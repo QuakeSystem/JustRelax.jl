@@ -17,30 +17,29 @@ end
 solve!(::CPUBackendTrait, stokes, args...; kwargs) = _solve!(stokes, args...; kwargs...)
 
 function _solve!(
-        stokes::JustRelax.StokesArrays,
-        pt_stokes,
-        di::NTuple{2, T},
-        flow_bcs::AbstractFlowBoundaryConditions,
-        ρg,
-        K,
-        dt,
-        igg::IGG;
-        iterMax = 10.0e3,
-        nout = 500,
-        b_width = (4, 4, 1),
-        verbose = true,
-        kwargs...,
-    ) where {T}
+    stokes::JustRelax.StokesArrays,
+    pt_stokes,
+    di::NTuple{2,T},
+    flow_bcs::AbstractFlowBoundaryConditions,
+    ρg,
+    K,
+    dt,
+    igg::IGG;
+    iterMax=10.0e3,
+    nout=500,
+    b_width=(4, 4, 1),
+    verbose=true,
+    kwargs...,
+) where {T}
 
     # unpack
     _di = _dx, _dy = inv.(di)
     (; ϵ_rel, ϵ_abs, r, θ_dτ, ηdτ) = pt_stokes
     ni = size(stokes.P)
-
     # ~preconditioner
     ητ = deepcopy(η)
     # @hide_communication b_width begin # communication/computation overlap
-    compute_maxloc!(ητ, stokes.viscosity.η; window = (1, 1))
+    compute_maxloc!(ητ, η; window=(1, 1))
     update_halo!(ητ)
     # end
 
@@ -122,7 +121,7 @@ function _solve!(
 
             if igg.me == 0 && ((verbose && (err / err_it1) > ϵ_rel && err > ϵ_abs) || iter == iterMax)
                 @printf(
-                    "Total steps = %d, abs_err = %1.3e , rel_err = %1.3e [norm_Rx=%1.3e, norm_Ry=%1.3e, norm_∇V=%1.3e] \n",
+                    "Viscedit: Total steps = %d, abs_err = %1.3e , rel_err = %1.3e [norm_Rx=%1.3e, norm_Ry=%1.3e, norm_∇V=%1.3e] \n",
                     iter,
                     err,
                     rel_err,
@@ -143,32 +142,32 @@ function _solve!(
     @parallel (@idx ni) multi_copy!(@tensor_center(stokes.τ_o), @tensor_center(stokes.τ))
 
     return (
-        iter = iter,
-        err_evo1 = err_evo1,
-        err_evo2 = err_evo2,
-        norm_Rx = norm_Rx,
-        norm_Ry = norm_Ry,
-        norm_∇V = norm_∇V,
+        iter=iter,
+        err_evo1=err_evo1,
+        err_evo2=err_evo2,
+        norm_Rx=norm_Rx,
+        norm_Ry=norm_Ry,
+        norm_∇V=norm_∇V,
     )
 end
 
 # visco-elastic solver
 function _solve!(
-        stokes::JustRelax.StokesArrays,
-        pt_stokes,
-        di::NTuple{2, T},
-        flow_bcs::AbstractFlowBoundaryConditions,
-        ρg,
-        G,
-        K,
-        dt,
-        igg::IGG;
-        iterMax = 10.0e3,
-        nout = 500,
-        b_width = (4, 4, 1),
-        verbose = true,
-        kwargs...,
-    ) where {T}
+    stokes::JustRelax.StokesArrays,
+    pt_stokes,
+    di::NTuple{2,T},
+    flow_bcs::AbstractFlowBoundaryConditions,
+    ρg,
+    G,
+    K,
+    dt,
+    igg::IGG;
+    iterMax=10.0e3,
+    nout=500,
+    b_width=(4, 4, 1),
+    verbose=true,
+    kwargs...,
+) where {T}
 
     # unpack
     _di = inv.(di)
@@ -179,7 +178,7 @@ function _solve!(
     # ~preconditioner
     ητ = deepcopy(η)
     # @hide_communication b_width begin # communication/computation overlap
-    compute_maxloc!(ητ, η; window = (1, 1))
+    compute_maxloc!(ητ, η; window=(1, 1))
     update_halo!(ητ)
     # end
 
@@ -243,11 +242,12 @@ function _solve!(
                 stokes.R.Rx, stokes.R.Ry, stokes.P, @stress(stokes)..., ρg..., _di...
             )
 
-            Acell = prod(di)
             errs = (
-                norm_mpi(@views stokes.R.Rx[2:(end - 1), 2:(end - 1)]) * √(Acell),
-                norm_mpi(@views stokes.R.Ry[2:(end - 1), 2:(end - 1)]) * √(Acell),
-                norm_mpi(stokes.R.RP) * √(Acell),
+                norm_mpi(@views stokes.R.Rx[2:(end-1), 2:(end-1)]) /
+                √((nx_g() - 2) * (ny_g() - 1)),
+                norm_mpi(@views stokes.R.Ry[2:(end-1), 2:(end-1)]) /
+                √((nx_g() - 1) * (ny_g() - 2)),
+                norm_mpi(stokes.R.RP) / √(nx_g() * ny_g()),
             )
 
             # errs = maximum_mpi.((abs.(stokes.R.Rx), abs.(stokes.R.Ry), abs.(stokes.R.RP)))
@@ -262,7 +262,7 @@ function _solve!(
 
             if igg.me == 0 && ((verbose && (err / err_it1) > ϵ_rel && err > ϵ_abs) || iter == iterMax)
                 @printf(
-                    "Total steps = %d, abs_err = %1.3e , rel_err = %1.3e [norm_Rx=%1.3e, norm_Ry=%1.3e, norm_∇V=%1.3e] \n",
+                    "bertedit2: Total steps = %d, abs_err = %1.3e , rel_err = %1.3e [norm_Rx=%1.3e, norm_Ry=%1.3e, norm_∇V=%1.3e] \n",
                     iter,
                     err,
                     rel_err,
@@ -282,36 +282,36 @@ function _solve!(
     @parallel (@idx ni) multi_copy!(@tensor_center(stokes.τ_o), @tensor_center(stokes.τ))
 
     return (
-        iter = iter,
-        err_evo1 = err_evo1,
-        err_evo2 = err_evo2,
-        norm_Rx = norm_Rx,
-        norm_Ry = norm_Ry,
-        norm_∇V = norm_∇V,
+        iter=iter,
+        err_evo1=err_evo1,
+        err_evo2=err_evo2,
+        norm_Rx=norm_Rx,
+        norm_Ry=norm_Ry,
+        norm_∇V=norm_∇V,
     )
 end
 
 # GeoParams: general (visco-elasto-plastic) solver
 
 function _solve!(
-        stokes::JustRelax.StokesArrays,
-        pt_stokes,
-        di::NTuple{2, T},
-        flow_bcs::AbstractFlowBoundaryConditions,
-        ρg,
-        rheology::MaterialParams,
-        args,
-        dt,
-        igg::IGG;
-        viscosity_cutoff = (-Inf, Inf),
-        viscosity_relaxation = 1.0e-2,
-        iterMax = 10.0e3,
-        nout = 500,
-        b_width = (4, 4, 0),
-        verbose = true,
-        free_surface = false,
-        kwargs...,
-    ) where {T}
+    stokes::JustRelax.StokesArrays,
+    pt_stokes,
+    di::NTuple{2,T},
+    flow_bcs::AbstractFlowBoundaryConditions,
+    ρg,
+    rheology::MaterialParams,
+    args,
+    dt,
+    igg::IGG;
+    viscosity_cutoff=(-Inf, Inf),
+    viscosity_relaxation=1.0e-2,
+    iterMax=10.0e3,
+    nout=500,
+    b_width=(4, 4, 0),
+    verbose=true,
+    free_surface=false,
+    kwargs...,
+) where {T}
 
     # unpack
     _di = inv.(di)
@@ -322,7 +322,7 @@ function _solve!(
     # ~preconditioner
     ητ = deepcopy(η)
     # @hide_communication b_width begin # communication/computation overlap
-    compute_maxloc!(ητ, η; window = (1, 1))
+    compute_maxloc!(ητ, η; window=(1, 1))
     update_halo!(ητ)
     # end
 
@@ -349,7 +349,7 @@ function _solve!(
     # ~preconditioner
     ητ = deepcopy(η)
     # @hide_communication b_width begin # communication/computation overlap
-    compute_maxloc!(ητ, η; window = (1, 1))
+    compute_maxloc!(ητ, η; window=(1, 1))
     update_halo!(ητ)
     # end
 
@@ -362,7 +362,7 @@ function _solve!(
 
     while iter < 2 || (((err / err_it1) > ϵ_rel && err > ϵ_abs) && iter ≤ iterMax)
         wtime0 += @elapsed begin
-            compute_maxloc!(ητ, η; window = (1, 1))
+            compute_maxloc!(ητ, η; window=(1, 1))
             update_halo!(ητ)
 
             @parallel (@idx ni) compute_∇V!(stokes.∇V, @velocity(stokes), _di)
@@ -377,10 +377,10 @@ function _solve!(
             )
 
             compute_viscosity_τII!(
-                stokes, args, rheology, viscosity_cutoff; relaxation = viscosity_relaxation
+                stokes, args, rheology, viscosity_cutoff; relaxation=viscosity_relaxation
             )
 
-            compute_maxloc!(ητ, η; window = (1, 1))
+            compute_maxloc!(ητ, η; window=(1, 1))
             update_halo!(ητ)
 
             @parallel (@idx ni) compute_τ_nonlinear!(
@@ -435,10 +435,10 @@ function _solve!(
             )
 
             errs = (
-                norm_mpi(@views stokes.R.Rx[2:(end - 1), 2:(end - 1)]) /
-                    √((nx_g() - 2) * (ny_g() - 1)),
-                norm_mpi(@views stokes.R.Ry[2:(end - 1), 2:(end - 1)]) /
-                    √((nx_g() - 1) * (ny_g() - 2)),
+                norm_mpi(@views stokes.R.Rx[2:(end-1), 2:(end-1)]) /
+                √((nx_g() - 2) * (ny_g() - 1)),
+                norm_mpi(@views stokes.R.Ry[2:(end-1), 2:(end-1)]) /
+                √((nx_g() - 1) * (ny_g() - 2)),
                 norm_mpi(stokes.R.RP) / √(nx_g() * ny_g()),
             )
 
@@ -453,7 +453,7 @@ function _solve!(
 
             if igg.me == 0 && ((verbose && (err / err_it1) > ϵ_rel && err > ϵ_abs) || iter == iterMax)
                 @printf(
-                    "Total steps = %d, abs_err = %1.3e , rel_err = %1.3e [norm_Rx=%1.3e, norm_Ry=%1.3e, norm_∇V=%1.3e] \n",
+                    "bertedit3: Total steps = %d, abs_err = %1.3e , rel_err = %1.3e [norm_Rx=%1.3e, norm_Ry=%1.3e, norm_∇V=%1.3e] \n",
                     iter,
                     err,
                     rel_err,
@@ -488,53 +488,71 @@ function _solve!(
     @parallel (@idx ni) multi_copy!(@tensor_center(stokes.τ_o), @tensor_center(stokes.τ))
 
     return (
-        iter = iter,
-        err_evo1 = err_evo1,
-        err_evo2 = err_evo2,
-        norm_Rx = norm_Rx,
-        norm_Ry = norm_Ry,
-        norm_∇V = norm_∇V,
+        iter=iter,
+        err_evo1=err_evo1,
+        err_evo2=err_evo2,
+        norm_Rx=norm_Rx,
+        norm_Ry=norm_Ry,
+        norm_∇V=norm_∇V,
     )
 end
 
 ## With phase ratios
 
 function _solve!(
-        stokes::JustRelax.StokesArrays,
-        pt_stokes,
-        di::NTuple{2, T},
-        flow_bcs::AbstractFlowBoundaryConditions,
-        ρg,
-        phase_ratios::JustPIC.PhaseRatios,
-        rheology,
-        args,
-        dt,
-        igg::IGG;
-        strain_increment = false,
-        viscosity_cutoff = (-Inf, Inf),
-        viscosity_relaxation = 1.0e-2,
-        λ_relaxation = 0.2,
-        iterMax = 50.0e3,
-        iterMin = 1.0e2,
-        free_surface = false,
-        nout = 500,
-        b_width = (4, 4, 0),
-        verbose = true,
-        kwargs...,
-    ) where {T}
+    stokes::JustRelax.StokesArrays,
+    pt_stokes,
+    di::NTuple{2,T},
+    flow_bcs::AbstractFlowBoundaryConditions,
+    ρg,
+    phase_ratios::JustPIC.PhaseRatios,
+    rheology,
+    args,
+    dt,
+    igg::IGG;
+    strain_increment=false,
+    viscosity_cutoff=(-Inf, Inf),
+    viscosity_relaxation=1.0e-2,
+    λ_relaxation=0.2,
+    iterMax=50.0e3,
+    iterMin=1.0e2,
+    free_surface=false,
+    nout=500,
+    b_width=(4, 4, 0),
+    verbose=true,
+    kwargs...,
+) where {T}
 
     # unpack
 
     _di = inv.(di)
     _dt = inv.(dt)
     (; ϵ_rel, ϵ_abs, r, θ_dτ, ηdτ) = pt_stokes
+    # xlim viscbox: [159,210 km], now [164, 218km] bert add 
+    # ylim viscbox: [-76.3, -19.2], now [-77.3, -21km]
+    # for i in 15:19
+    # for i in 15:19
+    for i in 10:30
+        # for i in 30:38 # double rsolution
+        # for j in 49:61
+        for j in 40:61
+            # for j in 98:122# doubl resolution
+            stokes.viscosity.η[i, j] = 1e24
+            stokes.viscosity.η_vep[i, j] = 1e24
+
+        end
+    end
+
     (; η, η_vep) = stokes.viscosity
     ni = size(stokes.P)
+
+
+    println("set viscosity")
 
     # ~preconditioner
     ητ = deepcopy(η)
     # @hide_communication b_width begin # communication/computation overlap
-    compute_maxloc!(ητ, η; window = (1, 1))
+    compute_maxloc!(ητ, η; window=(1, 1))
     update_halo!(ητ)
     # end
 
@@ -576,7 +594,7 @@ function _solve!(
         iterMin < iter && ((err / err_it1) < ϵ_rel || err < ϵ_abs) && break
 
         wtime0 += @elapsed begin
-            compute_maxloc!(ητ, η; window = (1, 1))
+            compute_maxloc!(ητ, η; window=(1, 1))
             update_halo!(ητ)
 
             @parallel (@idx ni) compute_∇V!(stokes.∇V, @velocity(stokes), _di)
@@ -622,7 +640,7 @@ function _solve!(
                 args,
                 rheology,
                 viscosity_cutoff;
-                relaxation = viscosity_relaxation,
+                relaxation=viscosity_relaxation,
             )
             # end
 
@@ -716,10 +734,10 @@ function _solve!(
             )
 
             errs = (
-                norm_mpi(@views stokes.R.Rx[2:(end - 1), 2:(end - 1)]) /
-                    √((nx_g() - 2) * (ny_g() - 1)),
-                norm_mpi(@views stokes.R.Ry[2:(end - 1), 2:(end - 1)]) /
-                    √((nx_g() - 1) * (ny_g() - 2)),
+                norm_mpi(@views stokes.R.Rx[2:(end-1), 2:(end-1)]) /
+                √((nx_g() - 2) * (ny_g() - 1)),
+                norm_mpi(@views stokes.R.Ry[2:(end-1), 2:(end-1)]) /
+                √((nx_g() - 1) * (ny_g() - 2)),
                 norm_mpi(stokes.R.RP) / √(nx_g() * ny_g()),
             )
 
@@ -734,7 +752,7 @@ function _solve!(
 
             if igg.me == 0 #&& ((verbose && err > ϵ_rel) || iter == iterMax)
                 @printf(
-                    "Total steps = %d, abs_err = %1.3e , rel_err = %1.3e [norm_Rx=%1.3e, norm_Ry=%1.3e, norm_∇V=%1.3e] \n",
+                    "bertedit4: Total steps = %d, abs_err = %1.3e , rel_err = %1.3e [norm_Rx=%1.3e, norm_Ry=%1.3e, norm_∇V=%1.3e] \n",
                     iter,
                     err,
                     rel_err,
@@ -768,11 +786,11 @@ function _solve!(
     @parallel (@idx ni) multi_copy!(@tensor_center(stokes.τ_o), @tensor_center(stokes.τ))
 
     return (
-        iter = iter,
-        err_evo1 = err_evo1,
-        err_evo2 = err_evo2,
-        norm_Rx = norm_Rx,
-        norm_Ry = norm_Ry,
-        norm_∇V = norm_∇V,
+        iter=iter,
+        err_evo1=err_evo1,
+        err_evo2=err_evo2,
+        norm_Rx=norm_Rx,
+        norm_Ry=norm_Ry,
+        norm_∇V=norm_∇V,
     )
 end

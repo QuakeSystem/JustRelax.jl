@@ -1,50 +1,53 @@
 abstract type AbstractBoundaryConditions end
 abstract type AbstractFlowBoundaryConditions <: AbstractBoundaryConditions end
-struct TemperatureBoundaryConditions{T, D, nD} <: AbstractBoundaryConditions
+struct TemperatureBoundaryConditions{T,D,nD} <: AbstractBoundaryConditions
     no_flux::T
     dirichlet::D
     function TemperatureBoundaryConditions(;
-            no_flux::T = (left = true, right = false, top = false, bot = false),
-            dirichlet = (; constant = nothing, mask = nothing),
-        ) where {T}
+        no_flux::T=(left=true, right=false, top=false, bot=false),
+        dirichlet=(; constant=nothing, mask=nothing),
+    ) where {T}
         D = Dirichlet(dirichlet)
         nD = length(no_flux) == 4 ? 2 : 3
-        return new{T, typeof(D), nD}(no_flux, D)
+        return new{T,typeof(D),nD}(no_flux, D)
     end
 end
 
-struct DisplacementBoundaryConditions{T, nD} <: AbstractFlowBoundaryConditions
+struct DisplacementBoundaryConditions{T,nD} <: AbstractFlowBoundaryConditions
     no_slip::T
     free_slip::T
     free_surface::Bool
 
     function DisplacementBoundaryConditions(;
-            no_slip::T = (left = false, right = false, top = false, bot = false),
-            free_slip::T = (left = true, right = true, top = true, bot = true),
-            free_surface::Bool = false,
-        ) where {T}
+        no_slip::T=(left=false, right=false, top=false, bot=false),
+        free_slip::T=(left=true, right=true, top=true, bot=true),
+        free_surface::Bool=false,
+    ) where {T}
         @assert length(no_slip) === length(free_slip)
         check_flow_bcs(no_slip, free_slip)
 
         nD = length(no_slip) == 4 ? 2 : 3
-        return new{T, nD}(no_slip, free_slip, free_surface)
+        return new{T,nD}(no_slip, free_slip, free_surface)
     end
 end
-struct VelocityBoundaryConditions{T, nD} <: AbstractFlowBoundaryConditions
+struct VelocityBoundaryConditions{T,nD,C} <: AbstractFlowBoundaryConditions
     no_slip::T
     free_slip::T
     free_surface::Bool
+    custom_slip::C
 
     function VelocityBoundaryConditions(;
-            no_slip::T = (left = false, right = false, top = false, bot = false),
-            free_slip::T = (left = true, right = true, top = true, bot = true),
-            free_surface::Bool = false,
-        ) where {T}
+        no_slip::T=(left=false, right=false, top=false, bot=false),
+        free_slip::T=(left=true, right=true, top=true, bot=true),
+        free_surface::Bool=false,
+        custom_slip::C=nothing,
+    ) where {T,C}
         @assert length(no_slip) === length(free_slip)
         check_flow_bcs(no_slip, free_slip)
+        _validate_custom_slip(custom_slip)
 
         nD = length(no_slip) == 4 ? 2 : 3
-        return new{T, nD}(no_slip, free_slip, free_surface)
+        return new{T,nD,C}(no_slip, free_slip, free_surface, custom_slip)
     end
 end
 
@@ -60,4 +63,10 @@ function check_flow_bcs(no_slip::T, free_slip::T) where {T}
         end
     end
     return
+end
+
+function _validate_custom_slip(cs)
+    cs === nothing && return
+    isa(cs, AbstractVector{<:Integer}) && return
+    error("custom_slip must be either nothing or a vector of integers")
 end
