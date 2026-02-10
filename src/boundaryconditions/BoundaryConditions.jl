@@ -64,6 +64,9 @@ function flow_bcs!(bcs, V::Vararg{T,N}) where {T,N}
 end
 
 function _flow_bcs!(bcs, V)
+    #= Edit by bert: custom slip boundary condition to force convergence.
+    Will be released by Dirichlet boundary conditions in future versions.
+    =#
     n = bc_index(V)
     # no slip boundary conditions
     # do_bc(bcs.no_slip) && (@parallel (@idx n) no_slip!(V..., bcs.no_slip))

@@ -121,7 +121,7 @@ function _solve!(
 
             if igg.me == 0 && ((verbose && (err / err_it1) > ϵ_rel && err > ϵ_abs) || iter == iterMax)
                 @printf(
-                    "Viscedit: Total steps = %d, abs_err = %1.3e , rel_err = %1.3e [norm_Rx=%1.3e, norm_Ry=%1.3e, norm_∇V=%1.3e] \n",
+                    "Total steps = %d, abs_err = %1.3e , rel_err = %1.3e [norm_Rx=%1.3e, norm_Ry=%1.3e, norm_∇V=%1.3e] \n",
                     iter,
                     err,
                     rel_err,
@@ -262,7 +262,7 @@ function _solve!(
 
             if igg.me == 0 && ((verbose && (err / err_it1) > ϵ_rel && err > ϵ_abs) || iter == iterMax)
                 @printf(
-                    "bertedit2: Total steps = %d, abs_err = %1.3e , rel_err = %1.3e [norm_Rx=%1.3e, norm_Ry=%1.3e, norm_∇V=%1.3e] \n",
+                    "Total steps = %d, abs_err = %1.3e , rel_err = %1.3e [norm_Rx=%1.3e, norm_Ry=%1.3e, norm_∇V=%1.3e] \n",
                     iter,
                     err,
                     rel_err,
@@ -453,7 +453,7 @@ function _solve!(
 
             if igg.me == 0 && ((verbose && (err / err_it1) > ϵ_rel && err > ϵ_abs) || iter == iterMax)
                 @printf(
-                    "bertedit3: Total steps = %d, abs_err = %1.3e , rel_err = %1.3e [norm_Rx=%1.3e, norm_Ry=%1.3e, norm_∇V=%1.3e] \n",
+                    "Total steps = %d, abs_err = %1.3e , rel_err = %1.3e [norm_Rx=%1.3e, norm_Ry=%1.3e, norm_∇V=%1.3e] \n",
                     iter,
                     err,
                     rel_err,
@@ -528,21 +528,6 @@ function _solve!(
     _di = inv.(di)
     _dt = inv.(dt)
     (; ϵ_rel, ϵ_abs, r, θ_dτ, ηdτ) = pt_stokes
-    # xlim viscbox: [159,210 km], now [164, 218km] bert add 
-    # ylim viscbox: [-76.3, -19.2], now [-77.3, -21km]
-    # for i in 15:19
-    # for i in 15:19
-    for i in 10:30
-        # for i in 30:38 # double rsolution
-        # for j in 49:61
-        for j in 40:61
-            # for j in 98:122# doubl resolution
-            stokes.viscosity.η[i, j] = 1e24
-            stokes.viscosity.η_vep[i, j] = 1e24
-
-        end
-    end
-
     (; η, η_vep) = stokes.viscosity
     ni = size(stokes.P)
 
@@ -752,7 +737,7 @@ function _solve!(
 
             if igg.me == 0 #&& ((verbose && err > ϵ_rel) || iter == iterMax)
                 @printf(
-                    "bertedit4: Total steps = %d, abs_err = %1.3e , rel_err = %1.3e [norm_Rx=%1.3e, norm_Ry=%1.3e, norm_∇V=%1.3e] \n",
+                    "Total steps = %d, abs_err = %1.3e , rel_err = %1.3e [norm_Rx=%1.3e, norm_Ry=%1.3e, norm_∇V=%1.3e] \n",
                     iter,
                     err,
                     rel_err,

@@ -104,6 +104,9 @@ end
 
 # @parallel_indices (i) function custom_slip!(Ax, Ay, bc_indices)#::Vector{Int})
 function custom_slip!(Ax, Ay, bc_indices)#::Vector{Int})
+    #= Edit by bert: custom slip boundary condition to force convergence.
+    Will be released by Dirichlet boundary conditions in future versions.
+    =#
     @inbounds begin
         for node in bc_indices
             Ax[node] = (7.5 * 1e-2) / (3600 * 24 * 365.25) # 7.5 cm/yr in m/s
