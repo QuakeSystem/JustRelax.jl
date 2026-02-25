@@ -1,5 +1,5 @@
-# const isCUDA = false
-const isCUDA = true
+const isCUDA = false
+# const isCUDA = true
 
 @static if isCUDA
     using CUDA
@@ -32,7 +32,7 @@ else
 end
 
 # Load script dependencies
-using GeoParams, CairoMakie, CellArrays, Statistics, Dates, JLD2
+using GeoParams, GLMakie, CellArrays, Statistics, Dates, JLD2
 
 # Load file with all the rheology configurations
 include("Caldera_setup.jl")
@@ -621,7 +621,7 @@ const plotting = true
 do_vtk = true # set to true to generate VTK files for ParaView
 
 figdir = "Caldera2D_$(today())"
-n = 256
+n = 64
 nx, ny = n, n >>> 1
 
 li, origin, phases_GMG, T_GMG = setup2D(

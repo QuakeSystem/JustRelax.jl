@@ -33,7 +33,7 @@ end
 
 # Load script dependencies
 using GeoParams
-using GLMakie
+using CairoMakie
 
 # Velocity helper grids for the particle advection
 function copyinn_x!(A, B)
@@ -88,7 +88,7 @@ end
 ## END OF HELPER FUNCTION ------------------------------------------------------------
 
 # (Path)/folder where output data and figures are stored
-n = 101
+n = 64
 nx = n
 ny = n
 igg = if !(JustRelax.MPI.Initialized()) # initialize (or not) MPI grid

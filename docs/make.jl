@@ -110,6 +110,7 @@ makedocs(;
                 "Rheology" => "man/plume3D/rheology.md",
                 "Setting up the model" => "man/plume3D/plume3D.md",
             ],
+            "Self-tuned APT solver" => "man/DYREL.md",
             "Checkpointing/Restart" => Any[
                 "Checkpointing" => "man/checkpointing.md",
                 "Restart" => "man/restart.md",
@@ -128,8 +129,10 @@ makedocs(;
     ],
 )
 
-deploydocs(
+DocumenterVitepress.deploydocs(;
     repo = "github.com/PTsolvers/JustRelax.jl",
-    devbranch = "main",
-    push_preview = true
+    target = joinpath(@__DIR__, "build"),
+    branch = "gh-pages",
+    devbranch = "main", # or master, trunk, ...
+    push_preview = true,
 )

@@ -49,19 +49,6 @@ end
     return nothing
 end
 
-Base.@propagate_inbounds @generated function unrolled_copy!(
-        dst::NTuple{N, T}, src::NTuple{N, T}, I::Vararg{Int, NI}
-    ) where {N, NI, T}
-    return quote
-        Base.@_inline_meta
-        Base.@nexprs $N n -> begin
-            if all(tuple(I...) .≤ size(dst[n]))
-                dst[n][I...] = src[n][I...]
-            end
-        end
-    end
-end
-
 """
     @add(I, args...)
 
@@ -340,6 +327,24 @@ end
 end
 
 """
+    tensor_vertex(A)
+
+Unpacks the symmetric tensor `A`, where its components are defined in the vertices of the grid cells.
+Shear components are unpack following Voigt's notation.
+"""
+macro tensor_vertex(A)
+    return quote
+        unpack_tensor_vertex(($(esc(A))))
+    end
+end
+
+@inline function unpack_tensor_vertex(
+        A::JustRelax.SymmetricTensor{<:AbstractArray{T, 2}}
+    ) where {T}
+    return A.xx_v, A.yy_v, A.xy
+end
+
+"""
     @residuals(A)
 
 Unpacks the momentum residuals from `A`.
@@ -361,19 +366,6 @@ end
 
 macro allocate(ni...)
     return esc(:(PTArray(undef, $(ni...))))
-end
-
-function indices(::NTuple{3, T}) where {T}
-    i = (blockIdx().x - 1) * blockDim().x + threadIdx().x
-    j = (blockIdx().y - 1) * blockDim().y + threadIdx().y
-    k = (blockIdx().z - 1) * blockDim().z + threadIdx().z
-    return i, j, k
-end
-
-function indices(::NTuple{2, T}) where {T}
-    i = (blockIdx().x - 1) * blockDim().x + threadIdx().x
-    j = (blockIdx().y - 1) * blockDim().y + threadIdx().y
-    return i, j
 end
 
 """
@@ -510,10 +502,17 @@ take(fldr::String) = !isdir(fldr) && mkpath(fldr)
 Do a continuation step `exp((1-ν)*log(x_old) + ν*log(x_new))` with damping parameter `ν`
 """
 @inline function continuation_log(x_new::T, x_old::T, ν) where {T}
-    x_cont = exp((1 - ν) * log(x_old) + ν * log(x_new))
-    return isnan(x_cont) ? 0.0 : x_cont
+    # a = iszero(x_old) ? zero(T) : log(x_old)
+    # b = iszero(x_new) ? zero(T) : log(x_new)
+    # x_cont = @fastmath exp((1 - ν) * a + ν * b)
+    # return isnan(x_cont) ? 0.0 : x_cont
+
+    x_cont = @fastmath exp((1 - ν) * log(x_old) + ν * log(x_new))
+    return isnan(x_cont) ? x_old : x_cont
 end
-@inline continuation_linear(x_new, x_old, ν) = muladd((1 - ν), x_old, ν * x_new) # (1 - ν) * x_old + ν * x_new
+
+@inline continuation_linear(x_new, x_old, ν) = (1 - ν) * x_old + ν * x_new
+# @inline continuation_linear(x_new, x_old, ν) = muladd((1 - ν), x_old, ν * x_new) # (1 - ν) * x_old + ν * x_new
 
 # Others
 
@@ -543,6 +542,10 @@ function norm_mpi(A)
     return sqrt(MPI.Allreduce(sum2_l, MPI.SUM, MPI.COMM_WORLD))
 end
 
+function sum_mpi(A)
+    return MPI.Allreduce(_sum(A), MPI.SUM, MPI.COMM_WORLD)
+end
+
 function minimum_mpi(A)
     min_l = _minimum(A)
     return MPI.Allreduce(min_l, MPI.MIN, MPI.COMM_WORLD)
@@ -557,7 +560,7 @@ for (f1, f2) in zip(
         (:_mean, :_norm, :_minimum, :_maximum, :_sum), (:mean, :norm, :minimum, :maximum, :sum)
     )
     @eval begin
-        $f1(A::AbstractArray) = $f2(Array(A))
+        # $f1(A::AbstractArray) = $f2(Array(A))
         $f1(A) = $f2(A)
     end
 end
