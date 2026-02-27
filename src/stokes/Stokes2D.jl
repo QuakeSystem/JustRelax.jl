@@ -682,13 +682,14 @@ function _solve!(
             )
 
             @hide_communication b_width begin # communication/computation overlap
-                @parallel compute_V!(
+                @parallel (@idx (ni)) compute_V!(
                     @velocity(stokes)...,
                     stokes.P,
                     @stress(stokes)...,
                     ηdτ,
                     ρg...,
                     ητ,
+                    flow_bcs.dirichlet,
                     _di...,
                     dt * free_surface,
                 )

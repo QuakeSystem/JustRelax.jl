@@ -30,21 +30,24 @@ struct DisplacementBoundaryConditions{T, nD} <: AbstractFlowBoundaryConditions
         return new{T, nD}(no_slip, free_slip, free_surface)
     end
 end
-struct VelocityBoundaryConditions{T, nD} <: AbstractFlowBoundaryConditions
+struct VelocityBoundaryConditions{T, D, nD} <: AbstractFlowBoundaryConditions
     no_slip::T
     free_slip::T
+    dirichlet::D
     free_surface::Bool
 
     function VelocityBoundaryConditions(;
-            no_slip::T = (left = false, right = false, top = false, bot = false),
-            free_slip::T = (left = true, right = true, top = true, bot = true),
-            free_surface::Bool = false,
+        no_slip::T = (left=false, right=false, top=false, bot=false),
+        free_slip::T = (left=true, right=true, top=true, bot=true),
+        free_surface::Bool = false,
+        dirichlet = (; constant=nothing, mask=nothing),
         ) where {T}
         @assert length(no_slip) === length(free_slip)
         check_flow_bcs(no_slip, free_slip)
 
+        D = Dirichlet(dirichlet)
         nD = length(no_slip) == 4 ? 2 : 3
-        return new{T, nD}(no_slip, free_slip, free_surface)
+        return new{T, typeof(D), nD}(no_slip, free_slip, D, free_surface)
     end
 end
 
