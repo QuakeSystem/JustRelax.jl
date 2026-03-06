@@ -100,6 +100,12 @@ end
     return nothing
 end
 
+# Velocity boxes are applied on the same staggered grid as the Stokes solver:
+# - Vx lives at (x face, z) with size (ni[1]+1, ni[2]+2); grid_vx = (xvi[1], yVx).
+# - Vy lives at (x, z face) with size (ni[1]+2, ni[2]+1); grid_vy = (xVy, xvi[2]).
+# There are no separate "cell-center" or "vertex" velocity arrays; Vx and Vy are the
+# only velocity DoFs, and apply_vel_boxes! correctly uses grid.grid_v so the box
+# region is applied to the right indices.
 function apply_vel_boxes!(
     stokes,
     grid::Geometry{2, T},
@@ -250,7 +256,7 @@ function main(li, origin, phases_GMG, igg; nx = 16, ny = 16, figdir = "figs2D", 
     τxx_v = @zeros(ni .+ 1...)
     τyy_v = @zeros(ni .+ 1...)
 
-    dyrel = DYREL(backend, stokes, rheology, phase_ratios, di, dt; ϵ = 1.0e-3)
+    dyrel = DYREL(backend, stokes, rheology, phase_ratios, di, dt; ϵ = 1.0e-2)
 
     # Time loop
     t, it = 0.0, 0
@@ -271,7 +277,8 @@ function main(li, origin, phases_GMG, igg; nx = 16, ny = 16, figdir = "figs2D", 
         apply_vel_boxes!(stokes, grid, vel_boxes_2D)
         update_halo!(@velocity(stokes)...)
 
-        # Stokes solver (re-applies velocity boxes every iteration via callback)
+        # Stokes solver: re-apply velocity boxes after every V update so the solver
+        # keeps the prescribed velocities in the box (otherwise each iteration overwrites them).
         args = (; T = thermal.Tc, P = stokes.P, dt = Inf)
         t_stokes = @elapsed begin
             out = solve_DYREL!(
@@ -285,15 +292,16 @@ function main(li, origin, phases_GMG, igg; nx = 16, ny = 16, figdir = "figs2D", 
                 di,
                 dt,
                 igg;
-                kwargs = (;
+                kwargs = (
                     verbose = false,
-                    iterMax = 50.0e3,
+                    iterMax = 50.0e2,
                     rel_drop = 1.0e-2,
                     nout = 400,
                     λ_relaxation = 1,
                     viscosity_relaxation = 1.0e-2,
                     viscosity_cutoff = (1.0e18, 1.0e23),
-                )
+                    apply_velocity_box = stokes -> apply_vel_boxes!(stokes, grid, vel_boxes_2D),
+                ),
             )
         end
         # Enforce velocity boxes again so the final velocity field (used for advection) matches the prescription
@@ -362,7 +370,7 @@ function main(li, origin, phases_GMG, igg; nx = 16, ny = 16, figdir = "figs2D", 
 
         @show it += 1
         t += dt
-
+println("Saved vtk at $vtk_dir")
         # Data I/O and plotting ---------------------
         if it == 1 || rem(it, 5) == 0
             checkpointing_jld2(checkpoint, stokes, thermal, t, dt; it = it)

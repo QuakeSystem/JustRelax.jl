@@ -279,7 +279,9 @@ function _solve_DYREL!(
             # PT updates
             @parallel (@idx ni .+ 1) update_DR_V!((stokes.V.Vx, stokes.V.Vy), (dVxdτ, dVydτ), (βVx, βVy), (dτVx, dτVy))
             flow_bcs!(stokes, flow_bcs)
+
             if apply_velocity_box !== nothing
+                # println("Applying velocity box")
                 apply_velocity_box(stokes)
             end
             update_halo!(@velocity(stokes)...)

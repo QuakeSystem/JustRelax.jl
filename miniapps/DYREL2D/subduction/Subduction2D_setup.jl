@@ -77,7 +77,7 @@ function GMG_subduction_2D(nx, ny)
         Phases,
         Temp,
         Grid2D;
-        xlim = (100, 3000 - 100),
+        xlim = (100,2000),
         zlim = (-model_depth, 0.0),
         Origin = nothing, StrikeAngle = 0, DipAngle = 0,
         phase = LithosphericPhases(Layers = [80], Phases = [1 0], Tlab = Tlab),
@@ -85,35 +85,35 @@ function GMG_subduction_2D(nx, ny)
     )
 
     # Add right oceanic plate crust
-    add_box!(
-        Phases,
-        Temp,
-        Grid2D;
-        xlim = (3000 - 1430, 3000 - 200),
-        zlim = (-model_depth, 0.0),
-        Origin = nothing, StrikeAngle = 0, DipAngle = 0,
-        phase = LithosphericPhases(Layers = [8 72], Phases = [2 1 0], Tlab = Tlab),
-        T = HalfspaceCoolingTemp(Tsurface = 20, Tmantle = Tbot, Age = 50, Adiabat = 0)
-    )
+    # add_box!(
+    #     Phases,
+    #     Temp,
+    #     Grid2D;
+    #     xlim = (3000 - 130, 3000 - 200),
+    #     zlim = (-model_depth, 0.0),
+    #     Origin = nothing, StrikeAngle = 0, DipAngle = 0,
+    #     phase = LithosphericPhases(Layers = [8 72], Phases = [2 1 0], Tlab = Tlab),
+    #     T = HalfspaceCoolingTemp(Tsurface = 20, Tmantle = Tbot, Age = 50, Adiabat = 0)
+    # )
 
     # Add slab
-    add_box!(
-        Phases,
-        Temp,
-        Grid2D;
-        xlim = (3000 - 1430, 3000 - 1430 - 250),
-        zlim = (-80, 0.0),
-        Origin = nothing, StrikeAngle = 0, DipAngle = -30,
-        phase = LithosphericPhases(Layers = [8 80], Phases = [2 1 0], Tlab = Tlab),
-        T = HalfspaceCoolingTemp(Tsurface = 20, Tmantle = Tbot, Age = 50, Adiabat = 0)
-    )
+    # add_box!(
+    #     Phases,
+    #     Temp,
+    #     Grid2D;
+    #     xlim = (3000 - 1430, 3000 - 1430 - 250),
+    #     zlim = (-80, 0.0),
+    #     Origin = nothing, StrikeAngle = 0, DipAngle = -30,
+    #     phase = LithosphericPhases(Layers = [8 80], Phases = [2 1 0], Tlab = Tlab),
+    #     T = HalfspaceCoolingTemp(Tsurface = 20, Tmantle = Tbot, Age = 50, Adiabat = 0)
+    # )
     add_vel_box!(
         cenx   = (3000 - 2430) * 1.0e3,  # m
         cenz   = -40.0 * 1.0e3,          # m
         widthx = 250.0 * 1.0e3,          # m
-        widthz = 40.0 * 1.0e3,           # m
-        vx     = 4.0e-9,                   # m/s (optional)
-        vy     = 0.0,                    # m/s (optional)
+        widthz = 140.0 * 1.0e3,           # m
+        vx     = 2.0e-9,                   # m/s (optional)
+       # vy     = 0.0,                    # m/s (optional)
     )
     surf = Grid2D.z.val .> 0.0
     Temp[surf] .= 20.0

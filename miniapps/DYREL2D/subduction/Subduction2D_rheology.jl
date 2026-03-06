@@ -19,8 +19,8 @@ function init_rheology_nonNewtonian_plastic()
     # diffusion laws
     diff_wet_olivine = SetDiffusionCreep(Diffusion.wet_olivine_Hirth_2003)
     # plasticity
-    ϕ_wet_olivine = asind(0.1)
-    C_wet_olivine = 1.0e6
+    ϕ_wet_olivine = asind(0.6)
+    C_wet_olivine = 1.0e7
     η_reg = 1.0e20
     el = ConstantElasticity(; G = 40.0e9, ν = 0.25)
     lithosphere_rheology = CompositeRheology(
@@ -62,7 +62,8 @@ function init_rheologies(lithosphere_rheology)
             Density = PT_Density(; ρ0 = 3.2e3, α = α, β = 0.0e0, T0 = 273 + 1474),
             HeatCapacity = ConstantHeatCapacity(; Cp = Cp),
             Conductivity = ConstantConductivity(; k = 2.5),
-            CompositeRheology = lithosphere_rheology,
+            # CompositeRheology = lithosphere_rheology,
+            CompositeRheology = CompositeRheology((LinearViscous(; η = 1.0e23),)),
         ),
         # Name              = "oceanic crust",
         SetMaterialParams(;
