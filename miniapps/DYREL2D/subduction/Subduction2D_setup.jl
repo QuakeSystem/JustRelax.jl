@@ -1,5 +1,46 @@
 using GeophysicalModelGenerator
 
+struct VelBox2D
+    cenx::Float64
+    cenz::Float64
+    widthx::Float64
+    widthz::Float64
+    vx::Float64
+    vy::Float64
+    has_vx::Bool
+    has_vy::Bool
+end
+
+const vel_boxes_2D = VelBox2D[]
+
+function add_vel_box!(
+    ; cenx,
+      cenz,
+      widthx,
+      widthz,
+      vx = nothing,
+      vy = nothing,
+)
+    vx_val = vx === nothing ? 0.0 : Float64(vx)
+    vy_val = vy === nothing ? 0.0 : Float64(vy)
+    has_vx = vx !== nothing
+    has_vy = vy !== nothing
+    push!(
+        vel_boxes_2D,
+        VelBox2D(
+            Float64(cenx),
+            Float64(cenz),
+            Float64(widthx),
+            Float64(widthz),
+            vx_val,
+            vy_val,
+            has_vx,
+            has_vy,
+        ),
+    )
+    return nothing
+end
+
 function GMG_subduction_2D(nx, ny)
     model_depth = 660
     # Our starting basis is the example above with ridge and overriding slab
@@ -66,7 +107,14 @@ function GMG_subduction_2D(nx, ny)
         phase = LithosphericPhases(Layers = [8 80], Phases = [2 1 0], Tlab = Tlab),
         T = HalfspaceCoolingTemp(Tsurface = 20, Tmantle = Tbot, Age = 50, Adiabat = 0)
     )
-
+    add_vel_box!(
+        cenx   = (3000 - 2430) * 1.0e3,  # m
+        cenz   = -40.0 * 1.0e3,          # m
+        widthx = 250.0 * 1.0e3,          # m
+        widthz = 40.0 * 1.0e3,           # m
+        vx     = 4.0e-9,                   # m/s (optional)
+        vy     = 0.0,                    # m/s (optional)
+    )
     surf = Grid2D.z.val .> 0.0
     Temp[surf] .= 20.0
     Phases[surf] .= 3

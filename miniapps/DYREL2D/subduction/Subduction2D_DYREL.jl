@@ -1,7 +1,7 @@
 # Load script dependencies
 using GeoParams, CairoMakie
 
-const isCUDA = true
+const isCUDA = false
 
 @static if isCUDA
     using CUDA
@@ -57,6 +57,82 @@ end
 # Initial pressure profile - not accurate
 @parallel function init_P!(P, ρg, z)
     @all(P) = abs(@all(ρg) * @all_k(z)) * <(@all_k(z), 0.0)
+    return nothing
+end
+
+@parallel_indices (i, j) function _apply_vel_box_Vx!(
+    Vx,
+    xvx,
+    yvx,
+    cenx,
+    cenz,
+    halfx,
+    halfz,
+    vx_val,
+)
+    if i ≤ size(Vx, 1) && j ≤ size(Vx, 2)
+        x = xvx[i]
+        z = yvx[j]
+        if abs(x - cenx) ≤ halfx && abs(z - cenz) ≤ halfz
+            @inbounds Vx[i, j] = vx_val
+        end
+    end
+    return nothing
+end
+
+@parallel_indices (i, j) function _apply_vel_box_Vy!(
+    Vy,
+    xvy,
+    yvy,
+    cenx,
+    cenz,
+    halfx,
+    halfz,
+    vy_val,
+)
+    if i ≤ size(Vy, 1) && j ≤ size(Vy, 2)
+        x = xvy[i]
+        z = yvy[j]
+        if abs(x - cenx) ≤ halfx && abs(z - cenz) ≤ halfz
+            @inbounds Vy[i, j] = vy_val
+        end
+    end
+    return nothing
+end
+
+function apply_vel_boxes!(
+    stokes,
+    grid::Geometry{2, T},
+    boxes::Vector{VelBox2D},
+) where {T}
+    isempty(boxes) && return nothing
+
+    Vx, Vy = @velocity(stokes)
+    grid_vx, grid_vy = grid.grid_v
+    xvx, yvx = grid_vx
+    xvy, yvy = grid_vy
+
+    for box in boxes
+        halfx = box.widthx / 2
+        halfz = box.widthz / 2
+
+        if box.has_vx
+            nx = length(xvx)
+            ny = length(yvx)
+            @parallel (@idx (nx, ny)) _apply_vel_box_Vx!(
+                Vx, xvx, yvx, box.cenx, box.cenz, halfx, halfz, box.vx
+            )
+        end
+
+        if box.has_vy
+            nx = length(xvy)
+            ny = length(yvy)
+            @parallel (@idx (nx, ny)) _apply_vel_box_Vy!(
+                Vy, xvy, yvy, box.cenx, box.cenz, halfx, halfz, box.vy
+            )
+        end
+    end
+
     return nothing
 end
 ## END OF HELPER FUNCTION ------------------------------------------------------------
@@ -178,7 +254,7 @@ function main(li, origin, phases_GMG, igg; nx = 16, ny = 16, figdir = "figs2D", 
 
     # Time loop
     t, it = 0.0, 0
-    while it < 1 #000 # run only for 5 Myrs
+    while it < 100 #000 # run only for 5 Myrs
 
         # interpolate fields from particle to grid vertices
         particle2grid!(T_buffer, pT, xvi, particles)
@@ -191,7 +267,11 @@ function main(li, origin, phases_GMG, igg; nx = 16, ny = 16, figdir = "figs2D", 
         # interpolate stress back to the grid
         stress2grid!(stokes, pτ, xvi, xci, particles)
 
-        # Stokes solver ----------------
+        # Prescribe velocity boxes before solve so solver finds a solution consistent with them
+        apply_vel_boxes!(stokes, grid, vel_boxes_2D)
+        update_halo!(@velocity(stokes)...)
+
+        # Stokes solver (re-applies velocity boxes every iteration via callback)
         args = (; T = thermal.Tc, P = stokes.P, dt = Inf)
         t_stokes = @elapsed begin
             out = solve_DYREL!(
@@ -216,6 +296,9 @@ function main(li, origin, phases_GMG, igg; nx = 16, ny = 16, figdir = "figs2D", 
                 )
             )
         end
+        # Enforce velocity boxes again so the final velocity field (used for advection) matches the prescription
+        apply_vel_boxes!(stokes, grid, vel_boxes_2D)
+        update_halo!(@velocity(stokes)...)
         # print some stuff
         println("Stokes solver time             ")
         println("   Total time:      $t_stokes s")
