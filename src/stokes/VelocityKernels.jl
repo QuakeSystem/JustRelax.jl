@@ -122,7 +122,7 @@ end
 
 # with free surface stabilization
 @parallel_indices (i, j) function compute_V!(
-        Vx::AbstractArray{T, 2}, Vy, P, τxx, τyy, τxy, ηdτ, ρgx, ρgy, ητ, _dx, _dy, dt
+        Vx::AbstractArray{T, 2}, Vy, P, τxx, τyy, τxy, ηdτ, ρgx, ρgy, ητ, dirichlet, _dx, _dy, dt
     ) where {T}
     Base.@propagate_inbounds @inline d_xi(A) = _d_xi(A, _dx, i, j)
     Base.@propagate_inbounds @inline d_yi(A) = _d_yi(A, _dy, i, j)
