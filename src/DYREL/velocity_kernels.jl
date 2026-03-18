@@ -192,7 +192,7 @@ end
 @parallel_indices (I...) function update_DR_V!(
         V::NTuple{N, AbstractArray{T, N}}, dVdτ::NTuple{N, AbstractArray{T, N}}, βV::NTuple{N, AbstractArray{T, N}}, dτV::NTuple{N, AbstractArray{T, N}}
     ) where {N, T}
-
+# TODO apply dirichlet
     ntuple(Val(N)) do i
         @inline
         if all(I .≤ size(dVdτ[i]))

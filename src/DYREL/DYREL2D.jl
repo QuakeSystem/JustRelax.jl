@@ -1,4 +1,7 @@
 ## 2D VISCO-ELASTIC STOKES SOLVER
+
+import JustRelax: apply_mask!
+using CairoMakie
 """
     solve_DYREL!(stokes::JustRelax.StokesArrays, args...; kwargs)
 
@@ -123,7 +126,7 @@ function _solve_DYREL!(
     P_num = similar(stokes.P)
 
     # Powell-Hestenes iterations
-    for itPH in 1:1000
+    for itPH in 1:10#00
         # update buoyancy forces
         update_ρg!(ρg, phase_ratios, rheology, args)
 
@@ -165,6 +168,11 @@ function _solve_DYREL!(
             _di...,
         )
 
+        if apply_velocity_box !== nothing
+            # apply_mask!(stokes.R.Rx, 0.0, stokes.mask_vbox_x)
+            # apply_mask!(stokes.R.Ry, 0.0, stokes.mask_vbox_y)
+        end
+
         # compute pressure residual
         compute_residual_P!(
             stokes.R.RP,
@@ -178,10 +186,24 @@ function _solve_DYREL!(
             dt,
             args,
         )
+        inv_mask_vx = inv(stokes.mask_vbox_x)        # 1 outside box, 0 inside
+        inv_mask_vy = inv(stokes.mask_vbox_y)
+        
+        Rx_free = stokes.R.Rx .* inv_mask_vx
+        Ry_free = stokes.R.Ry .* inv_mask_vy
+        
+        nVx_free = sum_mpi(inv_mask_vx)
+        nVy_free = sum_mpi(inv_mask_vy)
+        nP      = nx_g() * ny_g()                    # unchanged
+        
+        errVx = norm_mpi(Rx_free) / √(nVx_free)
+        errVy = norm_mpi(Ry_free) / √(nVy_free)
+        errPt = norm_mpi(stokes.R.RP) / √(nP)
+
         # Residual check
-        errVx = norm_mpi(stokes.R.Rx) / √((nx_g() - 2) * (ny_g() - 1))
-        errVy = norm_mpi(stokes.R.Ry) / √((nx_g() - 1) * (ny_g() - 2))
-        errPt = norm_mpi(stokes.R.RP) / √(nx_g() * ny_g())
+        # errVx = norm_mpi(stokes.R.Rx) / √((nx_g() - 2) * (ny_g() - 1))
+        # errVy = norm_mpi(stokes.R.Ry) / √((nx_g() - 1) * (ny_g() - 2))
+        # errPt = norm_mpi(stokes.R.RP) / √(nx_g() * ny_g())
         if isone(itPH)
             errVx0 = errVx + eps()
             errVy0 = errVy + eps()
@@ -273,13 +295,17 @@ function _solve_DYREL!(
                 _di...,
             )
 
+            if apply_velocity_box !== nothing
+                # apply_mask!(stokes.R.Rx, 0.0, stokes.mask_vbox_x)
+                # apply_mask!(stokes.R.Ry, 0.0, stokes.mask_vbox_y)
+            end
+
             # Damping-pong
             @parallel (@idx ni) update_V_damping!((dVxdτ, dVydτ), (stokes.R.Rx, stokes.R.Ry), (αVx, αVy))
 
             # PT updates
             @parallel (@idx ni .+ 1) update_DR_V!((stokes.V.Vx, stokes.V.Vy), (dVxdτ, dVydτ), (βVx, βVy), (dτVx, dτVy))
             flow_bcs!(stokes, flow_bcs)
-
             if apply_velocity_box !== nothing
                 # println("Applying velocity box")
                 apply_velocity_box(stokes)
