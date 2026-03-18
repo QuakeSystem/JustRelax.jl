@@ -139,6 +139,21 @@ end
     return nothing
 end
 
+@parallel_indices (i, j) function _trim_right_layer_mask!(
+    mask,
+)
+    if i ≤ size(mask, 1) && j ≤ size(mask, 2)
+        # keep a cell masked only if it and its right neighbor are masked
+        # => removes exactly one layer on the +x (right) boundary of the mask
+        if i < size(mask, 1)
+            @inbounds mask[i, j] = mask[i, j] * mask[i + 1, j]
+        else
+            @inbounds mask[i, j] = 0
+        end
+    end
+    return nothing
+end
+
 # Velocity boxes are applied on the same staggered grid as the Stokes solver:
 # - Vx lives at (x face, z) with size (ni[1]+1, ni[2]+2); grid_vx = (xvi[1], yVx).
 # - Vy lives at (x, z face) with size (ni[1]+2, ni[2]+1); grid_vy = (xVy, xvi[2]).
@@ -199,6 +214,9 @@ function apply_vel_boxes!(
             )
         end
     end
+
+    # Do not freeze the immediate +x neighbor layer: helps propagation at the right edge
+    @parallel (@idx size(stokes.mask_vbox_x.mask)) _trim_right_layer_mask!(stokes.mask_vbox_x.mask)
 
     return nothing
 end
@@ -321,7 +339,7 @@ function main(li, origin, phases_GMG, igg; nx = 16, ny = 16, figdir = "figs2D", 
 
     # Time loop
     t, it = 0.0, 0
-    while it < 1 #000 # run only for 5 Myrs
+    while it < 20 #000 # run only for 5 Myrs
 
         # interpolate fields from particle to grid vertices
         particle2grid!(T_buffer, pT, xvi, particles)
@@ -357,7 +375,7 @@ function main(li, origin, phases_GMG, igg; nx = 16, ny = 16, figdir = "figs2D", 
                 igg;
                 kwargs = (;
                     verbose = false,
-                    iterMax = 50.0e2,
+                    iterMax = 50.0e3,
                     rel_drop = 1.0e-2,
                     nout = 400,
                     λ_relaxation = 1,
