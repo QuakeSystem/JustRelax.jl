@@ -111,10 +111,15 @@ end
     halfz,
 )
     if i ≤ size(mask_vbox_x, 1) && j ≤ size(mask_vbox_x, 2)
-        x = xvx[i]
-        z = yvx[j]
-        if abs(x - cenx) ≤ halfx && abs(z - cenz) ≤ halfz
-            @inbounds mask_vbox_x[i, j] = 1
+        # mask indices (i,j) correspond to velocity DoFs at (i+1,j+1)
+        ii = i + 1
+        jj = j + 1
+        if ii ≤ length(xvx) && jj ≤ length(yvx)
+            x = xvx[ii]
+            z = yvx[jj]
+            if abs(x - cenx) ≤ halfx && abs(z - cenz) ≤ halfz
+                @inbounds mask_vbox_x[i, j] = 1
+            end
         end
     end
     return nothing
@@ -130,25 +135,15 @@ end
     halfz,
 )
     if i ≤ size(mask_vbox_y, 1) && j ≤ size(mask_vbox_y, 2)
-        x = xvy[i]
-        z = yvy[j]
-        if abs(x - cenx) ≤ halfx && abs(z - cenz) ≤ halfz
-            @inbounds mask_vbox_y[i, j] = 1
-        end
-    end
-    return nothing
-end
-
-@parallel_indices (i, j) function _trim_right_layer_mask!(
-    mask,
-)
-    if i ≤ size(mask, 1) && j ≤ size(mask, 2)
-        # keep a cell masked only if it and its right neighbor are masked
-        # => removes exactly one layer on the +x (right) boundary of the mask
-        if i < size(mask, 1)
-            @inbounds mask[i, j] = mask[i, j] * mask[i + 1, j]
-        else
-            @inbounds mask[i, j] = 0
+        # mask indices (i,j) correspond to velocity DoFs at (i+1,j+1)
+        ii = i + 1
+        jj = j + 1
+        if ii ≤ length(xvy) && jj ≤ length(yvy)
+            x = xvy[ii]
+            z = yvy[jj]
+            if abs(x - cenx) ≤ halfx && abs(z - cenz) ≤ halfz
+                @inbounds mask_vbox_y[i, j] = 1
+            end
         end
     end
     return nothing
@@ -214,9 +209,6 @@ function apply_vel_boxes!(
             )
         end
     end
-
-    # Do not freeze the immediate +x neighbor layer: helps propagation at the right edge
-    @parallel (@idx size(stokes.mask_vbox_x.mask)) _trim_right_layer_mask!(stokes.mask_vbox_x.mask)
 
     return nothing
 end

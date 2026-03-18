@@ -186,19 +186,6 @@ function _solve_DYREL!(
             dt,
             args,
         )
-        # inv_mask_vx = inv(stokes.mask_vbox_x)        # 1 outside box, 0 inside
-        # inv_mask_vy = inv(stokes.mask_vbox_y)
-        
-        # Rx_free = stokes.R.Rx .* inv_mask_vx
-        # Ry_free = stokes.R.Ry .* inv_mask_vy
-        
-        # nVx_free = sum_mpi(inv_mask_vx)
-        # nVy_free = sum_mpi(inv_mask_vy)
-        # nP      = nx_g() * ny_g()                    # unchanged
-        
-        # errVx = norm_mpi(Rx_free) / √(nVx_free)
-        # errVy = norm_mpi(Ry_free) / √(nVy_free)
-        # errPt = norm_mpi(stokes.R.RP) / √(nP)
 
         # Residual check
         errVx = norm_mpi(stokes.R.Rx) / √((nx_g() - 2) * (ny_g() - 1))
@@ -294,26 +281,14 @@ function _solve_DYREL!(
                 Dy,
                 _di...,
             )
-
-            if apply_velocity_box !== nothing
-                apply_mask!(stokes.R.Rx, 0.0, stokes.mask_vbox_x)
-                apply_mask!(stokes.R.Ry, 0.0, stokes.mask_vbox_y)
-            end
+            
+        if apply_velocity_box !== nothing
+            apply_mask!(stokes.R.Rx, 0.0, stokes.mask_vbox_x)
+            apply_mask!(stokes.R.Ry, 0.0, stokes.mask_vbox_y)
+        end
 
             # Damping-pong
             @parallel (@idx ni) update_V_damping!((dVxdτ, dVydτ), (stokes.R.Rx, stokes.R.Ry), (αVx, αVy))
-
-            # PT updates (freeze internal velocity-box DoFs)
-            if apply_velocity_box !== nothing
-                # apply_velocity_box(stokes) # ensure masks (and prescribed values) are up-to-date
-            end
-
-            # @parallel (@idx ni .+ 1) update_DR_V!(
-            #     (stokes.V.Vx, stokes.V.Vy),
-            #     (dVxdτ, dVydτ),
-            #     (βVx, βVy),
-            #     (dτVx, dτVy),
-            # )
 
             @parallel (@idx ni .+ 1) update_DR_V!(
                 (stokes.V.Vx, stokes.V.Vy),
@@ -323,10 +298,7 @@ function _solve_DYREL!(
                 (stokes.mask_vbox_x.mask, stokes.mask_vbox_y.mask),
             )
             flow_bcs!(stokes, flow_bcs)
-            if apply_velocity_box !== nothing
-                # println("Applying velocity box")
-                # apply_velocity_box(stokes)
-            end
+
             update_halo!(@velocity(stokes)...)
 
             # Residual check
