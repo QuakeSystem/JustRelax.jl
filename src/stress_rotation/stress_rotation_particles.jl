@@ -11,6 +11,35 @@ using StaticArrays
     return nothing
 end
 
+# Geometry-aware overload (2D): derive local spacing from node/center vectors.
+@parallel_indices (i, j) function compute_vorticity!(
+        ωxy,
+        Vx,
+        Vy,
+        x_nodes::AbstractVector,
+        x_centers::AbstractVector,
+        y_nodes::AbstractVector,
+        y_centers::AbstractVector,
+    )
+    # vorticity is node-centered in this 2D layout, so prefer SIZE_NODE where valid.
+    dx_inv = if 1 < i ≤ length(x_centers)
+        inv(size_node(x_centers, i))
+    else
+        inv(size_cell(x_nodes, clamp(i, 1, length(x_nodes) - 1)))
+    end
+    dy_inv = if 1 < j ≤ length(y_centers)
+        inv(size_node(y_centers, j))
+    else
+        inv(size_cell(y_nodes, clamp(j, 1, length(y_nodes) - 1)))
+    end
+
+    @inbounds ωxy[i, j] = 0.5 * (
+        (Vy[i + 1, j] - Vy[i, j]) * dx_inv -
+        (Vx[i, j + 1] - Vx[i, j]) * dy_inv
+    )
+    return nothing
+end
+
 @parallel_indices (I...) function compute_vorticity!(
         ωyz, ωxz, ωxy, Vx, Vy, Vz, _dx, _dy, _dz
     )

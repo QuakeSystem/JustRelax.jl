@@ -5,6 +5,30 @@
     return nothing
 end
 
+# Geometry-aware overload (LaMEM-style): derive local spacing from node vectors.
+# Keeps the original _di-based overload intact.
+@parallel_indices (i, j) function compute_∇V!(
+        ∇V::AbstractArray,
+        V::NTuple{2},
+        x_nodes::AbstractVector,
+        x_centers::AbstractVector,
+        y_nodes::AbstractVector,
+        y_centers::AbstractVector,
+    )
+    Vx, Vy = V
+
+    # cell-centered divergence uses cell widths in x/y
+    dx_inv = inv(size_cell(x_nodes, clamp(i, 1, length(x_nodes) - 1)))
+    dy_inv = inv(size_cell(y_nodes, clamp(j, 1, length(y_nodes) - 1)))
+
+    @inbounds if all((i, j) .≤ size(∇V))
+        ∇V[i, j] =
+            (Vx[i + 1, j + 1] - Vx[i, j + 1]) * dx_inv +
+            (Vy[i + 1, j + 1] - Vy[i + 1, j]) * dy_inv
+    end
+    return nothing
+end
+
 ## DEVIATORIC STRAIN RATE TENSOR
 
 @parallel_indices (i, j) function compute_strain_rate!(
@@ -29,6 +53,57 @@ end
             εxy[i, j] =
                 0.5 * (
                 _dy * (Vx[i, j + 1] - Vx[i, j]) + _dx * (Vy[i + 1, j] - Vy[i, j])
+            )
+        end
+    end
+
+    return nothing
+end
+
+# Geometry-aware overload (LaMEM-style): derive local spacings from node/center vectors.
+# Keeps the original scalar overload intact so existing call paths are unchanged.
+@parallel_indices (i, j) function compute_strain_rate!(
+        εxx::AbstractArray{T, 2},
+        εyy,
+        εxy,
+        ∇V,
+        Vx,
+        Vy,
+        x_nodes::AbstractVector,
+        x_centers::AbstractVector,
+        y_nodes::AbstractVector,
+        y_centers::AbstractVector,
+    ) where {T}
+
+    # εxx, εyy are cell-centered derivatives -> SIZE_CELL in each direction.
+    dx_inv = inv(size_cell(x_nodes, clamp(i, 1, length(x_nodes) - 1)))
+    dy_inv = inv(size_cell(y_nodes, clamp(j, 1, length(y_nodes) - 1)))
+
+    @inbounds begin
+        # normal components are all located @ cell centers
+        if all((i, j) .≤ size(εxx))
+            ∇Vij = ∇V[i, j] * inv(3)
+            εxx[i, j] = (Vx[i + 1, j + 1] - Vx[i, j + 1]) * dx_inv - ∇Vij
+            εyy[i, j] = (Vy[i + 1, j + 1] - Vy[i + 1, j]) * dy_inv - ∇Vij
+        end
+
+        # εxy lives on the xy-node stencil; prefer SIZE_NODE where valid and
+        # fall back to SIZE_CELL near boundaries.
+        if all((i, j) .≤ size(εxy))
+            dy_node_inv = if 1 < j ≤ length(y_centers)
+                inv(size_node(y_centers, j))
+            else
+                inv(size_cell(y_nodes, clamp(j, 1, length(y_nodes) - 1)))
+            end
+            dx_node_inv = if 1 < i ≤ length(x_centers)
+                inv(size_node(x_centers, i))
+            else
+                inv(size_cell(x_nodes, clamp(i, 1, length(x_nodes) - 1)))
+            end
+            εxy[i, j] =
+                0.5 * (
+                dy_node_inv * (Vx[i, j + 1] - Vx[i, j]) +
+                    dx_node_inv * (Vy[i + 1, j] - Vy[i, j])
             )
         end
     end

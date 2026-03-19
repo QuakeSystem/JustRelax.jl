@@ -30,6 +30,26 @@ Base.@propagate_inbounds @inline bot(
 Base.@propagate_inbounds @inline top(
     A::AbstractArray, i::I, j::I, k::I
 ) where {I <: Integer} = A[i, j, k + 1]
+
+## 1D geometric helpers (LaMEM-style SIZE_CELL / SIZE_NODE)
+#
+# These work on arbitrary 1D coordinate arrays (nodes or centers) and are
+# intended to be the single source of truth for geometric extents, both
+# for uniform and non-uniform grids.
+#
+# Usage pattern (per direction):
+# - x_nodes  :: AbstractVector  – vertex / node coordinates
+# - x_centers:: AbstractVector  – cell-center coordinates
+#
+# Cell width between nodes (centered quantity control volume), e.g. pressure:
+@inline size_cell(nodes::AbstractVector, i::Integer) =
+    @inbounds nodes[i + 1] - nodes[i]
+
+# Node control-volume width between neighboring cell centers (face-based DoFs),
+# e.g. velocity on faces in that direction:
+@inline size_node(centers::AbstractVector, i::Integer) =
+    @inbounds centers[i] - centers[i - 1]
+
 ## 2D mini kernels
 const T2 = AbstractArray{T, 2} where {T}
 
@@ -37,22 +57,58 @@ const T2 = AbstractArray{T, 2} where {T}
 Base.@propagate_inbounds @inline _d_xa(
     A::AbstractArray, _dx, I::Vararg{Integer, N}
 ) where {N} = (-center(A, I...) + right(A, I...)) * _dx
+
+# non-uniform x-spacing (1D array of inverse spacings)
+Base.@propagate_inbounds @inline _d_xa(
+    A::AbstractArray, _dx::AbstractVector, I::Vararg{Integer, N}
+) where {N} = (-center(A, I...) + right(A, I...)) * _dx[I[1]]
 Base.@propagate_inbounds @inline _d_ya(
     A::AbstractArray, _dy, I::Vararg{Integer, N}
 ) where {N} = (-center(A, I...) + front(A, I...)) * _dy
+
+# non-uniform y-spacing (1D array of inverse spacings)
+Base.@propagate_inbounds @inline _d_ya(
+    A::AbstractArray, _dy::AbstractVector, I::Vararg{Integer, N}
+) where {N} = (-center(A, I...) + front(A, I...)) * _dy[I[2]]
 Base.@propagate_inbounds @inline _d_za(
     A::AbstractArray, _dz, I::Vararg{Integer, N}
 ) where {N} = (-center(A, I...) + top(A, I...)) * _dz
+
+# non-uniform z-spacing (1D array of inverse spacings)
+Base.@propagate_inbounds @inline _d_za(
+    A::AbstractArray, _dz::AbstractVector, I::Vararg{Integer, N}
+) where {N} = (-center(A, I...) + top(A, I...)) * _dz[I[3]]
 Base.@propagate_inbounds @inline _d_xi(
     A::AbstractArray, _dx, I::Vararg{Integer, 2}
 ) = (-front(A, I...) + next(A, I...)) * _dx
+
+# non-uniform x-spacing (staggered xi operator)
+Base.@propagate_inbounds @inline _d_xi(
+    A::AbstractArray, _dx::AbstractVector, I::Vararg{Integer, 2}
+) = (-front(A, I...) + next(A, I...)) * _dx[I[1]]
 Base.@propagate_inbounds @inline _d_yi(
     A::AbstractArray, _dy, I::Vararg{Integer, 2}
 ) = (-right(A, I...) + next(A, I...)) * _dy
 
+# non-uniform y-spacing (staggered yi operator)
+Base.@propagate_inbounds @inline _d_yi(
+    A::AbstractArray, _dy::AbstractVector, I::Vararg{Integer, 2}
+) = (-right(A, I...) + next(A, I...)) * _dy[I[2]]
+
 Base.@propagate_inbounds @inline _d_xi(A, _dx, i::I, j::I, k::I) where {I <: Integer} = (-A[i, j + 1, k + 1] + next(A, i, j, k)) * _dx
 Base.@propagate_inbounds @inline _d_yi(A, _dy, i::I, j::I, k::I) where {I <: Integer} = (-A[i + 1, j, k + 1] + next(A, i, j, k)) * _dy
 Base.@propagate_inbounds @inline _d_zi(A, _dz, i::I, j::I, k::I) where {I <: Integer} = (-A[i + 1, j + 1, k] + next(A, i, j, k)) * _dz
+
+# non-uniform x/y/z spacing for 3D staggered xi/yi/zi operators
+Base.@propagate_inbounds @inline _d_xi(
+    A, _dx::AbstractVector, i::I, j::I, k::I
+) where {I <: Integer} = (-A[i, j + 1, k + 1] + next(A, i, j, k)) * _dx[i]
+Base.@propagate_inbounds @inline _d_yi(
+    A, _dy::AbstractVector, i::I, j::I, k::I
+) where {I <: Integer} = (-A[i + 1, j, k + 1] + next(A, i, j, k)) * _dy[j]
+Base.@propagate_inbounds @inline _d_zi(
+    A, _dz::AbstractVector, i::I, j::I, k::I
+) where {I <: Integer} = (-A[i + 1, j + 1, k] + next(A, i, j, k)) * _dz[k]
 
 Base.@propagate_inbounds @inline div(Ax, Ay, _dx, _dy, I::Vararg{Integer, 2}) =
     _d_xi(Ax, _dx, I...) + _d_yi(Ay, _dy, I...)

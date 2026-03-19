@@ -4,6 +4,19 @@ function Gershgorin_Stokes2D_SchurComplement!(Dx, Dy, λmaxVx, λmaxVy, η, ηv,
     return nothing
 end
 
+# Inverse-spacing vector overload (geometry-aware path).
+# Here `inv_di = (inv_dx_vec, inv_dy_vec)` already contains inverse spacings.
+function Gershgorin_Stokes2D_SchurComplement!(
+        Dx, Dy, λmaxVx, λmaxVy, η, ηv, γ_eff, phase_ratios, rheology,
+        inv_di::NTuple{2, <:AbstractVector}, dt
+    )
+    ni = size(η)
+    @parallel (@idx ni) _Gershgorin_Stokes2D_SchurComplement_inv!(
+        Dx, Dy, λmaxVx, λmaxVy, η, ηv, γ_eff, inv_di..., phase_ratios.vertex, phase_ratios.center, rheology, dt
+    )
+    return nothing
+end
+
 @parallel_indices (i, j) function _Gershgorin_Stokes2D_SchurComplement!(
         Dx, Dy, λmaxVx, λmaxVy, η, ηv, γ_eff, dx, dy,
         phase_vertex, phase_center, rheology, dt
@@ -116,6 +129,104 @@ end
     end
     # end
 
+    return nothing
+end
+
+@parallel_indices (i, j) function _Gershgorin_Stokes2D_SchurComplement_inv!(
+        Dx, Dy, λmaxVx, λmaxVy, η, ηv, γ_eff, inv_dx, inv_dy,
+        phase_vertex, phase_center, rheology, dt
+    )
+    # Hoist common parameters
+    _dx = inv_dx[clamp(i, 1, length(inv_dx))]
+    _dy = inv_dy[clamp(j, 1, length(inv_dy))]
+    _dx2 = _dx * _dx
+    _dy2 = _dy * _dy
+    _dxdy = _dx * _dy
+    c43 = 4 / 3
+    c23 = 2 / 3
+
+    phase = phase_vertex[i + 1, j + 1]
+    GN = fn_ratio(get_shear_modulus, rheology, phase)
+    phase = phase_vertex[i + 1, j]
+    GS = fn_ratio(get_shear_modulus, rheology, phase)
+    phase = phase_center[i, j]
+    GW = fn_ratio(get_shear_modulus, rheology, phase)
+
+    ηN = ηv[i + 1, j + 1]
+    ηS = ηv[i + 1, j]
+    ηW = η[i, j]
+    γW = γ_eff[i, j]
+
+    if i ≤ size(Dx, 1) && j ≤ size(Dx, 2)
+        phase = phase_center[i + 1, j]
+        GE = fn_ratio(get_shear_modulus, rheology, phase)
+        ηE = η[i + 1, j]
+        γE = γ_eff[i + 1, j]
+
+        ηN = 1 / (1 / ηN + 1 / (GN * dt))
+        ηS = 1 / (1 / ηS + 1 / (GS * dt))
+        ηW = 1 / (1 / ηW + 1 / (GW * dt))
+        ηE = 1 / (1 / ηE + 1 / (GE * dt))
+
+        ηN_dy = ηN * _dy
+        ηS_dy = ηS * _dy
+        ηE_dx = ηE * _dx
+        ηW_dx = ηW * _dx
+        γE_dx = γE * _dx
+        γW_dx = γW * _dx
+
+        Cxx = (ηN + ηS) * _dy2 +
+            (γE + c43 * ηE) * _dx2 +
+            (γW + c43 * ηW) * _dx2 +
+            (ηN_dy + ηS_dy) * _dy + (γE_dx + γW_dx + c43 * (ηE_dx + ηW_dx)) * _dx
+
+        Cxy = ((γE - c23 * ηE + ηN) + (γE - c23 * ηE + ηS)) * _dxdy +
+            ((γW + ηN - c23 * ηW) + (γW + ηS - c23 * ηW)) * _dxdy
+
+        Dx_ij = Dx[i, j] = (ηN_dy + ηS_dy) * _dy + (γE_dx + γW_dx + c43 * (ηE_dx + ηW_dx)) * _dx
+        λmaxVx[i, j] = inv(Dx_ij) * (Cxx + Cxy)
+    end
+
+    GS = GW
+    phase = phase_vertex[i, j + 1]
+    GW = fn_ratio(get_shear_modulus, rheology, phase)
+    GE = GN
+
+    ηS = η[i, j]
+    ηW = ηv[i, j + 1]
+    ηE = ηv[i + 1, j + 1]
+    γS = γW
+
+    if i ≤ size(Dy, 1) && j ≤ size(Dy, 2)
+        phase = phase_center[i, j + 1]
+        GN = fn_ratio(get_shear_modulus, rheology, phase)
+
+        ηN = η[i, j + 1]
+        γN = γ_eff[i, j + 1]
+
+        ηN = 1 / (1 / ηN + 1 / (GN * dt))
+        ηS = 1 / (1 / ηS + 1 / (GS * dt))
+        ηW = 1 / (1 / ηW + 1 / (GW * dt))
+        ηE = 1 / (1 / ηE + 1 / (GE * dt))
+
+        ηE_dx = ηE * _dx
+        ηW_dx = ηW * _dx
+        ηN_dy = ηN * _dy
+        ηS_dy = ηS * _dy
+        γN_dy = γN * _dy
+        γS_dy = γS * _dy
+
+        Cyy = (ηE + ηW) * _dx2 +
+            (γN + c43 * ηN) * _dy2 +
+            (γS + c43 * ηS) * _dy2 +
+            (γN_dy + γS_dy + c43 * (ηN_dy + ηS_dy)) * _dy + (ηE_dx + ηW_dx) * _dx
+
+        Cyx = ((γN + ηE - c23 * ηN) + (γN - c23 * ηN + ηW)) * _dxdy +
+            ((γS + ηE - c23 * ηS) + (γS - c23 * ηS + ηW)) * _dxdy
+
+        Dy_ij = Dy[i, j] = (γN_dy + γS_dy + c43 * (ηN_dy + ηS_dy)) * _dy + (ηE_dx + ηW_dx) * _dx
+        λmaxVy[i, j] = inv(Dy_ij) * (Cyx + Cyy)
+    end
     return nothing
 end
 

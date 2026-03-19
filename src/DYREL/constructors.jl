@@ -175,6 +175,35 @@ function DYREL!(dyrel::JustRelax.DYREL, stokes::JustRelax.StokesArrays, rheology
     return nothing
 end
 
+function DYREL!(
+        dyrel::JustRelax.DYREL,
+        stokes::JustRelax.StokesArrays,
+        rheology,
+        phase_ratios,
+        inv_di::NTuple{2, <:AbstractVector},
+        dt;
+        CFL = 0.99,
+        γfact = 20.0,
+    )
+    # compute bulk viscosity and penalty parameter
+    compute_bulk_viscosity_and_penalty!(dyrel, stokes, rheology, phase_ratios, γfact, dt)
+
+    # compute Gershgorin estimates using inverse-spacing vectors
+    Gershgorin_Stokes2D_SchurComplement!(
+        dyrel.Dx, dyrel.Dy, dyrel.λmaxVx, dyrel.λmaxVy,
+        stokes.viscosity.η, stokes.viscosity.ηv, dyrel.γ_eff,
+        phase_ratios, rheology, inv_di, dt,
+    )
+
+    # compute damping coefficients
+    update_dτV_α_β!(
+        dyrel.dτVx, dyrel.dτVy, dyrel.βVx, dyrel.βVy, dyrel.αVx, dyrel.αVy,
+        dyrel.cVx, dyrel.cVy, dyrel.λmaxVx, dyrel.λmaxVy, CFL,
+    )
+
+    return nothing
+end
+
 # variational version
 function DYREL!(dyrel::JustRelax.DYREL, stokes::JustRelax.StokesArrays, rheology, phase_ratios, ϕ, di, dt; CFL = 0.99, γfact = 20.0)
     # compute bulk viscosity and penalty parameter
@@ -185,6 +214,33 @@ function DYREL!(dyrel::JustRelax.DYREL, stokes::JustRelax.StokesArrays, rheology
 
     # compute damping coefficients
     update_dτV_α_β!(dyrel.dτVx, dyrel.dτVy, dyrel.βVx, dyrel.βVy, dyrel.αVx, dyrel.αVy, dyrel.cVx, dyrel.cVy, dyrel.λmaxVx, dyrel.λmaxVy, CFL)
+
+    return nothing
+end
+
+function DYREL!(
+        dyrel::JustRelax.DYREL,
+        stokes::JustRelax.StokesArrays,
+        rheology,
+        phase_ratios,
+        ϕ,
+        inv_di::NTuple{2, <:AbstractVector},
+        dt;
+        CFL = 0.99,
+        γfact = 20.0,
+    )
+    compute_bulk_viscosity_and_penalty!(dyrel, stokes, rheology, phase_ratios, ϕ, γfact, dt)
+
+    Gershgorin_Stokes2D_SchurComplement!(
+        dyrel.Dx, dyrel.Dy, dyrel.λmaxVx, dyrel.λmaxVy,
+        stokes.viscosity.η, stokes.viscosity.ηv, dyrel.γ_eff,
+        phase_ratios, rheology, inv_di, dt,
+    )
+
+    update_dτV_α_β!(
+        dyrel.dτVx, dyrel.dτVy, dyrel.βVx, dyrel.βVy, dyrel.αVx, dyrel.αVy,
+        dyrel.cVx, dyrel.cVy, dyrel.λmaxVx, dyrel.λmaxVy, CFL,
+    )
 
     return nothing
 end

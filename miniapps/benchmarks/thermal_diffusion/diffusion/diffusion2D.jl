@@ -38,10 +38,10 @@ end
 function diffusion_2D(; nx = 32, ny = 32, lx = 100.0e3, ly = 100.0e3, ρ0 = 3.3e3, Cp0 = 1.2e3, K0 = 3.0)
     kyr = 1.0e3 * 3600 * 24 * 365.25
     Myr = 1.0e3 * kyr
-    ttot = 1 * Myr # total simulation time
-    dt = 50 * kyr # physical time step
+    ttot = 10 * Myr # total simulation time
+    dt = 500 * kyr # physical time step
     init_mpi = JustRelax.MPI.Initialized() ? false : true
-    igg = IGG(init_global_grid(nx, ny, 1; init_MPI = init_mpi)...)
+    # igg = IGG(init_global_grid(nx, ny, 1; init_MPI = init_mpi)...)
 
     # Physical domain
     ni = (nx, ny)
@@ -77,6 +77,9 @@ function diffusion_2D(; nx = 32, ny = 32, lx = 100.0e3, ly = 100.0e3, ρ0 = 3.3e
     )
     @parallel (@idx size(thermal.T)) init_T!(thermal.T, xvi[2])
 
+
+    thermal.T[:,15:20] .= 15000.0 # add a thermal anomaly to test the diffusion
+    init_T=thermal.T
     # Add thermal perturbation
     δT = 100.0e0 # thermal perturbation
     r = 10.0e3 # thermal perturbation radius
@@ -88,6 +91,7 @@ function diffusion_2D(; nx = 32, ny = 32, lx = 100.0e3, ly = 100.0e3, ρ0 = 3.3e
     t = 0.0
     it = 0
     nt = Int(ceil(ttot / dt))
+
 
     while it < nt
         heatdiffusion_PT!(
@@ -107,7 +111,15 @@ function diffusion_2D(; nx = 32, ny = 32, lx = 100.0e3, ly = 100.0e3, ρ0 = 3.3e
         it += 1
     end
 
-    return thermal
+    return thermal,init_T
 end
 
-diffusion_2D()
+therm,init_T=diffusion_2D()
+using Plots
+# put two heatmaps side by side
+plot(
+    heatmap(init_T[:, :], aspect_ratio = 1, title = "Initial Temperature"),
+    heatmap(therm.T[:, :], aspect_ratio = 1, title = "Final Temperature"),
+    layout = (1, 2),
+    size = (800, 400),
+)

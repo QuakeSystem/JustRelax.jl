@@ -21,6 +21,46 @@
     return nothing
 end
 
+# Geometry-aware overload (2D): derive local spacings from node/center vectors.
+@parallel_indices (i, j) function compute_PH_residual_V!(
+        Rx::AbstractArray{T, 2},
+        Ry,
+        P,
+        ΔPψ,
+        τxx,
+        τyy,
+        τxy,
+        ρgx,
+        ρgy,
+        x_nodes::AbstractVector,
+        x_centers::AbstractVector,
+        y_nodes::AbstractVector,
+        y_centers::AbstractVector,
+    ) where {T}
+    dx_inv = inv(size_cell(x_nodes, clamp(i, 1, length(x_nodes) - 1)))
+    dy_inv = inv(size_cell(y_nodes, clamp(j, 1, length(y_nodes) - 1)))
+    av_xa(A) = _av_xa(A, i, j)
+    av_ya(A) = _av_ya(A, i, j)
+
+    @inbounds begin
+        if i ≤ size(Rx, 1) && j ≤ size(Rx, 2)
+            d_xa_τxx = (τxx[i + 1, j] - τxx[i, j]) * dx_inv
+            d_yi_τxy = (τxy[i + 1, j + 1] - τxy[i + 1, j]) * dy_inv
+            d_xa_P = (P[i + 1, j] - P[i, j]) * dx_inv
+            d_xa_ΔPψ = (ΔPψ[i + 1, j] - ΔPψ[i, j]) * dx_inv
+            Rx[i, j] = d_xa_τxx + d_yi_τxy - d_xa_P - d_xa_ΔPψ - av_xa(ρgx)
+        end
+        if i ≤ size(Ry, 1) && j ≤ size(Ry, 2)
+            d_ya_τyy = (τyy[i, j + 1] - τyy[i, j]) * dy_inv
+            d_xi_τxy = (τxy[i + 1, j + 1] - τxy[i, j + 1]) * dx_inv
+            d_ya_P = (P[i, j + 1] - P[i, j]) * dy_inv
+            d_ya_ΔPψ = (ΔPψ[i, j + 1] - ΔPψ[i, j]) * dy_inv
+            Ry[i, j] = d_ya_τyy + d_xi_τxy - d_ya_P - d_ya_ΔPψ - av_ya(ρgy)
+        end
+    end
+    return nothing
+end
+
 @parallel_indices (i, j) function compute_PH_residual_V!(
         Rx::AbstractArray{T, 2}, Ry, Vx, Vy, P, ΔPψ, τxx, τyy, τxy, ρgx, ρgy, _dx, _dy, dt
     ) where {T}
@@ -75,6 +115,51 @@ end
     end
     # end
 
+    return nothing
+end
+
+# Geometry-aware overload (2D): derive local spacings from node/center vectors.
+@parallel_indices (i, j) function compute_DR_residual_V!(
+        Rx::AbstractArray{T, 2},
+        Ry,
+        P,
+        P_num,
+        ΔPψ,
+        τxx,
+        τyy,
+        τxy,
+        ρgx,
+        ρgy,
+        Dx,
+        Dy,
+        x_nodes::AbstractVector,
+        x_centers::AbstractVector,
+        y_nodes::AbstractVector,
+        y_centers::AbstractVector,
+    ) where {T}
+    dx_inv = inv(size_cell(x_nodes, clamp(i, 1, length(x_nodes) - 1)))
+    dy_inv = inv(size_cell(y_nodes, clamp(j, 1, length(y_nodes) - 1)))
+    av_xa(A) = _av_xa(A, i, j)
+    av_ya(A) = _av_ya(A, i, j)
+
+    @inbounds begin
+        if i ≤ size(Rx, 1) && j ≤ size(Rx, 2)
+            d_xa_τxx = (τxx[i + 1, j] - τxx[i, j]) * dx_inv
+            d_yi_τxy = (τxy[i + 1, j + 1] - τxy[i + 1, j]) * dy_inv
+            d_xa_P = (P[i + 1, j] - P[i, j]) * dx_inv
+            d_xa_Pn = (P_num[i + 1, j] - P_num[i, j]) * dx_inv
+            d_xa_ΔPψ = (ΔPψ[i + 1, j] - ΔPψ[i, j]) * dx_inv
+            Rx[i, j] = (d_xa_τxx + d_yi_τxy - d_xa_P - d_xa_Pn - d_xa_ΔPψ - av_xa(ρgx)) / Dx[i, j]
+        end
+        if i ≤ size(Ry, 1) && j ≤ size(Ry, 2)
+            d_ya_τyy = (τyy[i, j + 1] - τyy[i, j]) * dy_inv
+            d_xi_τxy = (τxy[i + 1, j + 1] - τxy[i, j + 1]) * dx_inv
+            d_ya_P = (P[i, j + 1] - P[i, j]) * dy_inv
+            d_ya_Pn = (P_num[i, j + 1] - P_num[i, j]) * dy_inv
+            d_ya_ΔPψ = (ΔPψ[i, j + 1] - ΔPψ[i, j]) * dy_inv
+            Ry[i, j] = (d_ya_τyy + d_xi_τxy - d_ya_P - d_ya_Pn - d_ya_ΔPψ - av_ya(ρgy)) / Dy[i, j]
+        end
+    end
     return nothing
 end
 

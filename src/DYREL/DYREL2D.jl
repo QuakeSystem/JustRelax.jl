@@ -62,6 +62,7 @@ function _solve_DYREL!(
         verbose_DR = true,
         linear_viscosity = false,
         apply_velocity_box = nothing,  # optional f(stokes) to enforce internal velocity boxes after each V update
+        grid = nothing,                # optional grid settings (ref_grid + coordinate vectors)
         kwargs...,
     ) where {T}
 
@@ -88,9 +89,36 @@ function _solve_DYREL!(
         ηb,
     ) = dyrel
 
+ 
     _di = inv.(di)
     ni = size(stokes.P)
+    nx_loc, ny_loc = ni
+    dx, dy = di
 
+    # Grid settings container:
+    # grid = (; ref_grid=0|1, x_nodes=..., x_centers=..., y_nodes=..., y_centers=...)
+    # If ref_grid==1 but vectors are missing, fall back to uniform vectors.
+    ref_grid = 0
+    x_nodes = nothing
+    x_centers = nothing
+    y_nodes = nothing
+    y_centers = nothing
+
+    if !isnothing(grid)
+        hasproperty(grid, :ref_grid) && (ref_grid = getproperty(grid, :ref_grid))
+        hasproperty(grid, :x_nodes) && (x_nodes = getproperty(grid, :x_nodes))
+        hasproperty(grid, :x_centers) && (x_centers = getproperty(grid, :x_centers))
+        hasproperty(grid, :y_nodes) && (y_nodes = getproperty(grid, :y_nodes))
+        hasproperty(grid, :y_centers) && (y_centers = getproperty(grid, :y_centers))
+    end
+
+    if ref_grid == 1
+        @assert !isnothing(x_nodes) && !isnothing(y_nodes) &&
+            !isnothing(x_centers) && !isnothing(y_centers) """
+            ref_grid=1 requires external coordinate vectors in `grid`:
+            grid = (; ref_grid=1, x_nodes=..., x_centers=..., y_nodes=..., y_centers=...)
+            """
+    end
     # errors
     err = 1.0
     iter = 0
@@ -130,13 +158,40 @@ function _solve_DYREL!(
         # update buoyancy forces
         update_ρg!(ρg, phase_ratios, rheology, args)
 
-        # compute divergence
-        @parallel (@idx ni) compute_∇V!(stokes.∇V, @velocity(stokes), _di)
+        if ref_grid == 0
+            # compute divergence
+            @parallel (@idx ni) compute_∇V!(stokes.∇V, @velocity(stokes), _di)
+        else
+        # compute divergence (geometry-aware test path)
+        @parallel (@idx ni) compute_∇V!(
+            stokes.∇V,
+            @velocity(stokes),
+            x_nodes,
+            x_centers,
+            y_nodes,
+            y_centers,
+        )
+        end
 
-        # compute deviatoric strain rate
+        if ref_grid == 0
+        # # compute deviatoric strain rate (original scalar-based version)
         @parallel (@idx ni .+ 1) compute_strain_rate!(
             @strain(stokes)..., stokes.∇V, @velocity(stokes)..., _di...
         )
+        else
+
+
+        # Geometry-aware test path: derive local spacings via size_cell/size_node.
+        @parallel (@idx ni .+ 1) compute_strain_rate!(
+            @strain(stokes)...,
+            stokes.∇V,
+            @velocity(stokes)...,
+            x_nodes,
+            x_centers,
+            y_nodes,
+            y_centers,
+        )
+        end
         vertex2center!(stokes.ε.xy_c, stokes.ε.xy)
 
         # compute deviatoric stress
@@ -157,6 +212,7 @@ function _solve_DYREL!(
             )
         end
 
+        if ref_grid == 0
         # compute velocity residuals
         @parallel (@idx ni) compute_PH_residual_V!(
             stokes.R.Rx,
@@ -167,6 +223,20 @@ function _solve_DYREL!(
             ρg...,
             _di...,
         )
+        else
+        @parallel (@idx ni) compute_PH_residual_V!(
+            stokes.R.Rx,
+            stokes.R.Ry,
+            stokes.P,
+            stokes.ΔPψ,
+            @stress(stokes)...,
+            ρg...,
+            x_nodes,
+            x_centers,
+            y_nodes,
+            y_centers,
+        )
+        end
 
         if apply_velocity_box !== nothing
             apply_mask!(stokes.R.Rx, 0.0, stokes.mask_vbox_x)
@@ -227,9 +297,20 @@ function _solve_DYREL!(
             # Pseudo-old dudes
             copyto!(Rx0, stokes.R.Rx)
             copyto!(Ry0, stokes.R.Ry)
-
-            # Divergence
-            @parallel (@idx ni) compute_∇V!(stokes.∇V, @velocity(stokes), _di)
+            if ref_grid == 0
+                # Divergence
+                @parallel (@idx ni) compute_∇V!(stokes.∇V, @velocity(stokes), _di)
+            else
+                # Divergence (geometry-aware test path)
+                @parallel (@idx ni) compute_∇V!(
+                    stokes.∇V,
+                    @velocity(stokes),
+                    x_nodes,
+                    x_centers,
+                    y_nodes,
+                    y_centers,
+            )
+            end
             compute_residual_P!(
                 stokes.R.RP,
                 stokes.P,
@@ -243,10 +324,23 @@ function _solve_DYREL!(
                 args,
             )
 
+            if ref_grid == 0
             # Deviatoric strain rate
             @parallel (@idx ni .+ 1) compute_strain_rate!(
                 @strain(stokes)..., stokes.∇V, @velocity(stokes)..., _di...
             )
+            else
+                # Geometry-aware test path: derive local spacings via size_cell/size_node.
+                @parallel (@idx ni .+ 1) compute_strain_rate!(
+                    @strain(stokes)...,
+                    stokes.∇V,
+                    @velocity(stokes)...,
+                    x_nodes,
+                    x_centers,
+                    y_nodes,
+                    y_centers,
+            )
+            end
             vertex2center!(stokes.ε.xy_c, stokes.ε.xy)
 
             # Deviatoric stress
@@ -269,6 +363,20 @@ function _solve_DYREL!(
 
             # Residuals
             @. P_num = γ_eff * stokes.R.RP
+            if ref_grid == 0
+                @parallel (@idx ni) compute_DR_residual_V!(
+                    stokes.R.Rx,
+                    stokes.R.Ry,
+                    stokes.P,
+                    P_num,
+                    stokes.ΔPψ,
+                    @stress(stokes)...,
+                    ρg...,
+                    Dx,
+                    Dy,
+                    _di...,
+                )
+            else
             @parallel (@idx ni) compute_DR_residual_V!(
                 stokes.R.Rx,
                 stokes.R.Ry,
@@ -279,8 +387,12 @@ function _solve_DYREL!(
                 ρg...,
                 Dx,
                 Dy,
-                _di...,
+                x_nodes,
+                x_centers,
+                y_nodes,
+                y_centers,
             )
+            end
             
         if apply_velocity_box !== nothing
             apply_mask!(stokes.R.Rx, 0.0, stokes.mask_vbox_x)
@@ -334,7 +446,26 @@ function _solve_DYREL!(
                 @. cVy = 2 * √(λminV) * c_fact
 
                 # Optimal pseudo-time steps - can be replaced by AD
-                Gershgorin_Stokes2D_SchurComplement!(Dx, Dy, λmaxVx, λmaxVy, stokes.viscosity.η, stokes.viscosity.ηv, γ_eff, phase_ratios, rheology, di, dt)
+                if ref_grid == 0
+                    Gershgorin_Stokes2D_SchurComplement!(
+                        Dx, Dy, λmaxVx, λmaxVy,
+                        stokes.viscosity.η, stokes.viscosity.ηv, γ_eff,
+                        phase_ratios, rheology, di, dt,
+                    )
+                else
+                    # Build geometry-consistent inverse spacings from node vectors.
+                    # `size_cell(nodes, i)` uses `nodes[i+1]-nodes[i]`, so the matching
+                    # inverse-spacing vector is simply `inv.(diff(nodes))`.
+                    inv_di_nodes = (
+                        inv.(diff(x_nodes)),
+                        inv.(diff(y_nodes)),
+                    )
+                    Gershgorin_Stokes2D_SchurComplement!(
+                        Dx, Dy, λmaxVx, λmaxVy,
+                        stokes.viscosity.η, stokes.viscosity.ηv, γ_eff,
+                        phase_ratios, rheology, inv_di_nodes, dt,
+                    )
+                end
 
                 # Select dτ
                 update_dτV_α_β!(dyrel)
@@ -348,9 +479,20 @@ function _solve_DYREL!(
     end
 
     # compute vorticity
-    @parallel (@idx ni .+ 1) compute_vorticity!(
-        stokes.ω.xy, @velocity(stokes)..., inv.(di)...
-    )
+    if ref_grid == 0
+        @parallel (@idx ni .+ 1) compute_vorticity!(
+            stokes.ω.xy, @velocity(stokes)..., inv.(di)...
+        )
+    else
+        @parallel (@idx ni .+ 1) compute_vorticity!(
+            stokes.ω.xy,
+            @velocity(stokes)...,
+            x_nodes,
+            x_centers,
+            y_nodes,
+            y_centers,
+        )
+    end
 
     # Interpolate shear components to cell center arrays
     shear2center!(stokes.ε)
@@ -366,7 +508,15 @@ function _solve_DYREL!(
     stokes.τ_o.yy_v .= stokes.τ.yy_v
 
     # recompute all the DYREL variables
-    DYREL!(dyrel, stokes, rheology, phase_ratios, di, dt)
+    if ref_grid == 0
+        DYREL!(dyrel, stokes, rheology, phase_ratios, di, dt)
+    else
+        inv_di_nodes = (
+            inv.(diff(x_nodes)),
+            inv.(diff(y_nodes)),
+        )
+        DYREL!(dyrel, stokes, rheology, phase_ratios, inv_di_nodes, dt)
+    end
 
     return (; err_evo_it, err_evo_V, err_evo_P)
 

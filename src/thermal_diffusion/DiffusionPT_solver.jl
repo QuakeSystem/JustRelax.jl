@@ -3,6 +3,8 @@ function heatdiffusion_PT!(thermal, args...; kwargs)
 end
 
 function heatdiffusion_PT!(::CPUBackendTrait, thermal, args...; kwargs)
+    # `kwargs` is expected to be a NamedTuple of keyword arguments.
+    # Forward it as actual keywords so specialized options like `dx`/`dy` reach kernels.
     return _heatdiffusion_PT!(thermal, args...; kwargs...)
 end
 
@@ -20,6 +22,8 @@ function _heatdiffusion_PT!(
         dt,
         di;
         igg = nothing,
+        dx = nothing,
+        dy = nothing,
         b_width = (4, 4, 1),
         iterMax = 50.0e3,
         nout = 1.0e3,
@@ -28,7 +32,12 @@ function _heatdiffusion_PT!(
     )
     # Compute some constant stuff
     _dt = inv(dt)
-    _di = inv.(di)
+    _di = if dx !== nothing || dy !== nothing
+        @assert !(dx === nothing) && !(dy === nothing) "Provide both `dx` and `dy` arrays (or neither)."
+        (inv.(dx), inv.(dy))
+    else
+        inv.(di)
+    end
 
     _sq_len_RT = inv(sqrt((nx_g() + 1) * (ny_g() + 1) * (nz_g() + (nz_g() > 1))))
     ϵ = pt_thermal.ϵ
@@ -127,6 +136,8 @@ function _heatdiffusion_PT!(
         igg = nothing,
         phase = nothing,
         stokes = nothing,
+        dx = nothing,
+        dy = nothing,
         b_width = (4, 4, 4),
         iterMax = 50.0e3,
         nout = 1.0e3,
@@ -137,7 +148,12 @@ function _heatdiffusion_PT!(
 
     # Compute some constant stuff
     _dt = inv(dt)
-    _di = inv.(di)
+    _di = if dx !== nothing || dy !== nothing
+        @assert !(dx === nothing) && !(dy === nothing) "Provide both `dx` and `dy` arrays (or neither)."
+        (inv.(dx), inv.(dy))
+    else
+        inv.(di)
+    end
     _sq_len_RT = inv(sqrt((nx_g() + 1) * (ny_g() + 1) * (nz_g() + (nz_g() > 1))))
     ϵ = pt_thermal.ϵ
     ni = size(thermal.Tc)
