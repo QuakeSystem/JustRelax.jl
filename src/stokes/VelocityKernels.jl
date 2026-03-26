@@ -134,32 +134,28 @@ end
     Base.@propagate_inbounds @inline harm_ya(A) = _av_ya(A, i, j)
 
     nx, ny = size(ρgy)
-    if isdirichlet(dirichlet, i + 1, j + 1)
-        apply_dirichlet!(Vx, dirichlet, i + 1, j + 1)
-    else
-        if all((i, j) .< size(Vx) .- 1)
-            @inbounds Vx[i + 1, j + 1] +=
-                (-d_xa(P) + d_xa(τxx) + d_yi(τxy) - av_xa(ρgx)) * ηdτ / av_xa(ητ)
-        end
+    if all((i, j) .< size(Vx) .- 1)
+        @inbounds Vx[i + 1, j + 1] +=
+            (-d_xa(P) + d_xa(τxx) + d_yi(τxy) - av_xa(ρgx)) * ηdτ / av_xa(ητ)
+    end
 
-        @inbounds if all((i, j) .< size(Vy) .- 1)
-            θ = 1.0
-            # Interpolated Vx into Vy node (includes density gradient)
-            # Vertical velocity
-            Vyᵢⱼ = Vy[i + 1, j + 1]
-            # Get necessary buoyancy forces
-            j_N = min(j + 1, ny)
-            ρg_S = ρgy[i, j]
-            ρg_N = ρgy[i, j_N]
-            # Spatial derivatives
-            ∂ρg∂y = (ρg_N - ρg_S) * _dy
-            # correction term
-            ρg_correction = Vyᵢⱼ * ∂ρg∂y * θ * dt
+    @inbounds if all((i, j) .< size(Vy) .- 1)
+        θ = 1.0
+        # Interpolated Vx into Vy node (includes density gradient)
+        # Vertical velocity
+        Vyᵢⱼ = Vy[i + 1, j + 1]
+        # Get necessary buoyancy forces
+        j_N = min(j + 1, ny)
+        ρg_S = ρgy[i, j]
+        ρg_N = ρgy[i, j_N]
+        # Spatial derivatives
+        ∂ρg∂y = (ρg_N - ρg_S) * _dy
+        # correction term
+        ρg_correction = Vyᵢⱼ * ∂ρg∂y * θ * dt
 
-            Vy[i + 1, j + 1] +=
-                (-d_ya(P) + d_ya(τyy) + d_xi(τxy) - av_ya(ρgy) + ρg_correction) * ηdτ /
-                av_ya(ητ)
-        end
+        Vy[i + 1, j + 1] +=
+            (-d_ya(P) + d_ya(τyy) + d_xi(τxy) - av_ya(ρgy) + ρg_correction) * ηdτ /
+            av_ya(ητ)
     end
     return nothing
 end

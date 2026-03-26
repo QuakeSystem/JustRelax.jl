@@ -1,7 +1,6 @@
 ## 2D VISCO-ELASTIC STOKES SOLVER
 
 import JustRelax: apply_mask!
-using CairoMakie
 """
     solve_DYREL!(stokes::JustRelax.StokesArrays, args...; kwargs)
 
