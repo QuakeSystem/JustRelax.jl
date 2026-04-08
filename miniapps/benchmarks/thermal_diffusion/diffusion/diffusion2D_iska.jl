@@ -3,7 +3,7 @@ using ParallelStencil
 
 using Printf, LinearAlgebra, GeoParams, CellArrays
 using JustRelax, JustRelax.JustRelax2D
-
+# using CairoMakie
 const backend_JR = CPUBackend # Options: CPUBackend, CUDABackend, AMDGPUBackend
 
 # using JustPIC, JustPIC._2D
@@ -217,7 +217,7 @@ using Plots
 # Plot cell-centered temperature with physical x/y axes.
 # Then overlay vertex lines to visualize the variable grid spacing.
 #
-plt = heatmap(
+plt = Plots.heatmap(
     xci_x ./ 1.0e3,
     xci_y ./ 1.0e3,
     Array(therm.Tc),
@@ -226,10 +226,10 @@ plt = heatmap(
 )
 
 for xv in xvi_x
-    vline!(plt, [xv ./ 1.0e3]; color = :black, alpha = 0.25, linewidth = 0.5, label = false)
+    Plots.vline!(plt, [xv ./ 1.0e3]; color = :black, alpha = 0.25, linewidth = 0.5, label = false)
 end
 for yv in xvi_y
-    hline!(plt, [yv ./ 1.0e3]; color = :black, alpha = 0.25, linewidth = 0.5, label = false)
+    Plots.hline!(plt, [yv ./ 1.0e3]; color = :black, alpha = 0.25, linewidth = 0.5, label = false)
 end
 
-plot(plt; size = (800, 400))
+Plots.plot(plt; size = (800, 400))

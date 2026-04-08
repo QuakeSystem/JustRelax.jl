@@ -371,7 +371,7 @@ function main(
 
     # Time loop
     t, it = 0.0, 0
-    while it < 20 #000 # run only for 5 Myrs
+    while it < 1 #000 # run only for 5 Myrs
 
         # interpolate fields from particle to grid vertices
         particle2grid!(T_buffer, pT, xvi, particles)
@@ -576,7 +576,7 @@ end
 ## END OF MAIN SCRIPT ----------------------------------------------------------------
 do_vtk = true # set to true to generate VTK files for ParaView
 figdir = "Subduction2D_DYREL"
-n = 64
+n = 164
 nx, ny = n * 2, n
 ref_grid = 1 # 0: original uniform grid, 1: non-uniform logistic grid
 

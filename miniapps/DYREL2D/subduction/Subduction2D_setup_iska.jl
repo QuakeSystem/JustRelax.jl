@@ -1,5 +1,5 @@
 using GeophysicalModelGenerator
-
+using Statistics
 struct VelBox2D
     cenx::Float64
     cenz::Float64
@@ -176,22 +176,17 @@ function subduction_nonuniform_coords_1d(
     x1::Float64;
     ref_grid::Int,
     refine_factor::Float64,
-    w_ref_ratio::Float64,
+    w_ref_ratio::Float64, # width of refined region as a fraction of total domain length
     x_center_frac::Float64,
-    k::Float64 = 4.0,
+    k::Float64 = 4.0, # logistic stretching parameter (higher k = sharper transition)
+    verbose::Int = 0,
 )
-    if ref_grid == 0 || refine_factor == 1.0
-        # Preserve the original type returned by `Geometry` (LinRange/StepRangeLen),
-        # which downstream JustPIC advection currently dispatches on.
-        return LinRange(x0, x1, n_points)
-    end
-
     n_cells = n_points - 1
     L = x1 - x0
     x_center = x0 + x_center_frac * L
     w_ref = w_ref_ratio * abs(L)
 
-    vertices, _ = logistic_vertices(
+    vertices, widths = logistic_vertices(
         n_cells,
         abs(L),
         x0;
@@ -200,6 +195,17 @@ function subduction_nonuniform_coords_1d(
         refine_factor = refine_factor,
         k = k,
     )
+
+    if verbose == 1
+        println("[grid verbose] non-uniform grid from $(x0) to $(x1):")
+        println("  max cell size = $(maximum(widths))")
+        println("  min cell size = $(minimum(widths))")
+        println("  average cell size = $(mean(widths))")
+        println("  refine_factor = $(refine_factor)")
+        println("  w_ref_ratio = $(w_ref_ratio) -> w_ref = $(w_ref)")
+        println("  center = $(x_center)")
+    end
+
     return vertices
 end
 
@@ -212,11 +218,12 @@ function GMG_subduction_2D_with_coords(
     nx_points::Int,
     ny_points::Int;
     ref_grid::Int = 0,
-    refine_factor::Float64 = 4.0,
-    w_ref_ratio::Float64 = 1 / 2,
-    k::Float64 = 4.0,
+    refine_factor::Float64 = 16.0,
+    w_ref_ratio::Float64 = 1 / 2, 
+    k::Float64 = 10.0,
     x_center_frac::Float64 = 0.5,
-    y_center_frac::Float64 = 0.5,
+    y_center_frac::Float64 = 0.8,
+    verbose::Int = 1,
 )
     model_depth = 660
     Tbot = 1474.0
@@ -231,19 +238,21 @@ function GMG_subduction_2D_with_coords(
         x1_km;
         ref_grid = ref_grid,
         refine_factor = refine_factor,
-        w_ref_ratio = w_ref_ratio,
+        w_ref_ratio = w_ref_ratio/1.5,
         x_center_frac = x_center_frac,
         k = k,
+        verbose = verbose,
     )
     z = subduction_nonuniform_coords_1d(
         ny_points,
         z0_km,
         z1_km;
         ref_grid = ref_grid,
-        refine_factor = refine_factor,
+        refine_factor = refine_factor/3,
         w_ref_ratio = w_ref_ratio,
         x_center_frac = y_center_frac,
         k = k,
+        verbose = verbose,
     )
 
     Grid2D = CartData(xyz_grid(x, 0, z))
