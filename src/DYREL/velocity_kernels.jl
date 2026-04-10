@@ -292,3 +292,23 @@ end
 
     return nothing
 end
+
+@parallel_indices (I...) function update_DR_V!(
+        V::NTuple{N, AbstractArray{T, N}},
+        dVdτ::NTuple{N, AbstractArray{T, N}},
+        βV::NTuple{N, AbstractArray{T, N}},
+        dτV::NTuple{N, AbstractArray{T, N}},
+        mask_vbox::NTuple{N, AbstractArray{<:Number, N}},
+    ) where {N, T}
+    ntuple(Val(N)) do i
+        @inline
+        if all(I .≤ size(dVdτ[i]))
+            # if mask==1 => prescribed region, do not update this velocity DoF
+            if mask_vbox[i][I...] == 0
+                V[i][I .+ 1...] += dVdτ[i][I...] * βV[i][I...] * dτV[i][I...]
+            end
+        end
+    end
+
+    return nothing
+end

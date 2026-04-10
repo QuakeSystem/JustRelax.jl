@@ -1,12 +1,12 @@
 # Load script dependencies
-using GeoParams#, CairoMakie
+using GeoParams, CairoMakie
 
-const isCUDA = false
+const isCUDA = false # set to true to run on CUDA GPU, false to run on CPU
 
 @static if isCUDA
     using CUDA
 end
-
+ 
 using JustRelax, JustRelax.JustRelax2D, JustRelax.DataIO
 
 const backend = @static if isCUDA
@@ -34,7 +34,7 @@ else
 end
 
 # Load file with all the rheology configurations
-include("Subduction2D_setup.jl")
+include("Subduction2D_setup_iska.jl")
 include("Subduction2D_rheology.jl")
 
 ## SET OF HELPER FUNCTIONS PARTICULAR FOR THIS SCRIPT --------------------------------
@@ -59,16 +59,204 @@ end
     @all(P) = abs(@all(ρg) * @all_k(z)) * <(@all_k(z), 0.0)
     return nothing
 end
+
+
+@parallel_indices (i, j) function _apply_vel_box_Vx!(
+    Vx,
+    xvx,
+    yvx,
+    cenx,
+    cenz,
+    halfx,
+    halfz,
+    vx_val,
+)
+    if i ≤ size(Vx, 1) && j ≤ size(Vx, 2)
+        x = xvx[i]
+        z = yvx[j]
+        if abs(x - cenx) ≤ halfx && abs(z - cenz) ≤ halfz
+            @inbounds Vx[i, j] = vx_val
+        end
+    end
+    return nothing
+end
+
+@parallel_indices (i, j) function _apply_vel_box_Vy!(
+    Vy,
+    xvy,
+    yvy,
+    cenx,
+    cenz,
+    halfx,
+    halfz,
+    vy_val,
+)
+    if i ≤ size(Vy, 1) && j ≤ size(Vy, 2)
+        x = xvy[i]
+        z = yvy[j]
+        if abs(x - cenx) ≤ halfx && abs(z - cenz) ≤ halfz
+            @inbounds Vy[i, j] = vy_val
+        end
+    end
+    return nothing
+end
+
+@parallel_indices (i, j) function _mark_vbox_mask_Vx!(
+    mask_vbox_x,
+    xvx,
+    yvx,
+    cenx,
+    cenz,
+    halfx,
+    halfz,
+)
+    if i ≤ size(mask_vbox_x, 1) && j ≤ size(mask_vbox_x, 2)
+        # mask indices (i,j) correspond to velocity DoFs at (i+1,j+1)
+        ii = i + 1
+        jj = j + 1
+        if ii ≤ length(xvx) && jj ≤ length(yvx)
+            x = xvx[ii]
+            z = yvx[jj]
+            if abs(x - cenx) ≤ halfx && abs(z - cenz) ≤ halfz
+                @inbounds mask_vbox_x[i, j] = 1
+            end
+        end
+    end
+    return nothing
+end
+
+@parallel_indices (i, j) function _mark_vbox_mask_Vy!(
+    mask_vbox_y,
+    xvy,
+    yvy,
+    cenx,
+    cenz,
+    halfx,
+    halfz,
+)
+    if i ≤ size(mask_vbox_y, 1) && j ≤ size(mask_vbox_y, 2)
+        # mask indices (i,j) correspond to velocity DoFs at (i+1,j+1)
+        ii = i + 1
+        jj = j + 1
+        if ii ≤ length(xvy) && jj ≤ length(yvy)
+            x = xvy[ii]
+            z = yvy[jj]
+            if abs(x - cenx) ≤ halfx && abs(z - cenz) ≤ halfz
+                @inbounds mask_vbox_y[i, j] = 1
+            end
+        end
+    end
+    return nothing
+end
+
+# Velocity boxes are applied on the same staggered grid as the Stokes solver:
+# - Vx lives at (x face, z) with size (ni[1]+1, ni[2]+2); grid_vx = (xvi[1], yVx).
+# - Vy lives at (x, z face) with size (ni[1]+2, ni[2]+1); grid_vy = (xVy, xvi[2]).
+# There are no separate "cell-center" or "vertex" velocity arrays; Vx and Vy are the
+# only velocity DoFs, and apply_vel_boxes! correctly uses grid.grid_v so the box
+# region is applied to the right indices.
+function apply_vel_boxes!(
+    stokes,
+    grid,
+    boxes::Vector{VelBox2D},
+)
+    isempty(boxes) && return nothing
+
+    Vx, Vy = @velocity(stokes)
+    grid_vx, grid_vy = grid.grid_v
+    xvx, yvx = grid_vx
+    xvy, yvy = grid_vy
+
+    # reset velocity-box masks: 0 ⇒ no box (free)
+    stokes.mask_vbox_x.mask .= 0
+    stokes.mask_vbox_y.mask .= 0
+
+    for box in boxes
+        halfx = box.widthx / 2
+        halfz = box.widthz / 2
+
+        if box.has_vx
+            nx = length(xvx)
+            ny = length(yvx)
+            @parallel (@idx (nx, ny)) _apply_vel_box_Vx!(
+                Vx, xvx, yvx, box.cenx, box.cenz, halfx, halfz, box.vx
+            )
+            @parallel (@idx (nx, ny)) _mark_vbox_mask_Vx!(
+                stokes.mask_vbox_x.mask,
+                xvx,
+                yvx,
+                box.cenx,
+                box.cenz,
+                halfx,
+                halfz,
+            )
+        end
+
+        if box.has_vy
+            nx = length(xvy)
+            ny = length(yvy)
+            @parallel (@idx (nx, ny)) _apply_vel_box_Vy!(
+                Vy, xvy, yvy, box.cenx, box.cenz, halfx, halfz, box.vy
+            )
+            @parallel (@idx (nx, ny)) _mark_vbox_mask_Vy!(
+                stokes.mask_vbox_y.mask,
+                xvy,
+                yvy,
+                box.cenx,
+                box.cenz,
+                halfx,
+                halfz,
+            )
+        end
+    end
+
+    return nothing
+end
 ## END OF HELPER FUNCTION ------------------------------------------------------------
 
 ## BEGIN OF MAIN SCRIPT --------------------------------------------------------------
-function main(li, origin, phases_GMG, igg; nx = 16, ny = 16, figdir = "figs2D", do_vtk = false)
+function main(
+    li,
+    origin,
+    phases_GMG,
+    igg;
+    xvi,
+    xci,
+    nx = 16,
+    ny = 16,
+    figdir = "figs2D",
+    do_vtk = false,
+    ref_grid = 0,
+    vtk_every = 1,
+    particle_vtk_every = 1,
+    save_particle_points = false,
+)
 
     # Physical domain ------------------------------------
     ni = nx, ny           # number of cells
-    di = @. li / ni       # grid steps
-    grid = Geometry(ni, li; origin = origin)
-    (; xci, xvi) = grid # nodes at the center and vertices of the cells
+    di = @. li / ni       # grid steps (uniform fallback and scalar legacy calls)
+    # Staggered-grid coordinates were already created upstream.
+    # grid_vxi is only used to support helper kernels (velocity-box application, etc.).
+    grid_vxi = velocity_grids(xci, xvi, di)
+    # JustPIC's `advection_MQS!` currently dispatches on the coordinate array types:
+    # for `ref_grid=1`, `xvi/xci` are vectors (non-uniform), while `velocity_grids`
+    # creates some ghost coordinates as `LinRange`. Convert to consistent
+    # `Vector{Float64}` to satisfy dispatch and keep interpolation stable.
+    if ref_grid == 1
+        grid_vxi = (
+            (collect(grid_vxi[1][1]), collect(grid_vxi[1][2])),
+            (collect(grid_vxi[2][1]), collect(grid_vxi[2][2])),
+        )
+    end
+    grid = (grid_v = grid_vxi,)
+
+    grid_settings = (
+        ref_grid = ref_grid,
+        x_nodes = collect(xvi[1]),
+        x_centers = collect(xci[1]),
+        y_nodes = collect(xvi[2]),
+        y_centers = collect(xci[2]),
+    )
     # ----------------------------------------------------
 
     # Physical properties using GeoParams ----------------
@@ -82,10 +270,10 @@ function main(li, origin, phases_GMG, igg; nx = 16, ny = 16, figdir = "figs2D", 
     max_xcell = 60
     min_xcell = 20
     particles = init_particles(
-        backend_JP, nxcell, max_xcell, min_xcell, grid.xi_vel...
+        backend_JP, nxcell, max_xcell, min_xcell, xvi...
     )
     subgrid_arrays = SubgridDiffusionCellArrays(particles)
-    grid_vxi = velocity_grids(xci, xvi, di)
+    # velocity grids
     # material phase & temperature
     pPhases, pT = init_cell_arrays(particles, Val(2))
 
@@ -98,7 +286,7 @@ function main(li, origin, phases_GMG, igg; nx = 16, ny = 16, figdir = "figs2D", 
     phases_device = PTArray(backend)(phases_GMG)
     phase_ratios = phase_ratios = PhaseRatios(backend_JP, length(rheology), ni)
     init_phases!(pPhases, phases_device, particles, xvi)
-    update_phase_ratios!(phase_ratios, particles, pPhases)
+    update_phase_ratios!(phase_ratios, particles, xci, xvi, pPhases)
     # ----------------------------------------------------
 
     # STOKES ---------------------------------------------
@@ -168,19 +356,28 @@ function main(li, origin, phases_GMG, igg; nx = 16, ny = 16, figdir = "figs2D", 
     for (dst, src) in zip((T_buffer, Told_buffer), (thermal.T, thermal.Told))
         copyinn_x!(dst, src)
     end
-    grid2particle!(pT, T_buffer, particles)
+    grid2particle!(pT, xvi, T_buffer, particles)
 
     τxx_v = @zeros(ni .+ 1...)
     τyy_v = @zeros(ni .+ 1...)
 
     dyrel = DYREL(backend, stokes, rheology, phase_ratios, di, dt; ϵ = 1.0e-3)
+    if ref_grid == 1
+        # Initialize Gershgorin / preconditioner diagonals with geometry-consistent
+        # inverse spacings before the first residual check.
+        inv_di_nodes = (
+            inv.(diff(grid_settings.x_nodes)),
+            inv.(diff(grid_settings.y_nodes)),
+        )
+        JustRelax.JustRelax2D.DYREL!(dyrel, stokes, rheology, phase_ratios, inv_di_nodes, dt)
+    end
 
     # Time loop
     t, it = 0.0, 0
     while it < 1 #000 # run only for 5 Myrs
 
         # interpolate fields from particle to grid vertices
-        particle2grid!(T_buffer, pT, particles)
+        particle2grid!(T_buffer, pT, xvi, particles)
         @views T_buffer[:, end] .= Ttop
         @views T_buffer[:, 1] .= Tbot
         @views thermal.T[2:(end - 1), :] .= T_buffer
@@ -188,7 +385,14 @@ function main(li, origin, phases_GMG, igg; nx = 16, ny = 16, figdir = "figs2D", 
         temperature2center!(thermal)
 
         # interpolate stress back to the grid
-        stress2grid!(stokes, pτ, particles)
+        stress2grid!(stokes, pτ, xvi, xci, particles)
+
+        # Prescribe velocity boxes before solve so solver finds a solution consistent with them
+        apply_vel_boxes!(stokes, grid, vel_boxes_2D)
+        update_halo!(@velocity(stokes)...)
+
+        # Stokes solver: re-apply velocity boxes after every V update so the solver
+        # keeps the prescribed velocities in the box (otherwise each iteration overwrites them).
 
         # Stokes solver ----------------
         args = (; T = thermal.Tc, P = stokes.P, dt = Inf)
@@ -201,29 +405,33 @@ function main(li, origin, phases_GMG, igg; nx = 16, ny = 16, figdir = "figs2D", 
                 phase_ratios,
                 rheology,
                 args,
-                grid,
+                di,
                 dt,
                 igg;
                 kwargs = (;
-                    verbose_PH = false,
-                    verbose_DR = false,
+                    verbose = false,
                     iterMax = 50.0e3,
                     rel_drop = 1.0e-2,
                     nout = 400,
-                    λ_relaxation_PH = 1,
-                    λ_relaxation_DR = 1,
+                    λ_relaxation = 1,
                     viscosity_relaxation = 1.0e-2,
                     viscosity_cutoff = (1.0e18, 1.0e23),
+                    apply_velocity_box = stokes -> apply_vel_boxes!(stokes, grid, vel_boxes_2D),
+                    grid = grid_settings,
                 )
             )
         end
+
+        # Enforce velocity boxes again so the final velocity field (used for advection) matches the prescription
+        apply_vel_boxes!(stokes, grid, vel_boxes_2D)
+        update_halo!(@velocity(stokes)...)
         # print some stuff
         println("Stokes solver time             ")
         println("   Total time:      $t_stokes s")
         # println("   Time/iteration:  $(t_stokes / out.iter) s")
-
+        println("Saved vtk at $vtk_dir")
         # rotate stresses
-        rotate_stress!(pτ, stokes, particles, dt)
+        rotate_stress!(pτ, stokes, particles, xci, xvi, dt)
         # compute time step
         dt = compute_dt(stokes, di, dt_max) #* 0.8
         # compute strain rate 2nd invartian - for plotting
@@ -240,7 +448,7 @@ function main(li, origin, phases_GMG, igg; nx = 16, ny = 16, figdir = "figs2D", 
             rheology,
             args,
             dt,
-            grid;
+            di;
             kwargs = (
                 igg = igg,
                 phase = phase_ratios,
@@ -250,58 +458,73 @@ function main(li, origin, phases_GMG, igg; nx = 16, ny = 16, figdir = "figs2D", 
             )
         )
         subgrid_characteristic_time!(
-            subgrid_arrays, particles, dt₀, phase_ratios, rheology, thermal, stokes
+            subgrid_arrays, particles, dt₀, phase_ratios, rheology, thermal, stokes, xci, di
         )
-        centroid2particle!(subgrid_arrays.dt₀, dt₀, particles)
+        centroid2particle!(subgrid_arrays.dt₀, xci, dt₀, particles)
         subgrid_diffusion!(
-            pT, thermal.T, thermal.ΔT, subgrid_arrays, particles, dt
+            pT, thermal.T, thermal.ΔT, subgrid_arrays, particles, xvi, di, dt
         )
         # ------------------------------
 
         # Advection --------------------
         # advect particles in space
-        advection_MQS!(particles, RungeKutta2(), @velocity(stokes), dt)
+        ###advection_MQS!(particles, RungeKutta2(), @velocity(stokes), grid_vxi, dt)
         # advect particles in memory
-        move_particles!(particles, particle_args)
+        ###move_particles!(particles, xvi, particle_args)
         # check if we need to inject particles
         # need stresses on the vertices for injection purposes
         # center2vertex!(τxx_v, stokes.τ.xx)
         # center2vertex!(τyy_v, stokes.τ.yy)
-        inject_particles_phase!(
-            particles,
-            pPhases,
-            particle_args_reduced,
-            (T_buffer, stokes.τ.xx_v, stokes.τ.yy_v, stokes.τ.xy, stokes.ω.xy)
-        )
+        
+        # inject_particles_phase!(
+        #     particles,
+        #     pPhases,
+        #     particle_args_reduced,
+        #     (T_buffer, stokes.τ.xx_v, stokes.τ.yy_v, stokes.τ.xy, stokes.ω.xy),
+        #     xvi
+        # )
 
         # update phase ratios
-        update_phase_ratios!(phase_ratios, particles, pPhases)
+        # update_phase_ratios!(phase_ratios, particles, xci, xvi, pPhases)
 
         @show it += 1
         t += dt
 
         # Data I/O and plotting ---------------------
-        if it == 1 || rem(it, 5) == 0
+        if it > 0 #it == 1 || rem(it, 5) == 0
             checkpointing_jld2(checkpoint, stokes, thermal, t, dt; it = it)
             checkpointing_particles(checkpoint, particles; phases = pPhases, phase_ratios = phase_ratios, particle_args = particle_args, particle_args_reduced = particle_args_reduced, t = t, dt = dt, it = it)
             (; η_vep, η) = stokes.viscosity
-            if do_vtk
+            if do_vtk && (it == 1 || rem(it, vtk_every) == 0)
                 velocity2vertex!(Vx_v, Vy_v, @velocity(stokes)...)
+                # Reconstruct compact phase "shapes" on the grid from particle phase ratios.
+                phase_vertex = [argmax(p) for p in Array(phase_ratios.vertex)]
+                # map staggered residuals Rx, Ry to a cell-centered array matching P
+                Rx_c = zeros(size(stokes.P))
+                Ry_c = zeros(size(stokes.P))
+                @views Rx_c[axes(stokes.R.Rx, 1), axes(stokes.R.Rx, 2)] .= Array(stokes.R.Rx)
+                @views Ry_c[axes(stokes.R.Ry, 1), axes(stokes.R.Ry, 2)] .= Array(stokes.R.Ry)
+
                 data_v = (;
                     T = Array(T_buffer),
                     τII = Array(stokes.τ.II),
                     εII = Array(stokes.ε.II),
                     Vx = Array(Vx_v),
                     Vy = Array(Vy_v),
+                    phase_vertex = phase_vertex,
                 )
                 data_c = (;
-                    P = Array(stokes.P),
-                    η = Array(η_vep),
+                    P   = Array(stokes.P),
+                    η   = Array(η_vep),
+                    Rx  = Rx_c,
+                    Ry  = Ry_c,
+                    Rmag = sqrt.(Rx_c .^ 2 .+ Ry_c .^ 2),
                 )
                 velocity_v = (
                     Array(Vx_v),
                     Array(Vy_v),
                 )
+                
                 save_vtk(
                     joinpath(vtk_dir, "vtk_" * lpad("$it", 6, "0")),
                     xvi,
@@ -311,6 +534,17 @@ function main(li, origin, phases_GMG, igg; nx = 16, ny = 16, figdir = "figs2D", 
                     velocity_v;
                     t = t
                 )
+                # Optional particle point-cloud output (large files).
+                if save_particle_points && (it == 1 || rem(it, particle_vtk_every) == 0)
+                    save_particles(
+                        particles,
+                        pPhases;
+                        fname = joinpath(vtk_dir, "particles_" * lpad("$it", 6, "0")),
+                        t = t,
+                    )
+                end
+                
+
             end
 
             # Make particles plottable
@@ -360,14 +594,31 @@ end
 ## END OF MAIN SCRIPT ----------------------------------------------------------------
 do_vtk = true # set to true to generate VTK files for ParaView
 figdir = "Subduction2D_DYREL"
-n = 64
-nx, ny = n * 2, n
+n = 256
+nx, ny = n * 4, n
+ref_grid = 0 # 0: original uniform grid, 1: non-uniform logistic grid
 
-li, origin, phases_GMG, T_GMG = GMG_subduction_2D(nx + 1, ny + 1)
+li, origin, phases_GMG, T_GMG, xvi, xci = GMG_subduction_2D_with_coords(
+    nx + 1,
+    ny + 1;
+    ref_grid = ref_grid,
+)
 igg = if !(JustRelax.MPI.Initialized()) # initialize (or not) MPI grid
     IGG(init_global_grid(nx, ny, 1; init_MPI = true)...)
 else
     igg
 end
 
-main(li, origin, phases_GMG, igg; figdir = figdir, nx = nx, ny = ny, do_vtk = do_vtk);
+main(
+    li,
+    origin,
+    phases_GMG,
+    igg;
+    xvi,
+    xci,
+    figdir = figdir,
+    nx = nx,
+    ny = ny,
+    do_vtk = do_vtk,
+    ref_grid = ref_grid,
+);

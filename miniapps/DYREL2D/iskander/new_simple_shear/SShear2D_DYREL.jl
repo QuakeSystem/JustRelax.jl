@@ -11,8 +11,10 @@ using JustRelax, JustRelax.JustRelax2D, JustRelax.DataIO
 
 const backend = @static if isCUDA
     CUDABackend # Options: CPUBackend, CUDABackend, AMDGPUBackend
+    const backend_JR = CUDABackend
 else
     JustRelax.CPUBackend # Options: CPUBackend, CUDABackend, AMDGPUBackend
+    const backend_JR = CPUBackend
 end
 
 using ParallelStencil, ParallelStencil.FiniteDifferences2D
@@ -34,8 +36,8 @@ else
 end
 
 # Load file with all the rheology configurations
-include("Subduction2D_setup.jl")
-include("Subduction2D_rheology.jl")
+include("SShear2D_setup.jl")
+include("SShear2D_rheology.jl")
 
 ## SET OF HELPER FUNCTIONS PARTICULAR FOR THIS SCRIPT --------------------------------
 
@@ -59,20 +61,218 @@ end
     @all(P) = abs(@all(ρg) * @all_k(z)) * <(@all_k(z), 0.0)
     return nothing
 end
+# PREPARE VISUALIZATION SETTINGS
+function prepare_visualisation(ni)
+    # SETTINGS FOR VISUALIZATION AND OUTPUT
+    do_vtk   = true # set to true to generate VTK files for ParaView
+    pictures = false # set to true to generate PNG figures of particles and fields using Makie
+    # IF VTK OUTPUT YES
+    pvd_name = "Simple_Shear_2d"
+    figdir   = "Simple_Shear_results"
+    save_particle_points = false # set to true to save particle point clouds as VTK files (can generate large files)
+    vtk_every = 1 # save VTK every N iterations
+    particle_vtk_every = 1 # save particle VTK every N iterations
+
+
+    if do_vtk == true
+        vtk_dir = joinpath(figdir, "vtk")
+        if isfile(joinpath(vtk_dir, "$pvd_name.pvd"))
+            rm(joinpath(vtk_dir, "$pvd_name.pvd"))
+        end
+        take(vtk_dir)
+        checkpoint = joinpath(figdir, "checkpoint")
+        take(checkpoint)
+    end
+    vis=(;do_vtk,vtk_dir,pvd_name ,figdir,save_particle_points,vtk_every,particle_vtk_every,pictures,checkpoint,Vx_v = @zeros(ni .+ 1...), Vy_v = @zeros(ni .+ 1...),)
+
+    return vis
+end
+# VELOCITY BOXES ROUTINES
+@parallel_indices (i, j) function _apply_vel_box_Vx!(
+    Vx,
+    xvx,
+    yvx,
+    cenx,
+    cenz,
+    halfx,
+    halfz,
+    vx_val,
+)
+    if i ≤ size(Vx, 1) && j ≤ size(Vx, 2)
+        x = xvx[i]
+        z = yvx[j]
+        if abs(x - cenx) ≤ halfx && abs(z - cenz) ≤ halfz
+            @inbounds Vx[i, j] = vx_val
+        end
+    end
+    return nothing
+end
+
+@parallel_indices (i, j) function _apply_vel_box_Vy!(
+    Vy,
+    xvy,
+    yvy,
+    cenx,
+    cenz,
+    halfx,
+    halfz,
+    vy_val,
+)
+    if i ≤ size(Vy, 1) && j ≤ size(Vy, 2)
+        x = xvy[i]
+        z = yvy[j]
+        if abs(x - cenx) ≤ halfx && abs(z - cenz) ≤ halfz
+            @inbounds Vy[i, j] = vy_val
+        end
+    end
+    return nothing
+end
+
+@parallel_indices (i, j) function _mark_vbox_mask_Vx!(
+    mask_vbox_x,
+    xvx,
+    yvx,
+    cenx,
+    cenz,
+    halfx,
+    halfz,
+)
+    if i ≤ size(mask_vbox_x, 1) && j ≤ size(mask_vbox_x, 2)
+        # mask indices (i,j) correspond to velocity DoFs at (i+1,j+1)
+        ii = i + 1
+        jj = j + 1
+        if ii ≤ length(xvx) && jj ≤ length(yvx)
+            x = xvx[ii]
+            z = yvx[jj]
+            if abs(x - cenx) ≤ halfx && abs(z - cenz) ≤ halfz
+                @inbounds mask_vbox_x[i, j] = 1
+            end
+        end
+    end
+    return nothing
+end
+
+@parallel_indices (i, j) function _mark_vbox_mask_Vy!(
+    mask_vbox_y,
+    xvy,
+    yvy,
+    cenx,
+    cenz,
+    halfx,
+    halfz,
+)
+    if i ≤ size(mask_vbox_y, 1) && j ≤ size(mask_vbox_y, 2)
+        # mask indices (i,j) correspond to velocity DoFs at (i+1,j+1)
+        ii = i + 1
+        jj = j + 1
+        if ii ≤ length(xvy) && jj ≤ length(yvy)
+            x = xvy[ii]
+            z = yvy[jj]
+            if abs(x - cenx) ≤ halfx && abs(z - cenz) ≤ halfz
+                @inbounds mask_vbox_y[i, j] = 1
+            end
+        end
+    end
+    return nothing
+end
+
+# Velocity boxes are applied on the same staggered coordinates as the Stokes solver.
+# In the new Geometry API these coordinates are stored in `grid.xi_vel`:
+# - `grid.xi_vel[1]` are the coordinates for Vx (x-face, z)
+# - `grid.xi_vel[2]` are the coordinates for Vy (x, z-face)
+# so the box region is applied to the correct velocity DoFs.
+function apply_vel_boxes!(
+    stokes,
+    grid,
+    boxes::Vector{VelBox2D},
+)
+    isempty(boxes) && return nothing
+
+    Vx, Vy = @velocity(stokes)
+    grid_vx, grid_vy = grid.xi_vel
+    xvx, yvx = grid_vx
+    xvy, yvy = grid_vy
+
+    # reset velocity-box masks: 0 ⇒ no box (free)
+    stokes.mask_vbox_x.mask .= 0
+    stokes.mask_vbox_y.mask .= 0
+
+    for box in boxes
+        halfx = box.widthx / 2
+        halfz = box.widthz / 2
+
+        if box.has_vx
+            nx = length(xvx)
+            ny = length(yvx)
+            @parallel (@idx (nx, ny)) _apply_vel_box_Vx!(
+                Vx, xvx, yvx, box.cenx, box.cenz, halfx, halfz, box.vx
+            )
+            @parallel (@idx (nx, ny)) _mark_vbox_mask_Vx!(
+                stokes.mask_vbox_x.mask,
+                xvx,
+                yvx,
+                box.cenx,
+                box.cenz,
+                halfx,
+                halfz,
+            )
+        end
+
+        if box.has_vy
+            nx = length(xvy)
+            ny = length(yvy)
+            @parallel (@idx (nx, ny)) _apply_vel_box_Vy!(
+                Vy, xvy, yvy, box.cenx, box.cenz, halfx, halfz, box.vy
+            )
+            @parallel (@idx (nx, ny)) _mark_vbox_mask_Vy!(
+                stokes.mask_vbox_y.mask,
+                xvy,
+                yvy,
+                box.cenx,
+                box.cenz,
+                halfx,
+                halfz,
+            )
+        end
+    end
+
+    return nothing
+end
 ## END OF HELPER FUNCTION ------------------------------------------------------------
 
 ## BEGIN OF MAIN SCRIPT --------------------------------------------------------------
-function main(li, origin, phases_GMG, igg; nx = 16, ny = 16, figdir = "figs2D", do_vtk = false)
+function main(
+    li,
+    origin,
+    phases_GMG,
+    igg;
+    xvi,
+    xci,
+    nx = 16,
+    ny = 16,
+    ref_grid = 0,
+)
 
     # Physical domain ------------------------------------
     ni = nx, ny           # number of cells
     di = @. li / ni       # grid steps
-    grid = Geometry(ni, li; origin = origin)
-    (; xci, xvi) = grid # nodes at the center and vertices of the cells
-    # ----------------------------------------------------
 
+    grid = Geometry(
+        PTArray(backend_JR),
+        xvi...,
+        )
+
+    (; xci, xvi) = grid # nodes at the center and vertices of the cells
+    di_min = min(
+        min(minimum.(grid.di.center)...),
+        min(minimum.(grid.di.vertex)...),
+        )
+    di1 = grid.di 
+    # ----------------------------------------------------
+    # Set flags and parameters for visualization and output and create folders for output
+    vis = prepare_visualisation(ni)
     # Physical properties using GeoParams ----------------
-    rheology = init_rheology_nonNewtonian_plastic()
+    rheology = init_rheology_simple_shear()
     dt = 25.0e3 * 3600 * 24 * 365 # diffusive CFL timestep limiter
     dt_max = 25.0e3 * 3600 * 24 * 365 # diffusive CFL timestep limiter
     # ----------------------------------------------------
@@ -85,7 +285,7 @@ function main(li, origin, phases_GMG, igg; nx = 16, ny = 16, figdir = "figs2D", 
         backend_JP, nxcell, max_xcell, min_xcell, grid.xi_vel...
     )
     subgrid_arrays = SubgridDiffusionCellArrays(particles)
-    grid_vxi = velocity_grids(xci, xvi, di)
+    # grid_vxi = velocity_grids(xci, xvi, di)
     # material phase & temperature
     pPhases, pT = init_cell_arrays(particles, Val(2))
 
@@ -123,8 +323,16 @@ function main(li, origin, phases_GMG, igg; nx = 16, ny = 16, figdir = "figs2D", 
     # Buoyancy forces
     ρg = ntuple(_ -> @zeros(ni...), Val(2))
     compute_ρg!(ρg[2], phase_ratios, rheology, (T = thermal.Tc, P = stokes.P))
-    stokes.P .= PTArray(backend)(reverse(cumsum(reverse((ρg[2]) .* di[2], dims = 2), dims = 2), dims = 2))
-
+    ρg[2] .= 0  # Turn off gravity for simple shear test
+    if ref_grid == 0
+        stokes.P .= PTArray(backend)(reverse(cumsum(reverse((ρg[2]) .* di[2], dims = 2), dims = 2), dims = 2))
+    else
+    # Lithostatic pressure integrates vertical body force using local cell dy (vertex spacing).
+    stokes.P .= PTArray(backend)(reverse(cumsum(reverse((ρg[2]) .* reshape(di1.vertex[2], 1, :), dims = 2), dims = 2), dims = 2))
+    end
+    # Pressure shift to reference value
+    P_ref = 5e7  # Reference pressure in Pa
+    stokes.P .+= P_ref
     # Rheology
     args0 = (T = thermal.Tc, P = stokes.P, dt = Inf)
     viscosity_cutoff = (1.0e18, 1.0e23)
@@ -134,7 +342,7 @@ function main(li, origin, phases_GMG, igg; nx = 16, ny = 16, figdir = "figs2D", 
 
     # PT coefficients for thermal diffusion
     pt_thermal = PTThermalCoeffs(
-        backend, rheology, phase_ratios, args0, dt, ni, di, li; ϵ = 1.0e-8, CFL = 0.95 / √2
+        backend, rheology, phase_ratios, args0, dt, ni, di1, li; ϵ = 1.0e-8, CFL = 0.95 / √2
     )
 
     # Boundary conditions
@@ -144,23 +352,6 @@ function main(li, origin, phases_GMG, igg; nx = 16, ny = 16, figdir = "figs2D", 
     )
     flow_bcs!(stokes, flow_bcs) # apply boundary conditions
     update_halo!(@velocity(stokes)...)
-
-    # IO -------------------------------------------------
-    # if it does not exist, make folder where figures are stored
-    if do_vtk
-        vtk_dir = joinpath(figdir, "vtk")
-        take(vtk_dir)
-        checkpoint = joinpath(figdir, "checkpoint")
-        take(checkpoint)
-    end
-    take(figdir)
-    # ----------------------------------------------------
-
-    local Vx_v, Vy_v
-    if do_vtk
-        Vx_v = @zeros(ni .+ 1...)
-        Vy_v = @zeros(ni .+ 1...)
-    end
 
     T_buffer = @zeros(ni .+ 1)
     Told_buffer = similar(T_buffer)
@@ -173,11 +364,11 @@ function main(li, origin, phases_GMG, igg; nx = 16, ny = 16, figdir = "figs2D", 
     τxx_v = @zeros(ni .+ 1...)
     τyy_v = @zeros(ni .+ 1...)
 
-    dyrel = DYREL(backend, stokes, rheology, phase_ratios, di, dt; ϵ = 1.0e-3)
+    dyrel = DYREL(backend, stokes, rheology, phase_ratios, di1, dt; ϵ = 1.0e-3)
 
     # Time loop
     t, it = 0.0, 0
-    while it < 1 #000 # run only for 5 Myrs
+    while it < 100 #000 # run only for 5 Myrs
 
         # interpolate fields from particle to grid vertices
         particle2grid!(T_buffer, pT, particles)
@@ -189,6 +380,10 @@ function main(li, origin, phases_GMG, igg; nx = 16, ny = 16, figdir = "figs2D", 
 
         # interpolate stress back to the grid
         stress2grid!(stokes, pτ, particles)
+
+        # Prescribe velocity boxes before solve so solver finds a solution consistent with them
+        apply_vel_boxes!(stokes, grid, vel_boxes_2D)
+        update_halo!(@velocity(stokes)...)
 
         # Stokes solver ----------------
         args = (; T = thermal.Tc, P = stokes.P, dt = Inf)
@@ -205,14 +400,15 @@ function main(li, origin, phases_GMG, igg; nx = 16, ny = 16, figdir = "figs2D", 
                 dt,
                 igg;
                 kwargs = (;
-                    verbose_PH = false,
-                    verbose_DR = false,
-                    iterMax = 50.0e3,
+                    verbose_PH = true,
+                    verbose_DR = true,
+                    iterMax = 50.0e2,
                     rel_drop = 1.0e-2,
                     nout = 400,
                     λ_relaxation_PH = 1,
                     λ_relaxation_DR = 1,
                     viscosity_relaxation = 1.0e-2,
+                    apply_velocity_box = stokes -> apply_vel_boxes!(stokes, grid, vel_boxes_2D),
                     viscosity_cutoff = (1.0e18, 1.0e23),
                 )
             )
@@ -225,7 +421,7 @@ function main(li, origin, phases_GMG, igg; nx = 16, ny = 16, figdir = "figs2D", 
         # rotate stresses
         rotate_stress!(pτ, stokes, particles, dt)
         # compute time step
-        dt = compute_dt(stokes, di, dt_max) #* 0.8
+        dt = compute_dt(stokes, di_min, dt_max) #* 0.8
         # compute strain rate 2nd invartian - for plotting
         tensor_invariant!(stokes.τ)
         tensor_invariant!(stokes.ε)
@@ -280,39 +476,62 @@ function main(li, origin, phases_GMG, igg; nx = 16, ny = 16, figdir = "figs2D", 
         @show it += 1
         t += dt
 
-        # Data I/O and plotting ---------------------
-        if it == 1 || rem(it, 5) == 0
-            checkpointing_jld2(checkpoint, stokes, thermal, t, dt; it = it)
-            checkpointing_particles(checkpoint, particles; phases = pPhases, phase_ratios = phase_ratios, particle_args = particle_args, particle_args_reduced = particle_args_reduced, t = t, dt = dt, it = it)
+        ### PARAVIEW PLOTTING
+        if it >= 0 #it == 1 || rem(it, 5) == 0
+
+        
+
+            checkpointing_jld2(vis.checkpoint, stokes, thermal, t, dt; it = it)
+            checkpointing_particles(vis.checkpoint, particles; phases = pPhases, phase_ratios = phase_ratios, particle_args = particle_args, particle_args_reduced = particle_args_reduced, t = t, dt = dt, it = it)
             (; η_vep, η) = stokes.viscosity
-            if do_vtk
+            if vis.do_vtk && (it == 1 || rem(it, vis.vtk_every) == 0)
+                Vx_v = vis.Vx_v
+                Vy_v = vis.Vy_v
                 velocity2vertex!(Vx_v, Vy_v, @velocity(stokes)...)
+                # Reconstruct compact phase "shapes" on the grid from particle phase ratios.
+                phase_vertex = [argmax(p) for p in Array(phase_ratios.vertex)]
+
                 data_v = (;
                     T = Array(T_buffer),
                     τII = Array(stokes.τ.II),
                     εII = Array(stokes.ε.II),
                     Vx = Array(Vx_v),
                     Vy = Array(Vy_v),
+                    phase_vertex = phase_vertex,
                 )
                 data_c = (;
-                    P = Array(stokes.P),
-                    η = Array(η_vep),
+                    P   = Array(stokes.P),
+                    η   = Array(η_vep),
                 )
                 velocity_v = (
                     Array(Vx_v),
                     Array(Vy_v),
                 )
+                path_vtk = joinpath(vis.vtk_dir, "vtk_" * lpad("$it", 6, "0"))
                 save_vtk(
-                    joinpath(vtk_dir, "vtk_" * lpad("$it", 6, "0")),
+                    path_vtk,
                     xvi,
                     xci,
                     data_v,
                     data_c,
                     velocity_v;
-                    t = t
+                    t = t,
+                    pvd=joinpath(vis.vtk_dir, vis.pvd_name)
                 )
+                # Optional particle point-cloud output (large files).
+                if vis.save_particle_points && (it == 1 || rem(it, vis.particle_vtk_every) == 0)
+                    save_particles(
+                        particles,
+                        pPhases;
+                        fname = joinpath(vis.vtk_dir, "particles_" * lpad("$it", 6, "0")),
+                        t = t,
+                    )
+                end
+                
+
             end
 
+            if vis.pictures == true
             # Make particles plottable
             p = particles.coords
             ppx, ppy = p
@@ -321,7 +540,7 @@ function main(li, origin, phases_GMG, igg; nx = 16, ny = 16, figdir = "figs2D", 
             clr = pPhases.data[:]
             # clr      = pT.data[:]
             idxv = particles.index.data[:]
-
+            
             # Make Makie figure
             ar = 3
             fig = Figure(size = (1200, 900), title = "t = $t")
@@ -347,8 +566,8 @@ function main(li, origin, phases_GMG, igg; nx = 16, ny = 16, figdir = "figs2D", 
             Colorbar(fig[2, 4], h4)
             linkaxes!(ax1, ax2, ax3, ax4)
             fig
-            save(joinpath(figdir, "$(it).png"), fig)
-
+            save(joinpath(vis.fig_dir, "$(it).png"), fig)
+            end
         end
         # ------------------------------
 
@@ -358,16 +577,35 @@ function main(li, origin, phases_GMG, igg; nx = 16, ny = 16, figdir = "figs2D", 
 end
 
 ## END OF MAIN SCRIPT ----------------------------------------------------------------
-do_vtk = true # set to true to generate VTK files for ParaView
-figdir = "Subduction2D_DYREL"
-n = 64
-nx, ny = n * 2, n
 
-li, origin, phases_GMG, T_GMG = GMG_subduction_2D(nx + 1, ny + 1)
+# MODEL SETUP
+n = 64
+nx, ny = n * 1, n
+# Choose grid type: original uniform grid (ref_grid=0) or non-uniform logistic grid (ref_grid=1)
+ref_grid = 1 # 0: original uniform grid, 1: non-uniform logistic grid
+
+# GENERATE GRID
+li, origin, phases_GMG, T_GMG, xvi, xci = GMG_subduction_2D_with_coords(
+    nx + 1,
+    ny + 1;
+    ref_grid = ref_grid,
+)
+
+# Initialize MPI grid (or not)
 igg = if !(JustRelax.MPI.Initialized()) # initialize (or not) MPI grid
     IGG(init_global_grid(nx, ny, 1; init_MPI = true)...)
 else
     igg
 end
 
-main(li, origin, phases_GMG, igg; figdir = figdir, nx = nx, ny = ny, do_vtk = do_vtk);
+main(
+    li,
+    origin,
+    phases_GMG,
+    igg;
+    xvi,
+    xci,
+    nx = nx,
+    ny = ny,
+    ref_grid = ref_grid,
+);

@@ -1,4 +1,5 @@
 ## 2D VISCO-ELASTIC STOKES SOLVER
+import JustRelax: apply_mask!
 """
     solve_DYREL!(stokes::JustRelax.StokesArrays, args...; kwargs)
 
@@ -59,6 +60,7 @@ function _solve_DYREL!(
         verbose_PH = true,
         verbose_DR = true,
         linear_viscosity = false,
+        apply_velocity_box = nothing,  # optional f(stokes) to enforce internal velocity boxes after each V update
         kwargs...,
     )
 
@@ -130,7 +132,7 @@ function _solve_DYREL!(
     DYREL!(dyrel, stokes, rheology, phase_ratios, grid.di, dt)
 
     # Powell-Hestenes iterations
-    for itPH in 1:1000
+    for itPH in 1:10#00
         # update buoyancy forces
         update_ρg!(ρg, phase_ratios, rheology, args)
 
@@ -174,6 +176,11 @@ function _solve_DYREL!(
             _di.center,
             _di.vertex,
         )
+
+        if apply_velocity_box !== nothing
+            apply_mask!(stokes.R.Rx, 0.0, stokes.mask_vbox_x)
+            apply_mask!(stokes.R.Ry, 0.0, stokes.mask_vbox_y)
+        end
 
         # compute pressure residual
         compute_residual_P!(
@@ -290,11 +297,22 @@ function _solve_DYREL!(
                 _di.vertex,
             )
 
+            if apply_velocity_box !== nothing
+                apply_mask!(stokes.R.Rx, 0.0, stokes.mask_vbox_x)
+                apply_mask!(stokes.R.Ry, 0.0, stokes.mask_vbox_y)
+            end
+
             # Damping-pong
             @parallel (@idx ni) update_V_damping!((dVxdτ, dVydτ), (stokes.R.Rx, stokes.R.Ry), (αVx, αVy))
 
             # PT updates
-            @parallel (@idx ni .+ 1) update_DR_V!((stokes.V.Vx, stokes.V.Vy), (dVxdτ, dVydτ), (βVx, βVy), (dτVx, dτVy))
+            @parallel (@idx ni .+ 1) update_DR_V!(
+                (stokes.V.Vx, stokes.V.Vy),
+                (dVxdτ, dVydτ),
+                (βVx, βVy),
+                (dτVx, dτVy),
+                (stokes.mask_vbox_x.mask, stokes.mask_vbox_y.mask),
+            )
             flow_bcs!(stokes, flow_bcs)
             update_halo!(@velocity(stokes)...)
 

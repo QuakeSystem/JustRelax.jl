@@ -1,11 +1,22 @@
+@inline _min_grid_spacing(di::NTuple{N, <:Real}) where {N} = minimum(di)
+@inline _min_grid_spacing(di::NTuple{N, <:AbstractVector}) where {N} = minimum(minimum.(di))
+@inline _min_grid_spacing(di::NamedTuple) = minimum(minimum.(di.vertex))
+
 function PTThermalCoeffs(
-        ::Type{CPUBackend}, K, ρCp, dt, di::NTuple, li::NTuple; ϵ = 1.0e-8, CFL = 0.9 / √3
+        ::Type{CPUBackend},
+        K,
+        ρCp,
+        dt,
+        di::Union{NTuple, NamedTuple},
+        li::NTuple;
+        ϵ = 1.0e-8,
+        CFL = 0.9 / √3,
     )
     return PTThermalCoeffs(K, ρCp, dt, di, li; ϵ = ϵ, CFL = CFL)
 end
 
-function PTThermalCoeffs(K, ρCp, dt, di, li::NTuple; ϵ = 1.0e-8, CFL = 0.9 / √3)
-    Vpdτ = min(di...) * CFL
+function PTThermalCoeffs(K, ρCp, dt, di::Union{NTuple, NamedTuple}, li::NTuple; ϵ = 1.0e-8, CFL = 0.9 / √3)
+    Vpdτ = _min_grid_spacing(di) * CFL
     max_lxyz = max(li...)
     max_lxyz2 = max_lxyz^2
     Re = @. π + √(π * π + ρCp * max_lxyz2 / K / dt) # Numerical Reynolds number
@@ -23,7 +34,7 @@ function PTThermalCoeffs(
         args,
         dt,
         ni,
-        di::NTuple,
+        di::Union{NTuple, NamedTuple},
         li::NTuple;
         ϵ = 1.0e-8,
         CFL = 0.9 / √3,
@@ -32,9 +43,17 @@ function PTThermalCoeffs(
 end
 
 function PTThermalCoeffs(
-        rheology, phase_ratios, args, dt, ni, di::NTuple, li::NTuple; ϵ = 1.0e-8, CFL = 0.9 / √3
+        rheology,
+        phase_ratios,
+        args,
+        dt,
+        ni,
+        di::Union{NTuple, NamedTuple},
+        li::NTuple;
+        ϵ = 1.0e-8,
+        CFL = 0.9 / √3,
     )
-    Vpdτ = min(di...) * CFL
+    Vpdτ = _min_grid_spacing(di) * CFL
     max_lxyz = max(li...)
     θr_dτ, dτ_ρ = @zeros(ni...), @zeros(ni...)
 
@@ -52,7 +71,7 @@ function PTThermalCoeffs(
         args,
         dt,
         ni,
-        di::NTuple,
+        di::Union{NTuple, NamedTuple},
         li::NTuple;
         ϵ = 1.0e-8,
         CFL = 0.9 / √3,
@@ -61,9 +80,16 @@ function PTThermalCoeffs(
 end
 
 function PTThermalCoeffs(
-        rheology::MaterialParams, args, dt, ni, di::NTuple, li::NTuple; ϵ = 1.0e-8, CFL = 0.9 / √3
+        rheology::MaterialParams,
+        args,
+        dt,
+        ni,
+        di::Union{NTuple, NamedTuple},
+        li::NTuple;
+        ϵ = 1.0e-8,
+        CFL = 0.9 / √3,
     )
-    Vpdτ = min(di...) * CFL
+    Vpdτ = _min_grid_spacing(di) * CFL
     max_lxyz = max(li...)
     θr_dτ, dτ_ρ = @zeros(ni...), @zeros(ni...)
 

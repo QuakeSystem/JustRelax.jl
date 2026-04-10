@@ -27,7 +27,9 @@ node_modules
 */*.h5
 
 *.png
+*.pvd
 *.vti
+*.vts
 *.vtm
 *.vtp
 *.vtr
