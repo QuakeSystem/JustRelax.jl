@@ -249,7 +249,7 @@ function _solve_DYREL!(
             vertex2center!(stokes.ε.xy_c, stokes.ε.xy)
 
             # Deviatoric stress
-            compute_stress_DRYEL!(stokes, rheology, phase_ratios, λ_relaxation_DR, dt)
+            compute_stress_DRYEL_serial!(stokes, rheology, phase_ratios, λ_relaxation_DR, dt)
             # update_halo!(stokes.λv)
             # update_halo!(stokes.τ.xx_v)
             # update_halo!(stokes.τ.yy_v)
@@ -281,10 +281,10 @@ function _solve_DYREL!(
                 _di...,
             )
             
-        if apply_velocity_box !== nothing
-            apply_mask!(stokes.R.Rx, 0.0, stokes.mask_vbox_x)
-            apply_mask!(stokes.R.Ry, 0.0, stokes.mask_vbox_y)
-        end
+            if apply_velocity_box !== nothing
+                apply_mask!(stokes.R.Rx, 0.0, stokes.mask_vbox_x)
+                apply_mask!(stokes.R.Ry, 0.0, stokes.mask_vbox_y)
+            end
 
             # Damping-pong
             @parallel (@idx ni) update_V_damping!((dVxdτ, dVydτ), (stokes.R.Rx, stokes.R.Ry), (αVx, αVy))
@@ -366,7 +366,7 @@ function _solve_DYREL!(
 
     # recompute all the DYREL variables
     DYREL!(dyrel, stokes, rheology, phase_ratios, di, dt)
-
+    
     return (; err_evo_it, err_evo_V, err_evo_P)
 
 end
