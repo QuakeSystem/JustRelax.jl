@@ -677,6 +677,8 @@ end
         εxzv_ij = av_clamped_yz_y(ε[5], Ic...)
         εxyv_ij = av_clamped_yz_z(ε[6], Ic...)
 
+        ε_plyzv_ij = ε_pl[4][I...]
+
         τxxv_ij = av_clamped_yz(τ[1], Ic...)
         τyyv_ij = av_clamped_yz(τ[2], Ic...)
         τzzv_ij = av_clamped_yz(τ[3], Ic...)
@@ -715,6 +717,11 @@ end
 
         # yield function @ vertex
         Fv = τIIv_ij - Cv * cosϕv - Pv_ij * sinϕv
+        # Fv = if Pv_ij ≥ 0
+        #     τIIv_ij - Cv * cosϕv - Pv_ij * sinϕv
+        # else
+        #     τIIv_ij - Cv
+        # end
         if is_pl && !iszero(τIIv_ij) && Fv > 0
             # stress correction @ vertex
             λv[1][I...] =
@@ -722,10 +729,13 @@ end
                 relλ * (max(Fv, 0.0) / (ηv_ij * dτ_rv + η_regv + volumev))
 
             dQdτyz = 0.5 * (τyzv_ij + dτyzv) / τIIv_ij
-            τyzv[I...] += dτyzv - 2.0 * ηv_ij * λv[1][I...] * dQdτyz * dτ_rv
+            ε_plyzv_ij = λv[1][I...] * dQdτyz
+            τyzv[I...] += @muladd dτyzv - 2.0 * ηv_ij * ε_plyzv_ij * dτ_rv
+            ε_pl[4][I...] = ε_plyzv_ij
         else
             # stress correction @ vertex
             τyzv[I...] += dτyzv
+            ε_pl[4][I...] = 0.0
         end
     end
 
@@ -753,6 +763,7 @@ end
         τyzv_old_ij = av_clamped_xz_x(τyzv_old, Ic...)
         τxzv_old_ij = τxzv_old[I...]
         τxyv_old_ij = av_clamped_xz_z(τxyv_old, Ic...)
+        ε_plxzv_ij = ε_pl[5][I...]
 
         # vertex parameters
         phase = @inbounds phase_xz[I...]
@@ -778,6 +789,11 @@ end
 
         # yield function @ vertex
         Fv = τIIv_ij - Cv * cosϕv - Pv_ij * sinϕv
+        # Fv = if Pv_ij ≥ 0
+        #     τIIv_ij - Cv * cosϕv - Pv_ij * sinϕv
+        # else
+        #     τIIv_ij - Cv
+        # end
         if is_pl && !iszero(τIIv_ij) && Fv > 0
             # stress correction @ vertex
             λv[2][I...] =
@@ -785,10 +801,13 @@ end
                 relλ * (max(Fv, 0.0) / (ηv_ij * dτ_rv + η_regv + volumev))
 
             dQdτxz = 0.5 * (τxzv_ij + dτxzv) / τIIv_ij
-            τxzv[I...] += dτxzv - 2.0 * ηv_ij * λv[2][I...] * dQdτxz * dτ_rv
+            ε_plxzv_ij = λv[2][I...] * dQdτxz
+            τxzv[I...] += @muladd dτxzv - 2.0 * ηv_ij * ε_plxzv_ij * dτ_rv
+            ε_pl[5][I...] = ε_plxzv_ij
         else
             # stress correction @ vertex
             τxzv[I...] += dτxzv
+            ε_pl[5][I...] = 0.0
         end
     end
 
@@ -804,6 +823,7 @@ end
         εyzv_ij = av_clamped_xy_x(ε[4], Ic...)
         εxzv_ij = av_clamped_xy_y(ε[5], Ic...)
         εxyv_ij = ε[6][I...]
+        ε_plxyv_ij = ε_pl[6][I...]
 
         τxxv_ij = av_clamped_xy(τ[1], Ic...)
         τyyv_ij = av_clamped_xy(τ[2], Ic...)
@@ -842,6 +862,11 @@ end
 
         # yield function @ vertex
         Fv = τIIv_ij - Cv * cosϕv - Pv_ij * sinϕv
+        # Fv = if Pv_ij ≥ 0
+        #     τIIv_ij - Cv * cosϕv - Pv_ij * sinϕv
+        # else
+        #     τIIv_ij - Cv
+        # end
         if is_pl && !iszero(τIIv_ij) && Fv > 0
             # stress correction @ vertex
             λv[3][I...] =
@@ -849,10 +874,13 @@ end
                 relλ * (max(Fv, 0.0) / (ηv_ij * dτ_rv + η_regv + volumev))
 
             dQdτxy = 0.5 * (τxyv_ij + dτxyv) / τIIv_ij
-            τxyv[I...] += dτxyv - 2.0 * ηv_ij * λv[3][I...] * dQdτxy * dτ_rv
+            ε_plxyv_ij = λv[3][I...] * dQdτxy
+            τxyv[I...] += @muladd  dτxyv - 2.0 * ηv_ij * ε_plxyv_ij * dτ_rv
+            ε_pl[6][I...] = ε_plxyv_ij
         else
             # stress correction @ vertex
             τxyv[I...] += dτxyv
+            ε_pl[6][I...] = 0.0
         end
     end
 
@@ -878,7 +906,11 @@ end
         τII_ij = second_invariant(dτij .+ τij)
         # yield function @ center
         F = τII_ij - C * cosϕ - Pr[I...] * sinϕ
-
+        # F = if Pr[I...] ≥ 0
+        #     τII_ij - C * cosϕ - Pr[I...] * sinϕ
+        # else
+        #     τII_ij - C
+        # end
         τII_ij = if is_pl && !iszero(τII_ij) && F > 0
             # stress correction @ center
             λ[I...] =
@@ -888,13 +920,19 @@ end
             εij_pl = λ[I...] .* dQdτij
             dτij = @. dτij - 2.0 * ηij * εij_pl * dτ_r
             τij = dτij .+ τij
-            setindex!.(τ, τij, I...)
-            setindex!.(ε_pl, εij_pl, I...)
+            Base.@nexprs 6 i -> begin
+                @inbounds τ[i][I...] = dτij[i] + τij[i]
+            end
+            Base.@nexprs 3 i -> begin
+                @inbounds ε_pl[i][I...] = εij_pl[i]
+            end
             τII[I...] = τII_ij = second_invariant(τij)
         else
             # stress correction @ center
             Base.@nexprs 6 i -> begin
                 @inbounds τ[i][I...] = dτij[i] .+ τij[i]
+            end
+            Base.@nexprs 3 i -> begin
                 @inbounds ε_pl[i][I...] = 0.0
             end
             τII[I...] = τII_ij
@@ -929,9 +967,9 @@ end
         phase_center,
         phase_vertex,
     )
-
     τxyv = τshear_v[1]
     τxyv_old = τshear_ov[1]
+    εij_plv = ε_pl[3]
     ni = size(Pr)
     Ic = clamped_indices(ni, I...)
 
@@ -966,18 +1004,24 @@ end
 
     # yield function @ center
     Fv = τIIv_ij - Cv * cosϕv - Pv_ij * sinϕv
-
+    # Fv = if Pv_ij ≥ 0
+    #     τIIv_ij - Cv * cosϕv - Pv_ij * sinϕv
+    # else
+    #     τIIv_ij - Cv
+    # end
     @inbounds if is_pl && !iszero(τIIv_ij)  && Fv > 0
         # stress correction @ vertex
         λv[I...] =
             @muladd (1.0 - relλ) * λv[I...] +
             relλ * (max(Fv, 0.0) / (ηv_ij * dτ_rv + η_regv + volumev))
         dQdτxy = 0.5 * (τxyv[I...] + dτxyv) / τIIv_ij
-        εij_pl = λv[I...] * dQdτxy
-        τxyv[I...] += @muladd dτxyv - 2.0 * ηv_ij * εij_pl * dτ_rv
+        εij_plv = λv[I...] * dQdτxy
+        τxyv[I...] += @muladd dτxyv - 2.0 * ηv_ij * εij_plv * dτ_rv
+        ε_pl[3][I...] = εij_plv
     else
         # stress correction @ vertex
         τxyv[I...] += dτxyv
+        ε_pl[3][I...] = 0.0
     end
 
     ## center
@@ -1002,7 +1046,11 @@ end
         τII_ij = second_invariant(dτij .+ τij)
         # yield function @ center
         F = @inbounds τII_ij - C * cosϕ - Pr[I...] * sinϕ
-
+        # F = if Pr[I...] ≥ 0
+        #     @inbounds τII_ij - C * cosϕ - Pr[I...] * sinϕ
+        # else
+        #     @inbounds τII_ij - C
+        # end
         τII_ij = @inbounds if is_pl && !iszero(τII_ij) && F > 0
             # stress correction @ center
             λ[I...] =
@@ -1015,6 +1063,8 @@ end
 
             Base.@nexprs 3 i -> begin
                 @inbounds τ[i][I...] = τij[i]
+            end
+            Base.@nexprs 2 i -> begin
                 @inbounds ε_pl[i][I...] = εij_pl[i]
             end
             τII_ij = second_invariant(τij)
@@ -1023,6 +1073,8 @@ end
 
             Base.@nexprs 3 i -> begin
                 @inbounds τ[i][I...] = dτij[i] .+ τij[i]
+            end
+            Base.@nexprs 2 i -> begin
                 @inbounds ε_pl[i][I...] = 0.0
             end
             τII_ij
@@ -1064,6 +1116,7 @@ end
     )
     τxyv = τshear_v[1]
     τxyv_old = τshear_ov[1]
+    εij_plv = ε_pl[3]
     ni = size(Pr)
     Ic = clamped_indices(ni, I...)
 
@@ -1102,16 +1155,24 @@ end
 
     # yield function @ center
     Fv = τIIv_ij - Cv * cosϕv - Pv_ij * sinϕv
+    # Fv = if Pv_ij ≥ 0
+    #     τIIv_ij - Cv * cosϕv - Pv_ij * sinϕv
+    # else
+    #     τIIv_ij - Cv
+    # end
     @inbounds if is_pl && !iszero(τIIv_ij) && Fv > 0
         # stress correction @ vertex
         λv[I...] =
             @muladd (1.0 - relλ) * λv[I...] +
             relλ * (max(Fv, 0.0) / (ηv_ij * dτ_rv * dt + η_regv + volumev))
         dQdτxy = 0.5 * (τxyv[I...] + dτxyv) / τIIv_ij
-        τxyv[I...] += @muladd dτxyv - 2.0 * ηv_ij * dt * λv[I...] * dQdτxy * dτ_rv
+        εij_plv = λv[I...] * dQdτxy
+        τxyv[I...] += @muladd dτxyv - 2.0 * ηv_ij * dt * εij_plv * dτ_rv
+        ε_pl[3][I...] = εij_plv
     else
         # stress correction @ vertex
         τxyv[I...] += dτxyv
+        ε_pl[3][I...] = 0.0
     end
 
     ## center
@@ -1138,7 +1199,11 @@ end
         τII_ij = second_invariant(dτij .+ τij)
         # yield function @ center
         F = @inbounds τII_ij - C * cosϕ - Pr[I...] * sinϕ
-
+        # F = if Pr[I...] ≥ 0
+        #     @inbounds τII_ij - C * cosϕ - Pr[I...] * sinϕ
+        # else
+        #     τII_ij - C
+        # end
         τII_ij = @inbounds if is_pl && !iszero(τII_ij) && F > 0
             # stress correction @ center
             λ[I...] =
@@ -1152,12 +1217,16 @@ end
 
             Base.@nexprs 3 i -> begin
                 @inbounds τ[i][I...] = τij[i]
+            end
+            Base.@nexprs 2 i -> begin
                 @inbounds ε_pl[i][I...] = εij_pl[i]
             end
             τII_ij = second_invariant(τij)
         else
             Base.@nexprs 3 i -> begin
                 @inbounds τ[i][I...] = dτij[i] .+ τij[i]
+            end
+            Base.@nexprs 2 i -> begin
                 @inbounds ε_pl[i][I...] = 0.0
             end
             τII_ij

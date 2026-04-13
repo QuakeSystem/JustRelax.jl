@@ -34,7 +34,7 @@ end
 
 # Load script dependencies
 using GeoParams
-using GLMakie
+using CairoMakie
 
 import ParallelStencil.INDICES
 const idx_j = INDICES[2]
@@ -267,7 +267,7 @@ end
 ## END OF MAIN SCRIPT ----------------------------------------------------------------
 
 # (Path)/folder where output data and figures are stored
-n = 100
+n = 64
 nx = n
 ny = n
 igg = if !(JustRelax.MPI.Initialized()) # initialize (or not) MPI grid

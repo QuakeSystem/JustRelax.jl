@@ -1,4 +1,4 @@
-using GeoParams, GLMakie, CellArrays
+using GeoParams, CairoMakie, CellArrays
 using JustRelax, JustRelax.JustRelax2D
 using ParallelStencil
 @init_parallel_stencil(Threads, Float64, 2)
@@ -196,7 +196,7 @@ function main(igg; nx = 64, ny = 64, figdir = "model_figs")
     return nothing
 end
 
-n = 256
+n = 64
 nx = n
 ny = n
 figdir = "output/ShearBands2D_StrainIncrement"

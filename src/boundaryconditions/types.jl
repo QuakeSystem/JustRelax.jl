@@ -37,11 +37,10 @@ struct VelocityBoundaryConditions{T,nD,C} <: AbstractFlowBoundaryConditions
     custom_slip::C
 
     function VelocityBoundaryConditions(;
-        no_slip::T=(left=false, right=false, top=false, bot=false),
-        free_slip::T=(left=true, right=true, top=true, bot=true),
-        free_surface::Bool=false,
-        custom_slip::C=nothing,
-    ) where {T,C}
+            no_slip::T = (left=false, right=false, top=false, bot=false),
+            free_slip::T = (left=true, right=true, top=true, bot=true),
+            free_surface::Bool = false,
+        ) where {T}
         @assert length(no_slip) === length(free_slip)
         check_flow_bcs(no_slip, free_slip)
         _validate_custom_slip(custom_slip)
