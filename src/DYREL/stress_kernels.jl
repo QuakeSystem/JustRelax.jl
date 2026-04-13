@@ -1,5 +1,15 @@
+<<<<<<< Updated upstream
 function compute_stress_DRYEL!(stokes, rheology, phase_ratios, λ_relaxation, dt)
     ni = size(phase_ratios.vertex)
+=======
+using Infiltrator
+function compute_stress_DRYEL!(stokes, rheology, phase_ratios, λ_relaxation, dt)
+    ni = size(phase_ratios.vertex)
+    if any(isnan.(stokes.viscosity.η_vep))
+        @infiltrate
+        error("NaN in η_vep")
+    end
+>>>>>>> Stashed changes
     @parallel (@idx ni) compute_stress_DRYEL!(
         (stokes.τ.xx, stokes.τ.yy, stokes.τ.xy_c),          # centers
         (stokes.τ.xx_v, stokes.τ.yy_v, stokes.τ.xy),        # vertices
@@ -17,6 +27,117 @@ function compute_stress_DRYEL!(stokes, rheology, phase_ratios, λ_relaxation, dt
         stokes.ΔPψ,
         rheology, phase_ratios.center, phase_ratios.vertex, λ_relaxation, dt
     )
+<<<<<<< Updated upstream
+=======
+    if any(isnan.(stokes.viscosity.η_vep))
+        @infiltrate
+        error("NaN in η_vep :(")
+    end
+    return nothing
+end
+
+function compute_stress_DRYEL_serial!(stokes, rheology, phase_ratios, λ_relaxation, dt)
+
+    ni = size(phase_ratios.center)
+
+    for I in CartesianIndices(ni)
+        compute_stress_DRYEL_point!(
+            (stokes.τ.xx, stokes.τ.yy, stokes.τ.xy_c),
+            (stokes.τ.xx_v, stokes.τ.yy_v, stokes.τ.xy),
+            (stokes.τ_o.xx, stokes.τ_o.yy, stokes.τ_o.xy_c),
+            (stokes.τ_o.xx_v, stokes.τ_o.yy_v, stokes.τ_o.xy),
+            stokes.τ.II,
+            (stokes.ε.xx, stokes.ε.yy, stokes.ε.xy),
+            (stokes.ε_pl.xx, stokes.ε_pl.yy, stokes.ε_pl.xy_c),
+            stokes.P,
+            stokes.λ,
+            stokes.λv,
+            stokes.viscosity.η,
+            stokes.viscosity.ηv,
+            stokes.viscosity.η_vep,
+            stokes.ΔPψ,
+            rheology,
+            phase_ratios.center,
+            phase_ratios.vertex,
+            λ_relaxation,
+            dt,
+            Tuple(I)...   # <-- key
+        )
+    end
+end
+
+function compute_stress_DRYEL_point!(
+    τ,
+    τ_v,
+    τ_o,
+    τ_ov,
+    τII,
+    ε,
+    ε_pl,
+    P,
+    λ,
+    λv,
+    η,
+    ηv,
+    η_vep,
+    ΔPψ,
+    rheology,
+    phase_ratios_center,
+    phase_ratios_vertex,
+    λ_relaxation,
+    dt,
+    I...
+)
+    Base.@propagate_inbounds @inline av(A) = sum(JustRelax2D._gather(A, I...)) / 4
+
+    ni = size(phase_ratios_center)
+
+    ## VERTEX CALCULATION
+    @inbounds begin
+        Ic = clamped_indices(ni, I...)
+        τij_o = τ_ov[1][I...], τ_ov[2][I...], τ_ov[3][I...]
+        εij = av_clamped(ε[1], Ic...), av_clamped(ε[2], Ic...), ε[3][I...]
+        λvij = λv[I...]
+        # ηij   = harm_clamped(η, Ic...)
+        ηij = ηv[I...]
+        Pij = av_clamped(P, Ic...)
+        ratio = phase_ratios_vertex[I...]
+        # compute local stress
+        τxx_I, τyy_I, τxy_I, _, _, _, _, λ_I, = compute_local_stress(εij, τij_o, ηij, Pij, λvij, λ_relaxation, rheology, ratio, dt)
+        if any(isnan.(λ_I))
+            @infiltrate
+            error("NaN in lambda")
+        end
+        # update arrays
+        τ_v[1][I...], τ_v[2][I...], τ_v[3][I...] = τxx_I, τyy_I, τxy_I
+        λv[I...] = λ_I
+
+        ## CENTER CALCULATION
+        if all(I .≤ ni)
+            τij_o = τ_o[1][I...], τ_o[2][I...], τ_o[3][I...]
+            εij = ε[1][I...], ε[2][I...], av(ε[3])
+            λij = λ[I...]
+            ηij = η[I...]
+            Pij = P[I...]
+            ratio = phase_ratios_center[I...]
+
+            # compute local stress
+            τxx_I, τyy_I, τxy_I, εxx_pl, εyy_pl, εxy_pl, τII_I, λ_I, ΔPψ_I, ηvep_I = compute_local_stress(εij, τij_o, ηij, Pij, λij, λ_relaxation, rheology, ratio, dt)
+            # update arrays
+            τ[1][I...], τ[2][I...], τ[3][I...] = τxx_I, τyy_I, τxy_I
+            ε_pl[1][I...], ε_pl[2][I...], ε_pl[3][I...] = εxx_pl, εyy_pl, εxy_pl
+            τII[I...] = τII_I
+            if any(isnan.(ηvep_I))
+                @infiltrate
+                error("NaN in η_vep")
+            end
+            η_vep[I...] = ηvep_I
+            λ[I...] = λ_I
+            ΔPψ[I...] = ΔPψ_I
+        end
+    end
+
+>>>>>>> Stashed changes
     return nothing
 end
 
@@ -119,10 +240,23 @@ end
     εij_eff = @. εij + τij_o * inv_2Gdt
 
     εII = second_invariant(εij_eff)
+<<<<<<< Updated upstream
 
     # early return if there is no deformation
     iszero(εII) && return (zero_tuple(εij)..., zero_tuple(εij)..., 0.0, 0.0, 0.0, η)
 
+=======
+    if any(isnan.(λ))
+        @infiltrate
+        error("NaN in λ")
+    end
+    if λ == NaN
+        @infiltrate
+        error("NaN in λ")
+    end
+    # early return if there is no deformation
+    iszero(εII) && return (zero_tuple(εij)..., zero_tuple(εij)..., 0.0, 0.0, 0.0, η)
+>>>>>>> Stashed changes
     # Plastic stress correction starts here
     τij = @. 2 * η_ve * εij_eff
     τII = second_invariant(τij)
@@ -143,6 +277,13 @@ end
     end
     # Effective viscoelastic-plastic viscosity
     η_vep = (τII - λ * η_ve) / (2 * εII)
+<<<<<<< Updated upstream
+=======
+    if any(isnan.(η_vep))
+        @infiltrate
+        error("NaN in η_vep")
+    end
+>>>>>>> Stashed changes
     # Update stress and plastic strain rate
     τij, τII, εij_pl, ΔPψ = if λ > 0
         τij = @. 2 * η_vep * εij_eff

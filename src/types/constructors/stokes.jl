@@ -181,8 +181,13 @@ function StokesArrays(ni::NTuple{N, Integer}) where {N}
     λ = @zeros(ni...)
     λv = @zeros(ni .+ 1...)
     ΔPψ = @zeros(ni...)
+<<<<<<< Updated upstream
     mask_vbox_x = JustRelax.Mask(size(R.Rx)...)
     mask_vbox_y = JustRelax.Mask(size(R.Ry)...)
+=======
+    mask_vbox_x = JustRelax.Mask(@zeros(size(R.Rx)...))
+    mask_vbox_y = JustRelax.Mask(@zeros(size(R.Ry)...))
+>>>>>>> Stashed changes
 
     return JustRelax.StokesArrays(
         P,
