@@ -273,6 +273,7 @@ function main(
     vis = prepare_visualisation(ni)
     # Physical properties using GeoParams ----------------
     rheology = init_rheology_simple_shear()
+    rsf_params = init_rsf_params_simple_shear(di_min)
     dt = 25.0e3 * 3600 * 24 * 365 # diffusive CFL timestep limiter
     dt_max = 25.0e3 * 3600 * 24 * 365 # diffusive CFL timestep limiter
     # ----------------------------------------------------
@@ -401,7 +402,7 @@ function main(
                 igg;
                 kwargs = (;
                     verbose_PH = true,
-                    verbose_DR = true,
+                    verbose_DR = false,
                     iterMax = 50.0e2,
                     rel_drop = 1.0e-2,
                     nout = 400,
@@ -409,6 +410,7 @@ function main(
                     λ_relaxation_DR = 1,
                     viscosity_relaxation = 1.0e-2,
                     apply_velocity_box = stokes -> apply_vel_boxes!(stokes, grid, vel_boxes_2D),
+                    rsf_params = rsf_params,
                     viscosity_cutoff = (1.0e18, 1.0e23),
                 )
             )
@@ -422,6 +424,7 @@ function main(
         rotate_stress!(pτ, stokes, particles, dt)
         # compute time step
         dt = compute_dt(stokes, di_min, dt_max) #* 0.8
+        println("Time step: $dt s")
         # compute strain rate 2nd invartian - for plotting
         tensor_invariant!(stokes.τ)
         tensor_invariant!(stokes.ε)
@@ -579,7 +582,7 @@ end
 ## END OF MAIN SCRIPT ----------------------------------------------------------------
 
 # MODEL SETUP
-n = 64
+n = 128
 nx, ny = n * 1, n
 # Choose grid type: original uniform grid (ref_grid=0) or non-uniform logistic grid (ref_grid=1)
 ref_grid = 1 # 0: original uniform grid, 1: non-uniform logistic grid

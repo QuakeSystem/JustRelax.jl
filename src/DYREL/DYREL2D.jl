@@ -61,6 +61,7 @@ function _solve_DYREL!(
         verbose_DR = true,
         linear_viscosity = false,
         apply_velocity_box = nothing,  # optional f(stokes) to enforce internal velocity boxes after each V update
+        rsf_params = nothing,          # optional RSF-like plasticity parameters
         kwargs...,
     )
 
@@ -148,7 +149,7 @@ function _solve_DYREL!(
         vertex2center!(stokes.ε.xy_c, stokes.ε.xy)
 
         # compute deviatoric stress
-        compute_stress_DRYEL!(stokes, rheology, phase_ratios, λ_relaxation_PH, dt) # not resetting λ in every PH iteration seems to work better
+        compute_stress_DRYEL!(stokes, rheology, phase_ratios, λ_relaxation_PH, dt; rsf_params = rsf_params) # not resetting λ in every PH iteration seems to work better
         # update_halo!(stokes.λv)
         # update_halo!(stokes.τ.xx_v)
         # update_halo!(stokes.τ.yy_v)
@@ -264,7 +265,7 @@ function _solve_DYREL!(
             )
 
             # Deviatoric stress
-            compute_stress_DRYEL!(stokes, rheology, phase_ratios, λ_relaxation_DR, dt)
+            compute_stress_DRYEL!(stokes, rheology, phase_ratios, λ_relaxation_DR, dt; rsf_params = rsf_params)
             # update_halo!(stokes.λv)
             # update_halo!(stokes.τ.xx_v)
             # update_halo!(stokes.τ.yy_v)

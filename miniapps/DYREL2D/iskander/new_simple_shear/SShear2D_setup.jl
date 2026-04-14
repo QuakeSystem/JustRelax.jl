@@ -212,7 +212,7 @@ function GMG_subduction_2D_with_coords(
         Temp,
         Grid2D;
         xlim = (-10.0, 10.0),
-        zlim = (-25.0, -24.0),
+        zlim = (-25.0, -24.5),
         Origin = nothing, StrikeAngle = 0, DipAngle = 0,
         phase = LithosphericPhases(Layers = [], Phases = [3]),
     )
@@ -222,7 +222,7 @@ function GMG_subduction_2D_with_coords(
         Temp,
         Grid2D;
         xlim = (-7.5, 7.5),
-        zlim = (-25.0, -24.0),
+        zlim = (-25.0, -24.5),
         Origin = nothing, StrikeAngle = 0, DipAngle = 0,
         phase = LithosphericPhases(Layers = [], Phases = [2]),
     )

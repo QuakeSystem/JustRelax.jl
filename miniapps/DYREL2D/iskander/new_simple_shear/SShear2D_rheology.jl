@@ -29,7 +29,7 @@ function init_rheology_nonNewtonian_plastic()
             el,
             disl_wet_olivine,
             diff_wet_olivine,
-            DruckerPrager_regularised(; C = C_wet_olivine, ϕ = ϕ_wet_olivine, η_vp = η_reg, Ψ = 0.0), # non-regularized plasticity
+            #DruckerPrager_regularised(; C = C_wet_olivine, ϕ = ϕ_wet_olivine, η_vp = η_reg, Ψ = 0.0), # non-regularized plasticity
         )
     )
     rheologies = (;lithosphere_rheology)
@@ -46,7 +46,7 @@ function init_rheology_simple_shear()
     media_rheology = CompositeRheology(
         (
             el,
-            DruckerPrager_regularised(; C = C_wet_olivine, ϕ = ϕ_wet_olivine, η_vp = η_reg, Ψ = 0.0), # non-regularized plasticity
+            #DruckerPrager_regularised(; C = C_wet_olivine, ϕ = ϕ_wet_olivine, η_vp = η_reg, Ψ = 0.0), # non-regularized plasticity
         )
     )
     ϕ_wet_olivine = 5 #asind(0.1)
@@ -54,12 +54,28 @@ function init_rheology_simple_shear()
     vel_weak_rheology = CompositeRheology(
         (
             el,
-            DruckerPrager_regularised(; C = C_wet_olivine, ϕ = ϕ_wet_olivine, η_vp = η_reg, Ψ = 0.0), # non-regularized plasticity
+            #DruckerPrager_regularised(; C = C_wet_olivine, ϕ = ϕ_wet_olivine, η_vp = η_reg, Ψ = 0.0), # non-regularized plasticity
         )
     )
     vel_strength_rheology =vel_weak_rheology;
     rheologies = (;media_rheology, vel_weak_rheology, vel_strength_rheology)
     return init_rheologies(rheologies)
+end
+
+function init_rsf_params_simple_shear(di_min)
+    # Phase-dependent RSF-like parameters used by the DYREL stress update hook.
+    # Phase ordering follows init_rheologies:
+    # 1: media, 2: velocity weakening, 3: velocity strengthening, 4: sticky air.
+    return (
+        active = (true, true, true, false),              # phase-wise RSF activation
+        mu_d = (0.5, 0.1, 0.7, 0.0),          # dynamic friction coefficient
+        mu_s = (0.7, 0.001, 0.3, 0.0),          # static friction coefficient
+        sigma_c = (1.0e7, 0.0e0, 0e0, 0.0),    # compressive strength [Pa]
+        Vc = (4.0e-9, 4.0e-9, 4.0e-9, 4.0e-9),   # characteristic slip velocity [m/s]
+        D = (di_min, di_min, di_min, di_min),    # characteristic length scale [m]
+        maxit = (8, 8, 8, 8),                    # fixed-point iterations
+        rtol = (1.0e-3, 1.0e-3, 1.0e-3, 1.0e-3), # local convergence tolerance
+    )
 end
 
 function init_rheology_linear()
@@ -80,7 +96,7 @@ function init_rheologies(rheologies)
         SetMaterialParams(;
             Name = "Media",
             Phase = 1,
-            Density = ConstantDensity(; ρ = 3.2e3),
+            Density = ConstantDensity(; ρ = 2.7e3),
             HeatCapacity = ConstantHeatCapacity(; Cp = Cp),
             Conductivity = ConstantConductivity(; k = 2.5),
             CompositeRheology = rheologies.media_rheology,
@@ -89,7 +105,7 @@ function init_rheologies(rheologies)
         # Name              = "Velocity weakening",
         SetMaterialParams(;
             Phase = 2,
-            Density = PT_Density(; ρ0 = 3.2e3, α = α, β = 0.0e0, T0 = 273 + 1474),
+            Density = PT_Density(; ρ0 = 2.7e3, α = α, β = 0.0e0, T0 = 273 + 1474),
             HeatCapacity = ConstantHeatCapacity(; Cp = Cp),
             Conductivity = ConstantConductivity(; k = 2.5),
             CompositeRheology = rheologies.vel_weak_rheology,
@@ -99,7 +115,7 @@ function init_rheologies(rheologies)
         # Name              = "Velocity strengthening",
         SetMaterialParams(;
             Phase = 3,
-            Density = ConstantDensity(; ρ = 3.2e3),
+            Density = ConstantDensity(; ρ = 2.7e3),
             HeatCapacity = ConstantHeatCapacity(; Cp = Cp),
             Conductivity = ConstantConductivity(; k = 2.5),
             CompositeRheology = rheologies.vel_strength_rheology,
