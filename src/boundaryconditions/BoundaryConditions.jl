@@ -3,6 +3,7 @@ include("free_slip.jl")
 include("free_surface.jl")
 include("no_slip.jl")
 include("pure_shear.jl")
+include("periodic.jl")
 
 @inline bc_index(x::T) where {T <: AbstractArray{_T, 2} where {_T}} = max(size(x)...)
 @inline bc_index(x::T) where {T <: AbstractArray{_T, 3} where {_T}} =
@@ -31,6 +32,7 @@ end
 function thermal_bcs!(T::AbstractArray, bcs::TemperatureBoundaryConditions)
     n = bc_index(T)
 
+    bcs.periodic_x && (@parallel (@idx n) periodic_x!(T))
     # no flux boundary conditions
     do_bc(bcs.no_flux) && (@parallel (@idx n) free_slip!(T, bcs.no_flux))
 
@@ -65,6 +67,7 @@ end
 
 function _flow_bcs!(bcs, V)
     n = bc_index(V)
+    bcs.periodic_x && (@parallel (@idx n) periodic_x!(V...))
     # no slip boundary conditions
     # do_bc(bcs.no_slip) && (@parallel (@idx n) no_slip!(V..., bcs.no_slip))
     if do_bc(bcs.no_slip)

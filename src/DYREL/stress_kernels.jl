@@ -1,4 +1,12 @@
-function compute_stress_DRYEL!(stokes, rheology, phase_ratios, λ_relaxation, dt; rsf_params = nothing)
+function compute_stress_DRYEL!(
+        stokes,
+        rheology,
+        phase_ratios,
+        λ_relaxation,
+        dt;
+        rsf_params = nothing,
+        periodic_x::Bool = false,
+    )
     ni = size(phase_ratios.vertex)
     @parallel (@idx ni) compute_stress_DRYEL!(
         (stokes.τ.xx, stokes.τ.yy, stokes.τ.xy_c),          # centers
@@ -15,9 +23,18 @@ function compute_stress_DRYEL!(stokes, rheology, phase_ratios, λ_relaxation, dt
         stokes.viscosity.ηv,
         stokes.viscosity.η_vep,
         stokes.ΔPψ,
-        rheology, phase_ratios.center, phase_ratios.vertex, λ_relaxation, dt, rsf_params
+        rheology, phase_ratios.center, phase_ratios.vertex, λ_relaxation, dt, rsf_params, periodic_x
     )
     return nothing
+end
+
+Base.@propagate_inbounds @inline function periodic_indices_x(ni::NTuple{2, Integer}, i, j)
+    nx, ny = ni
+    i0 = mod1(i - 1, nx)
+    ic = mod1(i, nx)
+    j0 = clamp(j - 1, 1, ny)
+    jc = clamp(j, 1, ny)
+    return i0, j0, ic, jc
 end
 
 @inline _rsf_pick(v::Number, ::Int) = v
@@ -40,7 +57,7 @@ end
         ηv,
         η_vep,
         ΔPψ,
-        rheology, phase_ratios_center, phase_ratios_vertex, λ_relaxation, dt, rsf_params
+        rheology, phase_ratios_center, phase_ratios_vertex, λ_relaxation, dt, rsf_params, periodic_x
     )
 
     Base.@propagate_inbounds @inline av(A) = sum(JustRelax2D._gather(A, I...)) / 4
@@ -49,7 +66,7 @@ end
 
     ## VERTEX CALCULATION
     @inbounds begin
-        Ic = clamped_indices(ni, I...)
+        Ic = periodic_x ? periodic_indices_x(ni, I...) : clamped_indices(ni, I...)
         τij_o = τ_ov[1][I...], τ_ov[2][I...], τ_ov[3][I...]
         εij = av_clamped(ε[1], Ic...), av_clamped(ε[2], Ic...), ε[3][I...]
         λvij = λv[I...]
@@ -150,7 +167,6 @@ end
         D = _rsf_pick(rsf_params.D, phase)
         maxit = Int(_rsf_pick(rsf_params.maxit, phase))
         rtol = _rsf_pick(rsf_params.rtol, phase)
-
         λ_it = max(λ, 0.0)
         λ_new = 0.0
         for _ in 1:maxit

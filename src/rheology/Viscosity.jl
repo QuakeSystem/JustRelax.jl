@@ -1,5 +1,12 @@
 # # Traits
 
+const PERIODIC_X_VISCOSITY_ARGS = Ref(false)
+
+@inline function set_periodic_x_viscosity_args!(flag::Bool)
+    PERIODIC_X_VISCOSITY_ARGS[] = flag
+    return nothing
+end
+
 # without phase ratios
 @inline function update_viscosity_εII!(
         stokes::JustRelax.StokesArrays, args, rheology, cutoff; relaxation = 1.0e0
@@ -511,10 +518,16 @@ end
 end
 
 @inline function local_viscosity_args_vertex(args, i, j)
-    # clamp indices
+    # clamp/wrap indices
     nx, ny = size(args[1])
-    il = max(i - 1, 1)  # left
-    ir = min(i, nx)   # right
+    if PERIODIC_X_VISCOSITY_ARGS[]
+        # periodic-x mapping from vertex index i -> neighboring center columns
+        ir = mod1(i, nx)
+        il = mod1(i - 1, nx)
+    else
+        il = max(i - 1, 1)  # left
+        ir = min(i, nx)   # right
+    end
     jb = max(j - 1, 1)  # bottom
     jt = min(j, ny)   # top
     # average values at cell centers surrounding vertex
@@ -529,10 +542,15 @@ end
 end
 
 @inline function local_viscosity_args_vertex(args, i, j, k)
-    # clamp indices
+    # clamp/wrap indices
     nx, ny, nz = size(args[1])
-    il = max(i - 1, 1)  # left
-    ir = min(i, nx)   # right
+    if PERIODIC_X_VISCOSITY_ARGS[]
+        ir = mod1(i, nx)
+        il = mod1(i - 1, nx)
+    else
+        il = max(i - 1, 1)  # left
+        ir = min(i, nx)   # right
+    end
     jb = max(j - 1, 1)  # bottom
     jt = min(j, ny)   # top
     kf = max(k - 1, 1)  # front

@@ -187,7 +187,7 @@ Adapt.@adapt_structure StokesArrays
 function StokesArrays(::Type{CPUBackend}, ni::Vararg{Integer, N}) where {N}
     return StokesArrays(tuple(ni...))
 end
-StokesArrays(::Type{CPUBackend}, ni::NTuple{N, Integer}) where {N} = StokesArrays(ni)
+StokesArrays(::Type{CPUBackend}, ni::NTuple{N, Integer}) where {N} = StokesArrays(ni; periodic_x = false)
 StokesArrays(ni::Vararg{Integer, N}) where {N} = StokesArrays(tuple(ni...))
 function StokesArrays(::Number, ::Number)
     throw(ArgumentError("StokesArrays dimensions must be given as integers"))

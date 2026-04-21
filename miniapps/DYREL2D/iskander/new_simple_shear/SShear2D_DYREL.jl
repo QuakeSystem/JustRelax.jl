@@ -1,6 +1,6 @@
 # Load script dependencies
 using GeoParams#, CairoMakie
-
+using Printf
 const isCUDA = false
 
 @static if isCUDA
@@ -56,6 +56,133 @@ function copyinn_x!(A, B)
     return @parallel f_x(A, B)
 end
 
+function wrap_particles_x!(particles, xvi)
+    xmin = xvi[1][1]
+    xmax = xvi[1][end]
+    lx = xmax - xmin
+    ppx = particles.coords[1].data
+    idx = particles.index.data
+
+    @inbounds for k in eachindex(idx)
+        if idx[k]
+            x = ppx[k]
+            if x < xmin
+                ppx[k] = x + lx
+            elseif x >= xmax
+                ppx[k] = x - lx
+            end
+        end
+    end
+    return nothing
+end
+
+function enforce_periodic_phase_ratios_x!(phase_ratios)
+    @views phase_ratios.vertex[end, :] .= phase_ratios.vertex[1, :]
+    return nothing
+end
+
+function residuals_to_center(Rx::AbstractMatrix, Ry::AbstractMatrix, RP::AbstractMatrix)
+    nx, ny = size(RP)
+    Rx_c = zeros(eltype(RP), nx, ny)
+    Ry_c = zeros(eltype(RP), nx, ny)
+
+    @inbounds for j in 1:ny
+        for i in 1:nx
+            il = max(i - 1, 1)
+            ir = min(i, size(Rx, 1))
+            Rx_c[i, j] = 0.5 * (Rx[il, j] + Rx[ir, j])
+        end
+    end
+
+    @inbounds for j in 1:ny
+        jb = max(j - 1, 1)
+        jt = min(j, size(Ry, 2))
+        for i in 1:nx
+            Ry_c[i, j] = 0.5 * (Ry[i, jb] + Ry[i, jt])
+        end
+    end
+
+    Rmag_c = @. sqrt(Rx_c^2 + Ry_c^2 + RP^2)
+    return Rx_c, Ry_c, Rmag_c
+end
+
+@inline _rsf_pick(v::Number, ::Int) = v
+@inline _rsf_pick(v::NTuple{N, <:Number}, phase::Int) where {N} = v[phase]
+@inline _rsf_pick(v::AbstractVector{<:Number}, phase::Int) = v[phase]
+
+function compute_mu_eff_field(λ::AbstractMatrix, phase_center, rsf_params)
+    nx, ny = size(λ)
+    μeff = zeros(eltype(λ), nx, ny)
+    Vp = zeros(eltype(λ), nx, ny)
+    rsf_params === nothing && return μeff, Vp
+
+    @inbounds for j in 1:ny, i in 1:nx
+        ratios = phase_center[i, j]
+        phase = argmax(ratios)
+        μs = _rsf_pick(rsf_params.mu_s, phase)
+        μd = clamp(_rsf_pick(rsf_params.mu_d, phase), 0.0, μs)
+        Vc = _rsf_pick(rsf_params.Vc, phase)
+        D = _rsf_pick(rsf_params.D, phase)
+        λij = max(λ[i, j], 0.0)
+        Vp[i, j] = 2.0 * D * λij
+        μeff[i, j] = μd + (μs - μd) / (1.0 + Vp[i, j] / Vc)
+    end
+    return μeff, Vp
+end
+
+function sanitize_particle_coords!(particles, xvi; periodic_x = false)
+    ppx = particles.coords[1].data
+    ppy = particles.coords[2].data
+    idx = particles.index.data
+
+    xmin, xmax = xvi[1][1], xvi[1][end]
+    ymin, ymax = xvi[2][1], xvi[2][end]
+    lx = xmax - xmin
+    ϵx = max(eps(Float64), 1.0e-12 * lx)
+    ϵy = max(eps(Float64), 1.0e-12 * (ymax - ymin))
+    xmid = 0.5 * (xmin + xmax)
+    ymid = 0.5 * (ymin + ymax)
+
+    for I in eachindex(idx)
+        idx[I] <= 0 && continue
+
+        x = ppx[I]
+        y = ppy[I]
+
+        if !isfinite(x)
+            x = xmid
+        end
+        if !isfinite(y)
+            y = ymid
+        end
+
+        if periodic_x
+            if x < xmin || x ≥ xmax
+                x = xmin + mod(x - xmin, lx)
+            end
+        else
+            x = clamp(x, xmin + ϵx, xmax - ϵx)
+        end
+
+        y = clamp(y, ymin + ϵy, ymax - ϵy)
+
+        ppx[I] = x
+        ppy[I] = y
+    end
+    return nothing
+end
+
+@views function apply_top_shear_bc!(stokes, Vtop)
+    Vx, Vy = @velocity(stokes)
+    # Enforce full-width top tangential velocity and zero normal velocity.
+    if isnothing(Vtop)
+        return nothing
+    end
+    Vx[:, end] .= 2 * Vtop .- Vx[:, end - 1]
+    Vy[:, end] .= 0.0
+    return nothing
+end
+
 # Initial pressure profile - not accurate
 @parallel function init_P!(P, ρg, z)
     @all(P) = abs(@all(ρg) * @all_k(z)) * <(@all_k(z), 0.0)
@@ -78,6 +205,12 @@ function prepare_visualisation(ni)
         vtk_dir = joinpath(figdir, "vtk")
         if isfile(joinpath(vtk_dir, "$pvd_name.pvd"))
             rm(joinpath(vtk_dir, "$pvd_name.pvd"))
+            # preview
+            # println.(filter(f->startswith(f,"vtk_"), readdir(vtk_dir)))
+            # delete
+            for f in filter(f->startswith(f,"vtk_"), readdir(vtk_dir))
+                rm(joinpath(vtk_dir, f); force=true)
+            end
         end
         take(vtk_dir)
         checkpoint = joinpath(figdir, "checkpoint")
@@ -240,6 +373,11 @@ function apply_vel_boxes!(
 end
 ## END OF HELPER FUNCTION ------------------------------------------------------------
 
+
+
+
+
+
 ## BEGIN OF MAIN SCRIPT --------------------------------------------------------------
 function main(
     li,
@@ -251,6 +389,9 @@ function main(
     nx = 16,
     ny = 16,
     ref_grid = 0,
+    periodic_x = false,
+    disable_injection_when_periodic = false,
+    Vtop = nothing,
 )
 
     # Physical domain ------------------------------------
@@ -274,6 +415,7 @@ function main(
     # Physical properties using GeoParams ----------------
     rheology = init_rheology_simple_shear()
     rsf_params = init_rsf_params_simple_shear(di_min)
+    # rsf_params = nothing
     dt = 25.0e3 * 3600 * 24 * 365 # diffusive CFL timestep limiter
     dt_max = 25.0e3 * 3600 * 24 * 365 # diffusive CFL timestep limiter
     # ----------------------------------------------------
@@ -286,7 +428,14 @@ function main(
         backend_JP, nxcell, max_xcell, min_xcell, grid.xi_vel...
     )
     subgrid_arrays = SubgridDiffusionCellArrays(particles)
-    # grid_vxi = velocity_grids(xci, xvi, di)
+    grid_vxi_raw = velocity_grids(xci, xvi, di)
+    grid_vxi = ntuple(Val(length(grid_vxi_raw))) do i
+        Base.@_inline_meta
+        ntuple(Val(length(grid_vxi_raw[i]))) do j
+            Base.@_inline_meta
+            collect(grid_vxi_raw[i][j])
+        end
+    end
     # material phase & temperature
     pPhases, pT = init_cell_arrays(particles, Val(2))
 
@@ -300,6 +449,7 @@ function main(
     phase_ratios = phase_ratios = PhaseRatios(backend_JP, length(rheology), ni)
     init_phases!(pPhases, phases_device, particles, xvi)
     update_phase_ratios!(phase_ratios, particles, pPhases)
+    periodic_x && enforce_periodic_phase_ratios_x!(phase_ratios)
     # ----------------------------------------------------
 
     # STOKES ---------------------------------------------
@@ -312,9 +462,10 @@ function main(
     Tbot = maximum(T_GMG)
     thermal = ThermalArrays(backend, ni)
     @views thermal.T[2:(end - 1), :] .= PTArray(backend)(T_GMG)
-    thermal_bc = TemperatureBoundaryConditions(;
-        no_flux = (left = true, right = true, top = false, bot = false),
-    )
+    thermal_no_flux = periodic_x ?
+        (left = false, right = false, top = false, bot = false) :
+        (left = true, right = true, top = false, bot = false)
+    thermal_bc = TemperatureBoundaryConditions(; no_flux = thermal_no_flux, periodic_x = periodic_x)
     thermal_bcs!(thermal, thermal_bc)
     @views thermal.T[:, end] .= Ttop
     @views thermal.T[:, 1] .= Tbot
@@ -336,7 +487,7 @@ function main(
     stokes.P .+= P_ref
     # Rheology
     args0 = (T = thermal.Tc, P = stokes.P, dt = Inf)
-    viscosity_cutoff = (1.0e18, 1.0e23)
+    viscosity_cutoff = (1.0e18, 1.0e24)
     compute_viscosity!(stokes, phase_ratios, args0, rheology, viscosity_cutoff)
     center2vertex!(stokes.viscosity.ηv, stokes.viscosity.η)
     # ----------------------------------------------------
@@ -347,12 +498,35 @@ function main(
     )
 
     # Boundary conditions
+    flow_no_slip = periodic_x ?
+        (left = false, right = false, top = false, bot = true) :
+        (left = false, right = false, top = false, bot = true)
+    flow_free_slip = periodic_x ?
+        (left = false, right = false, top = true, bot = false) :
+        (left = true, right = true, top = true, bot = false)
     flow_bcs = VelocityBoundaryConditions(;
-        free_slip = (left = true, right = true, top = true, bot = true),
+        no_slip = flow_no_slip,
+        free_slip = flow_free_slip,
         free_surface = false,
+        periodic_x = periodic_x,
     )
     flow_bcs!(stokes, flow_bcs) # apply boundary conditions
+    apply_top_shear_bc!(stokes, Vtop)
     update_halo!(@velocity(stokes)...)
+
+    ## Boundary conditions
+    #     εbg = 1.0e-14 # background strain-rate
+    # flow_bcs = VelocityBoundaryConditions(;
+    #     free_slip = (left = true, right = true, top = true, bot = true),
+    #     no_slip = (left = false, right = false, top = false, bot = false),
+    # )
+    # stokes.V.Vx .= PTArray(backend_JR)([ x * εbg for x in xvi[1], _ in 1:(ny + 2)])
+    # stokes.V.Vy .= PTArray(backend_JR)([-y * εbg for _ in 1:(nx + 2), y in xvi[2]])
+    # flow_bcs!(stokes, flow_bcs)
+    # update_halo!(@velocity(stokes)...)
+
+
+
 
     T_buffer = @zeros(ni .+ 1)
     Told_buffer = similar(T_buffer)
@@ -365,11 +539,12 @@ function main(
     τxx_v = @zeros(ni .+ 1...)
     τyy_v = @zeros(ni .+ 1...)
 
-    dyrel = DYREL(backend, stokes, rheology, phase_ratios, di1, dt; ϵ = 1.0e-3)
+    dyrel = DYREL(backend, stokes, rheology, phase_ratios, di1, dt; ϵ = 1.0e-3, periodic_x = periodic_x)
 
     # Time loop
     t, it = 0.0, 0
     while it < 100 #000 # run only for 5 Myrs
+        periodic_x && wrap_particles_x!(particles, xvi)
 
         # interpolate fields from particle to grid vertices
         particle2grid!(T_buffer, pT, particles)
@@ -382,9 +557,10 @@ function main(
         # interpolate stress back to the grid
         stress2grid!(stokes, pτ, particles)
 
-        # Prescribe velocity boxes before solve so solver finds a solution consistent with them
-        apply_vel_boxes!(stokes, grid, vel_boxes_2D)
-        update_halo!(@velocity(stokes)...)
+        # Prescribe top shear boundary before solve.
+        # apply_vel_boxes!(stokes, grid, vel_boxes_2D)
+        # apply_top_shear_bc!(stokes, Vtop)
+        # update_halo!(@velocity(stokes)...)
 
         # Stokes solver ----------------
         args = (; T = thermal.Tc, P = stokes.P, dt = Inf)
@@ -403,13 +579,20 @@ function main(
                 kwargs = (;
                     verbose_PH = true,
                     verbose_DR = false,
-                    iterMax = 50.0e2,
+                    iterMax = 50.0e3,
                     rel_drop = 1.0e-2,
                     nout = 400,
                     λ_relaxation_PH = 1,
                     λ_relaxation_DR = 1,
                     viscosity_relaxation = 1.0e-2,
-                    apply_velocity_box = stokes -> apply_vel_boxes!(stokes, grid, vel_boxes_2D),
+                    apply_velocity_box = stokes -> begin
+                        apply_vel_boxes!(stokes, grid, vel_boxes_2D)
+                        flow_bcs!(stokes, flow_bcs)
+                        apply_top_shear_bc!(stokes, Vtop)
+
+                        # pureshear_bc!(stokes, xci, xvi, εbg, backend_JR)
+                        # flow_bcs!(stokes, flow_bcs)
+                    end,
                     rsf_params = rsf_params,
                     viscosity_cutoff = (1.0e18, 1.0e23),
                 )
@@ -424,6 +607,7 @@ function main(
         rotate_stress!(pτ, stokes, particles, dt)
         # compute time step
         dt = compute_dt(stokes, di_min, dt_max) #* 0.8
+        dt= 1e7
         println("Time step: $dt s")
         # compute strain rate 2nd invartian - for plotting
         tensor_invariant!(stokes.τ)
@@ -459,22 +643,27 @@ function main(
 
         # Advection --------------------
         # advect particles in space
-        advection_MQS!(particles, RungeKutta2(), @velocity(stokes), dt)
+        advection_MQS!(particles, RungeKutta2(), @velocity(stokes), grid_vxi, dt, particles.di.velocity)
+        sanitize_particle_coords!(particles, xvi; periodic_x = periodic_x)
+        periodic_x && wrap_particles_x!(particles, xvi)
         # advect particles in memory
         move_particles!(particles, particle_args)
         # check if we need to inject particles
         # need stresses on the vertices for injection purposes
         # center2vertex!(τxx_v, stokes.τ.xx)
         # center2vertex!(τyy_v, stokes.τ.yy)
-        inject_particles_phase!(
-            particles,
-            pPhases,
-            particle_args_reduced,
-            (T_buffer, stokes.τ.xx_v, stokes.τ.yy_v, stokes.τ.xy, stokes.ω.xy)
-        )
+        if !(periodic_x && disable_injection_when_periodic)
+            inject_particles_phase!(
+                particles,
+                pPhases,
+                particle_args_reduced,
+                (T_buffer, stokes.τ.xx_v, stokes.τ.yy_v, stokes.τ.xy, stokes.ω.xy)
+            )
+        end
 
         # update phase ratios
         update_phase_ratios!(phase_ratios, particles, pPhases)
+        periodic_x && enforce_periodic_phase_ratios_x!(phase_ratios)
 
         @show it += 1
         t += dt
@@ -502,9 +691,19 @@ function main(
                     Vy = Array(Vy_v),
                     phase_vertex = phase_vertex,
                 )
+                RP_c = Array(stokes.R.RP)
+                Rx_c, Ry_c, Rmag_c = residuals_to_center(Array(stokes.R.Rx), Array(stokes.R.Ry), RP_c)
+                μ_eff_c, Vp_c = compute_mu_eff_field(Array(stokes.λ), Array(phase_ratios.center), rsf_params)
                 data_c = (;
                     P   = Array(stokes.P),
-                    η   = Array(η_vep),
+                    η_vep   = Array(η_vep),
+                    η   = Array(η),
+                    RP  = RP_c,
+                    Rx_c = Rx_c,
+                    Ry_c = Ry_c,
+                    R_magnitude = Rmag_c,
+                    μ_eff = μ_eff_c,
+                    Vp = Vp_c,
                 )
                 velocity_v = (
                     Array(Vx_v),
@@ -521,6 +720,7 @@ function main(
                     t = t,
                     pvd=joinpath(vis.vtk_dir, vis.pvd_name)
                 )
+                println("Saved VTK file at $(joinpath(vis.vtk_dir, vis.pvd_name))")
                 # Optional particle point-cloud output (large files).
                 if vis.save_particle_points && (it == 1 || rem(it, vis.particle_vtk_every) == 0)
                     save_particles(
@@ -582,10 +782,14 @@ end
 ## END OF MAIN SCRIPT ----------------------------------------------------------------
 
 # MODEL SETUP
-n = 128
+n = 64
 nx, ny = n * 1, n
 # Choose grid type: original uniform grid (ref_grid=0) or non-uniform logistic grid (ref_grid=1)
-ref_grid = 1 # 0: original uniform grid, 1: non-uniform logistic grid
+ref_grid = 0 # 0: original uniform grid, 1: non-uniform logistic grid
+periodic_x = true
+disable_injection_when_periodic = false
+Vtop = 4.0e-9
+# Vtop = nothing
 
 # GENERATE GRID
 li, origin, phases_GMG, T_GMG, xvi, xci = GMG_subduction_2D_with_coords(
@@ -611,4 +815,7 @@ main(
     nx = nx,
     ny = ny,
     ref_grid = ref_grid,
+    periodic_x = periodic_x,
+    disable_injection_when_periodic = disable_injection_when_periodic,
+    Vtop = Vtop,
 );

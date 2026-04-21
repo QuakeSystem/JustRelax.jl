@@ -1,5 +1,33 @@
 ## 2D VISCO-ELASTIC STOKES SOLVER
 import JustRelax: apply_mask!
+
+@inline is_periodic_x(flow_bcs) = hasproperty(flow_bcs, :periodic_x) && getproperty(flow_bcs, :periodic_x)
+
+@inline function enforce_periodic_solver_fields_x!(stokes, flow_bcs)
+    is_periodic_x(flow_bcs) || return nothing
+    # IMPORTANT:
+    # - Do NOT overwrite cell-centered columns (P, τ.xx, τ.yy, ΔPψ, τ_o centers):
+    #   first/last center DOFs are physical neighbors in a periodic domain, not
+    #   duplicate seam nodes.
+    # - Only synchronize seam-duplicated vertex-like arrays.
+    @views begin
+        stokes.τ.xy[end, :] .= stokes.τ.xy[1, :]
+        stokes.τ_o.xx_v[end, :] .= stokes.τ_o.xx_v[1, :]
+        stokes.τ_o.yy_v[end, :] .= stokes.τ_o.yy_v[1, :]
+        stokes.τ_o.xy[end, :] .= stokes.τ_o.xy[1, :]
+    end
+    return nothing
+end
+
+@inline function periodic_solver_seam_mismatch(stokes)
+    p_mis = maximum(abs.(Array(stokes.P[end, :]) .- Array(stokes.P[1, :])))
+    ΔPψ_mis = maximum(abs.(Array(stokes.ΔPψ[end, :]) .- Array(stokes.ΔPψ[1, :])))
+    τxx_mis = maximum(abs.(Array(stokes.τ.xx[end, :]) .- Array(stokes.τ.xx[1, :])))
+    τyy_mis = maximum(abs.(Array(stokes.τ.yy[end, :]) .- Array(stokes.τ.yy[1, :])))
+    τxy_mis = maximum(abs.(Array(stokes.τ.xy[end, :]) .- Array(stokes.τ.xy[1, :])))
+    τo_xy_mis = maximum(abs.(Array(stokes.τ_o.xy[end, :]) .- Array(stokes.τ_o.xy[1, :])))
+    return (; P = p_mis, ΔPψ = ΔPψ_mis, τxx = τxx_mis, τyy = τyy_mis, τxy = τxy_mis, τo_xy = τo_xy_mis)
+end
 """
     solve_DYREL!(stokes::JustRelax.StokesArrays, args...; kwargs)
 
@@ -59,11 +87,15 @@ function _solve_DYREL!(
         b_width = (4, 4, 0),
         verbose_PH = true,
         verbose_DR = true,
+        debug_periodic_x = false,
         linear_viscosity = false,
         apply_velocity_box = nothing,  # optional f(stokes) to enforce internal velocity boxes after each V update
         rsf_params = nothing,          # optional RSF-like plasticity parameters
         kwargs...,
     )
+
+    # Keep viscosity argument interpolation consistent with x-periodic topology.
+    set_periodic_x_viscosity_args!(is_periodic_x(flow_bcs))
 
     # unpack
     (;
@@ -130,10 +162,10 @@ function _solve_DYREL!(
     # recompute all the DYREL variables
     compute_viscosity!(stokes, phase_ratios, args, rheology, viscosity_cutoff)
     compute_ρg!(ρg[end], phase_ratios, rheology, args)
-    DYREL!(dyrel, stokes, rheology, phase_ratios, grid.di, dt)
+    DYREL!(dyrel, stokes, rheology, phase_ratios, grid.di, dt; periodic_x = is_periodic_x(flow_bcs))
 
     # Powell-Hestenes iterations
-    for itPH in 1:10#00
+    for itPH in 1:100#00
         # update buoyancy forces
         update_ρg!(ρg, phase_ratios, rheology, args)
 
@@ -149,11 +181,21 @@ function _solve_DYREL!(
         vertex2center!(stokes.ε.xy_c, stokes.ε.xy)
 
         # compute deviatoric stress
-        compute_stress_DRYEL!(stokes, rheology, phase_ratios, λ_relaxation_PH, dt; rsf_params = rsf_params) # not resetting λ in every PH iteration seems to work better
+        compute_stress_DRYEL!(
+            stokes,
+            rheology,
+            phase_ratios,
+            λ_relaxation_PH,
+            dt;
+            rsf_params = rsf_params,
+            periodic_x = is_periodic_x(flow_bcs),
+        ) # not resetting λ in every PH iteration seems to work better
         # update_halo!(stokes.λv)
         # update_halo!(stokes.τ.xx_v)
         # update_halo!(stokes.τ.yy_v)
         # update_halo!(stokes.τ.xy)
+
+        enforce_periodic_solver_fields_x!(stokes, flow_bcs)
 
         if !linear_viscosity
             update_viscosity_τII!(
@@ -167,16 +209,29 @@ function _solve_DYREL!(
         end
 
         # compute velocity residuals
-        @parallel (@idx ni) compute_PH_residual_V!(
-            stokes.R.Rx,
-            stokes.R.Ry,
-            stokes.P,
-            stokes.ΔPψ,
-            @stress(stokes)...,
-            ρg...,
-            _di.center,
-            _di.vertex,
-        )
+        if is_periodic_x(flow_bcs)
+            @parallel (@idx ni) compute_PH_residual_V_periodic_x!(
+                stokes.R.Rx,
+                stokes.R.Ry,
+                stokes.P,
+                stokes.ΔPψ,
+                @stress(stokes)...,
+                ρg...,
+                _di.center,
+                _di.vertex,
+            )
+        else
+            @parallel (@idx ni) compute_PH_residual_V!(
+                stokes.R.Rx,
+                stokes.R.Ry,
+                stokes.P,
+                stokes.ΔPψ,
+                @stress(stokes)...,
+                ρg...,
+                _di.center,
+                _di.vertex,
+            )
+        end
 
         if apply_velocity_box !== nothing
             apply_mask!(stokes.R.Rx, 0.0, stokes.mask_vbox_x)
@@ -215,6 +270,18 @@ function _solve_DYREL!(
 
         if verbose_PH && igg.me == 0
             @printf("itPH = %02d iter = %06d iter/nx = %03d, err = %1.3e - norm[Rx=%1.3e %1.3e, Ry=%1.3e %1.3e, Rp=%1.3e %1.3e] \n", itPH, iter, iter / ni[1], err, errVx, errVx / errVx0, errVy, errVy / errVy0, errPt, errPt / errPt0)
+        end
+        if debug_periodic_x && is_periodic_x(flow_bcs) && igg.me == 0
+            sm = periodic_solver_seam_mismatch(stokes)
+            @printf(
+                "DYREL periodic debug (PH): seam mismatch P=%1.3e ΔPψ=%1.3e τxx=%1.3e τyy=%1.3e τxy=%1.3e τo_xy=%1.3e\n",
+                sm.P,
+                sm.ΔPψ,
+                sm.τxx,
+                sm.τyy,
+                sm.τxy,
+                sm.τo_xy,
+            )
         end
         igg.me == 0 && isnan(err) && error("NaN detected in outer loop")
         igg.me == 0 && err > 1.0e10 && error("Kaboom! Error > 1e10 in outer loop")
@@ -265,11 +332,21 @@ function _solve_DYREL!(
             )
 
             # Deviatoric stress
-            compute_stress_DRYEL!(stokes, rheology, phase_ratios, λ_relaxation_DR, dt; rsf_params = rsf_params)
+            compute_stress_DRYEL!(
+                stokes,
+                rheology,
+                phase_ratios,
+                λ_relaxation_DR,
+                dt;
+                rsf_params = rsf_params,
+                periodic_x = is_periodic_x(flow_bcs),
+            )
             # update_halo!(stokes.λv)
             # update_halo!(stokes.τ.xx_v)
             # update_halo!(stokes.τ.yy_v)
             # update_halo!(stokes.τ.xy)
+
+            enforce_periodic_solver_fields_x!(stokes, flow_bcs)
 
             if !linear_viscosity
                 update_viscosity_τII!(
@@ -284,19 +361,35 @@ function _solve_DYREL!(
 
             # Residuals
             @. P_num = γ_eff * stokes.R.RP
-            @parallel (@idx ni) compute_DR_residual_V!(
-                stokes.R.Rx,
-                stokes.R.Ry,
-                stokes.P,
-                P_num,
-                stokes.ΔPψ,
-                @stress(stokes)...,
-                ρg...,
-                Dx,
-                Dy,
-                _di.center,
-                _di.vertex,
-            )
+            if is_periodic_x(flow_bcs)
+                @parallel (@idx ni) compute_DR_residual_V_periodic_x!(
+                    stokes.R.Rx,
+                    stokes.R.Ry,
+                    stokes.P,
+                    P_num,
+                    stokes.ΔPψ,
+                    @stress(stokes)...,
+                    ρg...,
+                    Dx,
+                    Dy,
+                    _di.center,
+                    _di.vertex,
+                )
+            else
+                @parallel (@idx ni) compute_DR_residual_V!(
+                    stokes.R.Rx,
+                    stokes.R.Ry,
+                    stokes.P,
+                    P_num,
+                    stokes.ΔPψ,
+                    @stress(stokes)...,
+                    ρg...,
+                    Dx,
+                    Dy,
+                    _di.center,
+                    _di.vertex,
+                )
+            end
 
             if apply_velocity_box !== nothing
                 apply_mask!(stokes.R.Rx, 0.0, stokes.mask_vbox_x)
@@ -315,6 +408,10 @@ function _solve_DYREL!(
                 (stokes.mask_vbox_x.mask, stokes.mask_vbox_y.mask),
             )
             flow_bcs!(stokes, flow_bcs)
+            if apply_velocity_box !== nothing
+                apply_velocity_box(stokes)
+            end
+            enforce_periodic_solver_fields_x!(stokes, flow_bcs)
             update_halo!(@velocity(stokes)...)
 
             # Residual check
@@ -341,6 +438,18 @@ function _solve_DYREL!(
                 if verbose_DR && igg.me == 0
                     @printf("it = %d, iter = %d, err = %1.3e \n", itPT, iter, err)
                 end
+                if debug_periodic_x && is_periodic_x(flow_bcs) && igg.me == 0
+                    sm = periodic_solver_seam_mismatch(stokes)
+                    @printf(
+                        "DYREL periodic debug (DR): seam mismatch P=%1.3e ΔPψ=%1.3e τxx=%1.3e τyy=%1.3e τxy=%1.3e τo_xy=%1.3e\n",
+                        sm.P,
+                        sm.ΔPψ,
+                        sm.τxx,
+                        sm.τyy,
+                        sm.τxy,
+                        sm.τo_xy,
+                    )
+                end
                 @. dVx = dVxdτ * βVx * dτVx
                 @. dVy = dVydτ * βVy * dτVy
 
@@ -350,7 +459,20 @@ function _solve_DYREL!(
                 @. cVy = 2 * √(λminV) * c_fact
 
                 # Optimal pseudo-time steps - can be replaced by AD
-                Gershgorin_Stokes2D_SchurComplement!(Dx, Dy, λmaxVx, λmaxVy, stokes.viscosity.η, stokes.viscosity.ηv, γ_eff, phase_ratios, rheology, grid.di, dt)
+                Gershgorin_Stokes2D_SchurComplement!(
+                    Dx,
+                    Dy,
+                    λmaxVx,
+                    λmaxVy,
+                    stokes.viscosity.η,
+                    stokes.viscosity.ηv,
+                    γ_eff,
+                    phase_ratios,
+                    rheology,
+                    grid.di,
+                    dt,
+                    periodic_x = is_periodic_x(flow_bcs),
+                )
 
                 # Select dτ
                 update_dτV_α_β!(dyrel)
@@ -359,6 +481,7 @@ function _solve_DYREL!(
 
         # update pressure
         @. stokes.P += γ_eff .* stokes.R.RP
+        enforce_periodic_solver_fields_x!(stokes, flow_bcs)
 
         iter > total_iterMax && break
     end
@@ -382,6 +505,7 @@ function _solve_DYREL!(
     stokes.τ_o.yy_v .= stokes.τ.yy_v
 
 
+    set_periodic_x_viscosity_args!(false)
     return (; err_evo_it, err_evo_V, err_evo_P)
 
 end

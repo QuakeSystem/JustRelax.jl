@@ -50,6 +50,19 @@ end
 
 ## RESIDUALS
 
+Base.@propagate_inbounds @inline function _right_periodic_x(A::AbstractArray, i::Integer, j::Integer)
+    nx = size(A, 1)
+    return A[ifelse(i == nx, 1, i + 1), j]
+end
+
+Base.@propagate_inbounds @inline function _d_xa_periodic_x(A::AbstractArray, _dx, i::Integer, j::Integer)
+    return (-A[i, j] + _right_periodic_x(A, i, j)) * _dx
+end
+
+Base.@propagate_inbounds @inline function _av_xa_periodic_x(A::AbstractArray, i::Integer, j::Integer)
+    return 0.5 * (A[i, j] + _right_periodic_x(A, i, j))
+end
+
 @parallel_indices (i, j) function compute_PH_residual_V!(
         Rx::AbstractArray{T, 2}, Ry, P, ΔPψ, τxx, τyy, τxy, ρgx, ρgy, _di_center, _di_vertex
     ) where {T}
@@ -162,6 +175,66 @@ end
     end
     # end
 
+    return nothing
+end
+
+@parallel_indices (i, j) function compute_PH_residual_V_periodic_x!(
+        Rx::AbstractArray{T, 2}, Ry, P, ΔPψ, τxx, τyy, τxy, ρgx, ρgy, _di_center, _di_vertex
+    ) where {T}
+    Base.@propagate_inbounds @inline av_ya(A) = _av_ya(A, i, j)
+    if i ≤ size(Rx, 1) && j ≤ size(Rx, 2)
+        _dx_c = @dx(_di_center, i)
+        _dy_v = @dy(_di_vertex, j)
+        Base.@propagate_inbounds @inline d_yi(A) = _d_yi(A, _dy_v, i, j)
+        Rx[i, j] =
+            _d_xa_periodic_x(τxx, _dx_c, i, j) + d_yi(τxy) -
+            _d_xa_periodic_x(P, _dx_c, i, j) - _d_xa_periodic_x(ΔPψ, _dx_c, i, j) -
+            _av_xa_periodic_x(ρgx, i, j)
+    end
+    if i ≤ size(Ry, 1) && j ≤ size(Ry, 2)
+        _dy_c = @dy(_di_center, j)
+        _dx_v = @dx(_di_vertex, i)
+        Base.@propagate_inbounds @inline d_ya(A) = _d_ya(A, _dy_c, i, j)
+        Base.@propagate_inbounds @inline d_xi(A) = _d_xi(A, _dx_v, i, j)
+        Ry[i, j] = d_ya(τyy) + d_xi(τxy) - d_ya(P) - d_ya(ΔPψ) - av_ya(ρgy)
+    end
+    return nothing
+end
+
+@parallel_indices (i, j) function compute_DR_residual_V_periodic_x!(
+        Rx::AbstractArray{T, 2},
+        Ry,
+        P,
+        P_num,
+        ΔPψ,
+        τxx,
+        τyy,
+        τxy,
+        ρgx,
+        ρgy,
+        Dx,
+        Dy,
+        _di_center,
+        _di_vertex,
+    ) where {T}
+    Base.@propagate_inbounds @inline av_ya(A) = _av_ya(A, i, j)
+    if i ≤ size(Rx, 1) && j ≤ size(Rx, 2)
+        _dx_c = @dx(_di_center, i)
+        _dy_v = @dy(_di_vertex, j)
+        Base.@propagate_inbounds @inline d_yi(A) = _d_yi(A, _dy_v, i, j)
+        Rx[i, j] = (
+            _d_xa_periodic_x(τxx, _dx_c, i, j) + d_yi(τxy) -
+            _d_xa_periodic_x(P, _dx_c, i, j) - _d_xa_periodic_x(P_num, _dx_c, i, j) -
+            _d_xa_periodic_x(ΔPψ, _dx_c, i, j) - _av_xa_periodic_x(ρgx, i, j)
+        ) / Dx[i, j]
+    end
+    if i ≤ size(Ry, 1) && j ≤ size(Ry, 2)
+        _dy_c = @dy(_di_center, j)
+        _dx_v = @dx(_di_vertex, i)
+        Base.@propagate_inbounds @inline d_ya(A) = _d_ya(A, _dy_c, i, j)
+        Base.@propagate_inbounds @inline d_xi(A) = _d_xi(A, _dx_v, i, j)
+        Ry[i, j] = (d_ya(τyy) + d_xi(τxy) - d_ya(P) - d_ya(P_num) - d_ya(ΔPψ) - av_ya(ρgy)) / Dy[i, j]
+    end
     return nothing
 end
 

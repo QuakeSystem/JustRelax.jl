@@ -1,4 +1,17 @@
-function Gershgorin_Stokes2D_SchurComplement!(Dx, Dy, λmaxVx, λmaxVy, η, ηv, γ_eff, phase_ratios, rheology, di, dt)
+function Gershgorin_Stokes2D_SchurComplement!(
+        Dx,
+        Dy,
+        λmaxVx,
+        λmaxVy,
+        η,
+        ηv,
+        γ_eff,
+        phase_ratios,
+        rheology,
+        di,
+        dt;
+        periodic_x::Bool = false,
+    )
     ni = size(η)
     @parallel (@idx ni) _Gershgorin_Stokes2D_SchurComplement!(
         Dx,
@@ -14,30 +27,36 @@ function Gershgorin_Stokes2D_SchurComplement!(Dx, Dy, λmaxVx, λmaxVy, η, ηv,
         phase_ratios.center,
         rheology,
         dt,
+        periodic_x,
     )
     return nothing
 end
 
 @parallel_indices (i, j) function _Gershgorin_Stokes2D_SchurComplement!(
         Dx, Dy, λmaxVx, λmaxVy, η, ηv, γ_eff, di_center, di_vertex,
-        phase_vertex, phase_center, rheology, dt
+        phase_vertex, phase_center, rheology, dt, periodic_x
     )
+
+    nx = size(η, 1)
+    iC = i
+    iCp = periodic_x ? (i == nx ? 1 : i + 1) : i + 1
+    iVp = periodic_x ? (i == nx ? 1 : i + 1) : i + 1
 
 
     # @inbounds begin
-    phase = phase_vertex[i + 1, j + 1]
+    phase = phase_vertex[iVp, j + 1]
     GN = fn_ratio(get_shear_modulus, rheology, phase)
-    phase = phase_vertex[i + 1, j]
+    phase = phase_vertex[iVp, j]
     GS = fn_ratio(get_shear_modulus, rheology, phase)
-    phase = phase_center[i, j]
+    phase = phase_center[iC, j]
     GW = fn_ratio(get_shear_modulus, rheology, phase)
 
     # viscosity coefficients at surrounding points
-    ηN = ηv[i + 1, j + 1]
-    ηS = ηv[i + 1, j]
-    ηW = η[i, j]
+    ηN = ηv[iVp, j + 1]
+    ηS = ηv[iVp, j]
+    ηW = η[iC, j]
     # # bulk viscosity coefficients at surrounding points
-    γW = γ_eff[i, j]
+    γW = γ_eff[iC, j]
 
     if i ≤ size(Dx, 1) && j ≤ size(Dx, 2)
 
@@ -52,10 +71,10 @@ end
         c43 = 4 / 3
         c23 = 2 / 3
 
-        phase = phase_center[i + 1, j]
+        phase = phase_center[iCp, j]
         GE = fn_ratio(get_shear_modulus, rheology, phase)
-        ηE = η[i + 1, j]
-        γE = γ_eff[i + 1, j]
+        ηE = η[iCp, j]
+        γE = γ_eff[iCp, j]
         # effective viscoelastic viscosity
         ηN = 1 / (1 / ηN + 1 / (GN * dt))
         ηS = 1 / (1 / ηS + 1 / (GS * dt))
@@ -94,7 +113,7 @@ end
     # viscosity coefficients at surrounding points
     ηS = η[i, j]
     ηW = ηv[i, j + 1]
-    ηE = ηv[i + 1, j + 1]
+    ηE = ηv[iVp, j + 1]
     # # bulk viscosity coefficients at surrounding points
     γS = γW # reuse cached value
 

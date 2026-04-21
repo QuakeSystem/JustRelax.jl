@@ -221,7 +221,7 @@ Create the residual arrays for the Stokes solver in 2D.
 - `Ry`: Residual for the y-momentum equation
 - `RP`: Residual for the continuity equation
 """
-function Residual(nx::Integer, ny::Integer)
+function Residual(nx::Integer, ny::Integer; periodic_x::Bool = false)
     Rx = @zeros(nx - 1, ny)
     Ry = @zeros(nx, ny - 1)
     RP = @zeros(nx, ny)
@@ -247,8 +247,8 @@ function Residual(nx::Integer, ny::Integer, nz::Integer)
 end
 
 ## StokesArrays type
-function StokesArrays(::Type{CPUBackend}, ni::NTuple{N, Integer}) where {N}
-    return StokesArrays(ni)
+function StokesArrays(::Type{CPUBackend}, ni::NTuple{N, Integer}; periodic_x::Bool = false) where {N}
+    return StokesArrays(ni; periodic_x = periodic_x)
 end
 """
     StokesArrays(ni::NTuple{N,Integer}) where {N}
@@ -276,7 +276,7 @@ Create the Stokes arrays object in 2D or 3D.
 - `λv` : plastic multiplier @ vertices
 - `ΔPψ` : pressure correction in dilatant case
 """
-function StokesArrays(ni::NTuple{N, Integer}) where {N}
+function StokesArrays(ni::NTuple{N, Integer}; periodic_x::Bool = false) where {N}
     P = @zeros(ni...)
     P0 = @zeros(ni...)
     ∇V = @zeros(ni...)

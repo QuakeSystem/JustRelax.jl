@@ -10,36 +10,37 @@ Creates a new `DYREL` struct with fields initialized to zero.
 - `CFL`: Courant-Friedrichs-Lewy number.
 - `c_fat`: Damping scaling factor.
 """
-function DYREL(ni::NTuple{2}; ϵ = 1.0e-6, ϵ_vel = 1.0e-6, CFL = 0.99, c_fat = 0.5)
+function DYREL(ni::NTuple{2}; ϵ = 1.0e-6, ϵ_vel = 1.0e-6, CFL = 0.99, c_fat = 0.5, periodic_x::Bool = false)
     nx, ny = ni
+    nRx = nx - 1
     # penalty parameter
     γ_eff = @zeros(nx, ny)
     # bulk viscosity
     ηb = @zeros(nx, ny)
     # Diagonal preconditioner arrays
-    Dx = @zeros(nx - 1, ny)
+    Dx = @zeros(nRx, ny)
     Dy = @zeros(nx, ny - 1)
     Dz = @zeros(1, 1)  # dummy for 2D
     # maximum eigenvalue estimates
-    λmaxVx = @zeros(nx - 1, ny)
+    λmaxVx = @zeros(nRx, ny)
     λmaxVy = @zeros(nx, ny - 1)
     λmaxVz = @zeros(1, 1)  # dummy for 2D
-    dVxdτ = @zeros(nx - 1, ny)
+    dVxdτ = @zeros(nRx, ny)
     dVydτ = @zeros(nx, ny - 1)
     dVzdτ = @zeros(1, 1)  # dummy for 2D
-    dτVx = @zeros(nx - 1, ny)
+    dτVx = @zeros(nRx, ny)
     dτVy = @zeros(nx, ny - 1)
     dτVz = @zeros(1, 1)  # dummy for 2D
-    dVx = @zeros(nx - 1, ny)
+    dVx = @zeros(nRx, ny)
     dVy = @zeros(nx, ny - 1)
     dVz = @zeros(1, 1)  # dummy for 2D
-    βVx = @zeros(nx - 1, ny)
+    βVx = @zeros(nRx, ny)
     βVy = @zeros(nx, ny - 1)
     βVz = @zeros(1, 1)  # dummy for 2D
-    cVx = @zeros(nx - 1, ny)
+    cVx = @zeros(nRx, ny)
     cVy = @zeros(nx, ny - 1)
     cVz = @zeros(1, 1)  # dummy for 2D
-    αVx = @zeros(nx - 1, ny)
+    αVx = @zeros(nRx, ny)
     αVy = @zeros(nx, ny - 1)
     αVz = @zeros(1, 1)  # dummy for 2D
 
@@ -97,8 +98,33 @@ end
 DYREL(nx::Integer, ny::Integer, nz::Integer; ϵ = 1.0e-6, ϵ_vel = 1.0e-6, CFL = 0.99, c_fat = 0.5) = DYREL((nx, ny, nz); ϵ = ϵ, ϵ_vel = ϵ_vel, CFL = CFL, c_fat = c_fat)
 
 
-function DYREL(::Type{CPUBackend}, stokes::JustRelax.StokesArrays, rheology, phase_ratios, di, dt; ϵ = 1.0e-6, ϵ_vel = 1.0e-6, CFL = 0.99, c_fat = 0.5, γfact = 20.0)
-    return DYREL(stokes, rheology, phase_ratios, di, dt; ϵ = ϵ, ϵ_vel = ϵ_vel, CFL = CFL, c_fat = c_fat, γfact = γfact)
+function DYREL(
+        ::Type{CPUBackend},
+        stokes::JustRelax.StokesArrays,
+        rheology,
+        phase_ratios,
+        di,
+        dt;
+        ϵ = 1.0e-6,
+        ϵ_vel = 1.0e-6,
+        CFL = 0.99,
+        c_fat = 0.5,
+        γfact = 20.0,
+        periodic_x::Bool = false,
+    )
+    return DYREL(
+        stokes,
+        rheology,
+        phase_ratios,
+        di,
+        dt;
+        ϵ = ϵ,
+        ϵ_vel = ϵ_vel,
+        CFL = CFL,
+        c_fat = c_fat,
+        γfact = γfact,
+        periodic_x = periodic_x,
+    )
 end
 
 
@@ -121,18 +147,43 @@ This function:
 - `dt`: Time step.
 - `γfact`: Factor for penalty parameter calculation (default: 20.0).
 """
-function DYREL(stokes::JustRelax.StokesArrays, rheology, phase_ratios, di, dt; ϵ = 1.0e-6, ϵ_vel = 1.0e-6, CFL = 0.99, c_fat = 0.5, γfact = 20.0)
+function DYREL(
+        stokes::JustRelax.StokesArrays,
+        rheology,
+        phase_ratios,
+        di,
+        dt;
+        ϵ = 1.0e-6,
+        ϵ_vel = 1.0e-6,
+        CFL = 0.99,
+        c_fat = 0.5,
+        γfact = 20.0,
+        periodic_x::Bool = false,
+    )
 
     ni = size(stokes.P)
 
     # instantiate DYREL object
-    dyrel = DYREL(ni; ϵ = ϵ, ϵ_vel = ϵ_vel, CFL = CFL, c_fat = c_fat)
+    dyrel = DYREL(ni; ϵ = ϵ, ϵ_vel = ϵ_vel, CFL = CFL, c_fat = c_fat, periodic_x = periodic_x)
 
     # compute bulk viscosity and penalty parameter
     compute_bulk_viscosity_and_penalty!(dyrel, stokes, rheology, phase_ratios, γfact, dt)
 
     # compute Gershgorin estimates for maximum eigenvalues and diagonal preconditioners
-    Gershgorin_Stokes2D_SchurComplement!(dyrel.Dx, dyrel.Dy, dyrel.λmaxVx, dyrel.λmaxVy, stokes.viscosity.η, stokes.viscosity.ηv, dyrel.γ_eff, phase_ratios, rheology, di, dt)
+    Gershgorin_Stokes2D_SchurComplement!(
+        dyrel.Dx,
+        dyrel.Dy,
+        dyrel.λmaxVx,
+        dyrel.λmaxVy,
+        stokes.viscosity.η,
+        stokes.viscosity.ηv,
+        dyrel.γ_eff,
+        phase_ratios,
+        rheology,
+        di,
+        dt,
+        periodic_x = periodic_x,
+    )
 
     # compute damping coefficients
     update_dτV_α_β!(dyrel.dτVx, dyrel.dτVy, dyrel.βVx, dyrel.βVy, dyrel.αVx, dyrel.αVy, dyrel.cVx, dyrel.cVy, dyrel.λmaxVx, dyrel.λmaxVy, CFL)
@@ -162,12 +213,35 @@ This function recomputes:
 
 Returns `nothing`.
 """
-function DYREL!(dyrel::JustRelax.DYREL, stokes::JustRelax.StokesArrays, rheology, phase_ratios, di, dt; CFL = 0.99, γfact = 20.0)
+function DYREL!(
+        dyrel::JustRelax.DYREL,
+        stokes::JustRelax.StokesArrays,
+        rheology,
+        phase_ratios,
+        di,
+        dt;
+        CFL = 0.99,
+        γfact = 20.0,
+        periodic_x::Bool = false,
+    )
     # compute bulk viscosity and penalty parameter
     compute_bulk_viscosity_and_penalty!(dyrel, stokes, rheology, phase_ratios, γfact, dt)
 
     # compute Gershgorin estimates for maximum eigenvalues and diagonal preconditioners
-    Gershgorin_Stokes2D_SchurComplement!(dyrel.Dx, dyrel.Dy, dyrel.λmaxVx, dyrel.λmaxVy, stokes.viscosity.η, stokes.viscosity.ηv, dyrel.γ_eff, phase_ratios, rheology, di, dt)
+    Gershgorin_Stokes2D_SchurComplement!(
+        dyrel.Dx,
+        dyrel.Dy,
+        dyrel.λmaxVx,
+        dyrel.λmaxVy,
+        stokes.viscosity.η,
+        stokes.viscosity.ηv,
+        dyrel.γ_eff,
+        phase_ratios,
+        rheology,
+        di,
+        dt,
+        periodic_x = periodic_x,
+    )
 
     # compute damping coefficients
     update_dτV_α_β!(dyrel.dτVx, dyrel.dτVy, dyrel.βVx, dyrel.βVy, dyrel.αVx, dyrel.αVy, dyrel.cVx, dyrel.cVy, dyrel.λmaxVx, dyrel.λmaxVy, CFL)
@@ -176,12 +250,36 @@ function DYREL!(dyrel::JustRelax.DYREL, stokes::JustRelax.StokesArrays, rheology
 end
 
 # variational version
-function DYREL!(dyrel::JustRelax.DYREL, stokes::JustRelax.StokesArrays, rheology, phase_ratios, ϕ, di, dt; CFL = 0.99, γfact = 20.0)
+function DYREL!(
+        dyrel::JustRelax.DYREL,
+        stokes::JustRelax.StokesArrays,
+        rheology,
+        phase_ratios,
+        ϕ,
+        di,
+        dt;
+        CFL = 0.99,
+        γfact = 20.0,
+        periodic_x::Bool = false,
+    )
     # compute bulk viscosity and penalty parameter
     compute_bulk_viscosity_and_penalty!(dyrel, stokes, rheology, phase_ratios, ϕ, γfact, dt)
 
     # compute Gershgorin estimates for maximum eigenvalues and diagonal preconditioners
-    Gershgorin_Stokes2D_SchurComplement!(dyrel.Dx, dyrel.Dy, dyrel.λmaxVx, dyrel.λmaxVy, stokes.viscosity.η, stokes.viscosity.ηv, dyrel.γ_eff, phase_ratios, rheology, di, dt)
+    Gershgorin_Stokes2D_SchurComplement!(
+        dyrel.Dx,
+        dyrel.Dy,
+        dyrel.λmaxVx,
+        dyrel.λmaxVy,
+        stokes.viscosity.η,
+        stokes.viscosity.ηv,
+        dyrel.γ_eff,
+        phase_ratios,
+        rheology,
+        di,
+        dt,
+        periodic_x = periodic_x,
+    )
 
     # compute damping coefficients
     update_dτV_α_β!(dyrel.dτVx, dyrel.dτVy, dyrel.βVx, dyrel.βVy, dyrel.αVx, dyrel.αVy, dyrel.cVx, dyrel.cVy, dyrel.λmaxVx, dyrel.λmaxVy, CFL)

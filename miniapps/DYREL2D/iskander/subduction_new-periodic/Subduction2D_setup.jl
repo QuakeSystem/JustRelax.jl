@@ -135,17 +135,17 @@ function GMG_subduction_2D_with_coords(
     nx_points::Int,
     ny_points::Int;
     ref_grid::Int = 0,
-    refine_factor::Float64 = 16.0,
+    refine_factor::Float64 = 8.0,
     w_ref_ratio::Float64 = 1 / 2, 
-    k::Float64 = 16.0,
+    k::Float64 = 8.0,
     x_center_frac::Float64 = 0.5,
-    y_center_frac::Float64 = 0.5,
+    y_center_frac::Float64 = 0.65,
     verbose::Int = 1,
 )
-    model_depth = 50.0 # POSITIVE VALUE IN KM
+    model_depth = 660
     Tbot = 1474.0
-    x0_km, x1_km = -25.0, 25.0
-    air_thickness = 0.0
+    x0_km, x1_km = 0.0, 3000.0
+    air_thickness = 15.0
     z0_km, z1_km = -model_depth * 1.0, air_thickness
 
     # Our coordinate arrays are "points" for CartData: xvi has length nx_points.
@@ -155,7 +155,7 @@ function GMG_subduction_2D_with_coords(
         x1_km;
         ref_grid = ref_grid,
         refine_factor = refine_factor,
-        w_ref_ratio = w_ref_ratio,
+        w_ref_ratio = w_ref_ratio/2,
         x_center_frac = x_center_frac,
         k = k,
         verbose = verbose,
@@ -165,8 +165,8 @@ function GMG_subduction_2D_with_coords(
         z0_km,
         z1_km;
         ref_grid = ref_grid,
-        refine_factor = refine_factor/4,
-        w_ref_ratio = w_ref_ratio/1.5,
+        refine_factor = refine_factor*4,
+        w_ref_ratio = w_ref_ratio,
         x_center_frac = y_center_frac,
         k = k,
         verbose = verbose,
@@ -175,7 +175,7 @@ function GMG_subduction_2D_with_coords(
     Grid2D = CartData(xyz_grid(x, 0, z))
 
     # Phases and temperature on the CartData grid points ------------------
-    Phases = zeros(Int64, nx_points, 1, ny_points) .+ 4
+    Phases = zeros(Int64, nx_points, 1, ny_points)
     Temp = fill(Tbot, nx_points, 1, ny_points)
     Tlab = 1300
 
@@ -185,71 +185,74 @@ function GMG_subduction_2D_with_coords(
     # 2: subduction lithosphere
     # 3: oceanic crust
     # 4: air
-    # ADD MEDIA
     add_box!(
         Phases,
         Temp,
         Grid2D;
-        xlim = (-25.0, 25.0),
-        zlim = (z0_km, z1_km),
+        xlim = (0, 3000),
+        zlim = (-model_depth, 0.0),
         Origin = nothing, StrikeAngle = 0, DipAngle = 0,
-        phase = LithosphericPhases(Layers = [], Phases = [1]),
+        phase = LithosphericPhases(Layers = [], Phases = [0], Tlab = Tlab),
+        T = HalfspaceCoolingTemp(Tsurface = 20, Tmantle = Tbot, Age = 50, Adiabat = 0),
     )
-    # # ADD PUSHING BOX
+
+    # Add left oceanic plate
+    add_box!(
+        Phases,
+        Temp,
+        Grid2D;
+        xlim = (2000, 3000-20),
+        zlim = (-model_depth, 0.0),
+        Origin = nothing, StrikeAngle = 0, DipAngle = 0,
+        phase = LithosphericPhases(Layers = [80], Phases = [1, 0], Tlab = Tlab),
+        T = HalfspaceCoolingTemp(Tsurface = 20, Tmantle = Tbot, Age = 50, Adiabat = 0),
+    )
+  # Add right oceanic plate crust
     # add_box!(
     #     Phases,
     #     Temp,
     #     Grid2D;
-    #     xlim = (-10.0, 10.0),
-    #     zlim = (-26.0, -10.0),
+    #     xlim = (3000 - 1430, 3000 - 200),
+    #     zlim = (-model_depth, 0.0),
     #     Origin = nothing, StrikeAngle = 0, DipAngle = 0,
-    #     phase = LithosphericPhases(Layers = [], Phases = [1]),
+    #     phase = LithosphericPhases(Layers = [8 72], Phases = [2 1 0], Tlab = Tlab),
+    #     T = HalfspaceCoolingTemp(Tsurface = 20, Tmantle = Tbot, Age = 50, Adiabat = 0)
     # )
 
-    # Add velocity strengthening zone 
-    add_box!(
-        Phases,
-        Temp,
-        Grid2D;
-        xlim = (x0_km, x1_km),
-        zlim = (-25.0, -24.5),
-        Origin = nothing, StrikeAngle = 0, DipAngle = 0,
-        phase = LithosphericPhases(Layers = [], Phases = [3]),
-    )
-        # Add velocity weaking zone 
-    add_box!(
-        Phases,
-        Temp,
-        Grid2D;
-        xlim = (-22.0, 22.0),
-        zlim = (-25.0, -24.5),
-        Origin = nothing, StrikeAngle = 0, DipAngle = 0,
-        phase = LithosphericPhases(Layers = [], Phases = [2]),
-    )
+    # Add slab
+    # add_box!(
+    #     Phases,
+    #     Temp,
+    #     Grid2D;
+    #     xlim = (3000 - 1430, 3000 - 1430 - 250),
+    #     zlim = (-80, 0.0),
+    #     Origin = nothing, StrikeAngle = 0, DipAngle = -30,
+    #     phase = LithosphericPhases(Layers = [8 80], Phases = [2 1 0], Tlab = Tlab),
+    #     T = HalfspaceCoolingTemp(Tsurface = 20, Tmantle = Tbot, Age = 50, Adiabat = 0)
+    # )
     # Velocity box (same values as the uniform setup)
     add_vel_box!(
-        cenx = 0.0,  # m
-        cenz = -2.0 * 1.0e3,         # m
-        widthx = 50.0 * 1.0e3,      # m
-        widthz = 4.0 * 1.0e3,      # m
-        # vx = 4.0e-12,                  # m/s
+        cenx = (3000 - 430) * 1.0e3,  # m
+        cenz = -40.0 * 1.0e3,         # m
+        widthx = 250.0 * 1.0e3,      # m
+        widthz = 140.0 * 1.0e3,      # m
+        #vx = 4.0e-9,                  # m/s
         # vy = -4.0e-9,              # m/s (optional)
     )
 
     # Surface overwrite
     surf = Grid2D.z.val .> 0.0
     Temp[surf] .= 20.0
-    # Phases[surf] .= 3 # air
+    # Phases[surf] .= 3
 
     Grid2D = addfield(Grid2D, (; Phases, Temp))
-    write_paraview(Grid2D, "Initial_Setup_Simple_Shear_rank")
+    write_paraview(Grid2D, "Initial_Setup_Subduction_rank")
 
     # Convert coordinates/geometry to meters for DYREL
     li = (abs(last(x) - first(x)), abs(last(z) - first(z))) .* 1.0e3
     origin = (x[1], z[1]) .* 1.0e3
 
-    # ph = Phases[:, 1, :] .+ 1
-    ph = Phases[:, 1, :]
+    ph = Phases[:, 1, :] .+ 1
     T = Temp[:, 1, :] .+ 273
 
     # Staggered grid coordinate vectors in meters:
