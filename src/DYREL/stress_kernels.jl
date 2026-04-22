@@ -37,11 +37,6 @@ Base.@propagate_inbounds @inline function periodic_indices_x(ni::NTuple{2, Integ
     return i0, j0, ic, jc
 end
 
-@inline _rsf_pick(v::Number, ::Int) = v
-@inline _rsf_pick(v::NTuple{N, <:Number}, phase::Int) where {N} = v[phase]
-@inline _rsf_pick(v::AbstractVector{<:Number}, phase::Int) = v[phase]
-@inline _rsf_phase_on(rsf_params, phase::Int) = hasproperty(rsf_params, :active) ? Bool(_rsf_pick(rsf_params.active, phase)) : true
-
 @parallel_indices (I...) function compute_stress_DRYEL!(
         τ,
         τ_v,
@@ -148,42 +143,13 @@ end
     # Plastic stress correction starts here
     τij = @. 2 * η_ve * εij_eff
     τII = second_invariant(τij)
-    if rsf_params === nothing
-        # Default Drucker-Prager regularized update.
-        F = τII - C * cosϕ - P * sinϕ
-        λ = if ispl && F ≥ 0
-            λ_new = F / (η_ve + η_reg + Kb * dt * sinϕ * sinΨ)
-            λ_relaxation * λ_new + (1 - λ_relaxation) * λ
-        else
-            0.0
-        end
+    # Drucker-Prager regularized update (RSF handled in viscosity pathway).
+    F = τII - C * cosϕ - P * sinϕ
+    λ = if ispl && F ≥ 0
+        λ_new = F / (η_ve + η_reg + Kb * dt * sinϕ * sinΨ)
+        λ_relaxation * λ_new + (1 - λ_relaxation) * λ
     else
-        # RSF-like friction update driven by plastic multiplier proxy.
-        rsf_on = _rsf_phase_on(rsf_params, phase)
-        μs = _rsf_pick(rsf_params.mu_s, phase)
-        μd = clamp(_rsf_pick(rsf_params.mu_d, phase), 0.0, μs)
-        σc = _rsf_pick(rsf_params.sigma_c, phase)
-        Vc = _rsf_pick(rsf_params.Vc, phase)
-        D = _rsf_pick(rsf_params.D, phase)
-        maxit = Int(_rsf_pick(rsf_params.maxit, phase))
-        rtol = _rsf_pick(rsf_params.rtol, phase)
-        λ_it = max(λ, 0.0)
-        λ_new = 0.0
-        for _ in 1:maxit
-            Vp = 2.0 * D * λ_it
-            μeff = μd + (μs - μd) / (1.0 + Vp / Vc)
-            τy = σc + P * μeff
-            F = τII - τy
-            λ_new = if rsf_on && F ≥ 0
-                F / (η_ve + η_reg + Kb * dt * μeff * sinΨ)
-            else
-                0.0
-            end
-            λ_new = λ_relaxation * λ_new + (1 - λ_relaxation) * λ_it
-            abs(λ_new - λ_it) ≤ rtol * (abs(εII) + eps()) && break
-            λ_it = max(λ_new, 0.0)
-        end
-        λ = max(λ_new, 0.0)
+        0.0
     end
     # Effective viscoelastic-plastic viscosity
     η_vep = (τII - λ * η_ve) / (2 * εII)

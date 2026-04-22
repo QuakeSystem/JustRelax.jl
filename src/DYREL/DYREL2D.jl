@@ -87,7 +87,6 @@ function _solve_DYREL!(
         b_width = (4, 4, 0),
         verbose_PH = true,
         verbose_DR = true,
-        debug_periodic_x = false,
         linear_viscosity = false,
         apply_velocity_box = nothing,  # optional f(stokes) to enforce internal velocity boxes after each V update
         rsf_params = nothing,          # optional RSF-like plasticity parameters
@@ -165,7 +164,7 @@ function _solve_DYREL!(
     DYREL!(dyrel, stokes, rheology, phase_ratios, grid.di, dt; periodic_x = is_periodic_x(flow_bcs))
 
     # Powell-Hestenes iterations
-    for itPH in 1:100#00
+    for itPH in 1:10#00
         # update buoyancy forces
         update_ρg!(ρg, phase_ratios, rheology, args)
 
@@ -198,10 +197,11 @@ function _solve_DYREL!(
         enforce_periodic_solver_fields_x!(stokes, flow_bcs)
 
         if !linear_viscosity
+            args_visc = (; args..., λ = stokes.λ, rsf_params = rsf_params)
             update_viscosity_τII!(
                 stokes,
                 phase_ratios,
-                args,
+                args_visc,
                 rheology,
                 viscosity_cutoff;
                 relaxation = viscosity_relaxation,
@@ -271,18 +271,6 @@ function _solve_DYREL!(
         if verbose_PH && igg.me == 0
             @printf("itPH = %02d iter = %06d iter/nx = %03d, err = %1.3e - norm[Rx=%1.3e %1.3e, Ry=%1.3e %1.3e, Rp=%1.3e %1.3e] \n", itPH, iter, iter / ni[1], err, errVx, errVx / errVx0, errVy, errVy / errVy0, errPt, errPt / errPt0)
         end
-        if debug_periodic_x && is_periodic_x(flow_bcs) && igg.me == 0
-            sm = periodic_solver_seam_mismatch(stokes)
-            @printf(
-                "DYREL periodic debug (PH): seam mismatch P=%1.3e ΔPψ=%1.3e τxx=%1.3e τyy=%1.3e τxy=%1.3e τo_xy=%1.3e\n",
-                sm.P,
-                sm.ΔPψ,
-                sm.τxx,
-                sm.τyy,
-                sm.τxy,
-                sm.τo_xy,
-            )
-        end
         igg.me == 0 && isnan(err) && error("NaN detected in outer loop")
         igg.me == 0 && err > 1.0e10 && error("Kaboom! Error > 1e10 in outer loop")
         err < ϵ && break
@@ -349,10 +337,11 @@ function _solve_DYREL!(
             enforce_periodic_solver_fields_x!(stokes, flow_bcs)
 
             if !linear_viscosity
+                args_visc = (; args..., λ = stokes.λ, rsf_params = rsf_params)
                 update_viscosity_τII!(
                     stokes,
                     phase_ratios,
-                    args,
+                    args_visc,
                     rheology,
                     viscosity_cutoff;
                     relaxation = viscosity_relaxation,
@@ -438,18 +427,7 @@ function _solve_DYREL!(
                 if verbose_DR && igg.me == 0
                     @printf("it = %d, iter = %d, err = %1.3e \n", itPT, iter, err)
                 end
-                if debug_periodic_x && is_periodic_x(flow_bcs) && igg.me == 0
-                    sm = periodic_solver_seam_mismatch(stokes)
-                    @printf(
-                        "DYREL periodic debug (DR): seam mismatch P=%1.3e ΔPψ=%1.3e τxx=%1.3e τyy=%1.3e τxy=%1.3e τo_xy=%1.3e\n",
-                        sm.P,
-                        sm.ΔPψ,
-                        sm.τxx,
-                        sm.τyy,
-                        sm.τxy,
-                        sm.τo_xy,
-                    )
-                end
+
                 @. dVx = dVxdτ * βVx * dτVx
                 @. dVy = dVydτ * βVy * dτVy
 

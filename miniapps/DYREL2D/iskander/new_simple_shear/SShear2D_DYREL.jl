@@ -414,9 +414,10 @@ function main(
     vis = prepare_visualisation(ni)
     # Physical properties using GeoParams ----------------
     rheology = init_rheology_simple_shear()
-    rsf_params = init_rsf_params_simple_shear(di_min)
-    # rsf_params = nothing
-    dt = 25.0e3 * 3600 * 24 * 365 # diffusive CFL timestep limiter
+    # rsf_params = init_rsf_params_simple_shear(di_min)
+    rsf_params = nothing
+    # dt = 25.0e3 * 3600 * 24 * 365 # diffusive CFL timestep limiter
+    dt = 1e7
     dt_max = 25.0e3 * 3600 * 24 * 365 # diffusive CFL timestep limiter
     # ----------------------------------------------------
 
@@ -483,7 +484,7 @@ function main(
     stokes.P .= PTArray(backend)(reverse(cumsum(reverse((ρg[2]) .* reshape(di1.vertex[2], 1, :), dims = 2), dims = 2), dims = 2))
     end
     # Pressure shift to reference value
-    P_ref = 5e7  # Reference pressure in Pa
+    P_ref = 5e6*0  # Reference pressure in Pa
     stokes.P .+= P_ref
     # Rheology
     args0 = (T = thermal.Tc, P = stokes.P, dt = Inf)
@@ -606,7 +607,7 @@ function main(
         # rotate stresses
         rotate_stress!(pτ, stokes, particles, dt)
         # compute time step
-        dt = compute_dt(stokes, di_min, dt_max) #* 0.8
+        # dt = compute_dt(stokes, di_min, dt_max) #* 0.8
         dt= 1e7
         println("Time step: $dt s")
         # compute strain rate 2nd invartian - for plotting
@@ -667,7 +668,7 @@ function main(
 
         @show it += 1
         t += dt
-
+println("Max τII = $(maximum(stokes.τ.II)) Pa")
         ### PARAVIEW PLOTTING
         if it >= 0 #it == 1 || rem(it, 5) == 0
 

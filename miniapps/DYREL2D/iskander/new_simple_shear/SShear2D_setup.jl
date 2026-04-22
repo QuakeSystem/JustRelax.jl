@@ -177,7 +177,7 @@ function GMG_subduction_2D_with_coords(
     # Phases and temperature on the CartData grid points ------------------
     Phases = zeros(Int64, nx_points, 1, ny_points) .+ 4
     Temp = fill(Tbot, nx_points, 1, ny_points)
-    Tlab = 1300
+    Tlab = 10.0
 
     # phases
     # 0: asthenosphere
@@ -207,25 +207,25 @@ function GMG_subduction_2D_with_coords(
     # )
 
     # Add velocity strengthening zone 
-    add_box!(
-        Phases,
-        Temp,
-        Grid2D;
-        xlim = (x0_km, x1_km),
-        zlim = (-25.0, -24.5),
-        Origin = nothing, StrikeAngle = 0, DipAngle = 0,
-        phase = LithosphericPhases(Layers = [], Phases = [3]),
-    )
-        # Add velocity weaking zone 
-    add_box!(
-        Phases,
-        Temp,
-        Grid2D;
-        xlim = (-22.0, 22.0),
-        zlim = (-25.0, -24.5),
-        Origin = nothing, StrikeAngle = 0, DipAngle = 0,
-        phase = LithosphericPhases(Layers = [], Phases = [2]),
-    )
+    # add_box!(
+    #     Phases,
+    #     Temp,
+    #     Grid2D;
+    #     xlim = (x0_km, x1_km),
+    #     zlim = (-25.0, -24.5),
+    #     Origin = nothing, StrikeAngle = 0, DipAngle = 0,
+    #     phase = LithosphericPhases(Layers = [], Phases = [3]),
+    # )
+    #     # Add velocity weaking zone 
+    # add_box!(
+    #     Phases,
+    #     Temp,
+    #     Grid2D;
+    #     xlim = (-22.0, 22.0),
+    #     zlim = (-25.0, -24.5),
+    #     Origin = nothing, StrikeAngle = 0, DipAngle = 0,
+    #     phase = LithosphericPhases(Layers = [], Phases = [2]),
+    # )
     # Velocity box (same values as the uniform setup)
     add_vel_box!(
         cenx = 0.0,  # m

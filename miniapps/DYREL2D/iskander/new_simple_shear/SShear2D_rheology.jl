@@ -42,11 +42,11 @@ function init_rheology_simple_shear()
     C_wet_olivine = 1.0e7
     η_reg = 1.0e20
     # Elasticity
-    el = ConstantElasticity(; G = 3.0e10, ν = 0.25)
+    el = ConstantElasticity(; G = 3.0e10, ν = 0.49)
     media_rheology = CompositeRheology(
         (
             el,
-            #LinearViscous(; η = 1.0e23),
+            LinearViscous(; η = 1.0e22),
             #DruckerPrager_regularised(; C = C_wet_olivine, ϕ = ϕ_wet_olivine, η_vp = η_reg, Ψ = 0.0), # non-regularized plasticity
         )
     )
@@ -68,7 +68,7 @@ function init_rsf_params_simple_shear(di_min)
     # Phase ordering follows init_rheologies:
     # 1: media, 2: velocity weakening, 3: velocity strengthening, 4: sticky air.
     return (
-        active = (true, true, true, false),              # phase-wise RSF activation
+        active = (false, false, false, false),              # phase-wise RSF activation
         mu_d = (0.5, 0.15, 0.15, 0.0),          # dynamic friction coefficient
         mu_s = (0.7, 0.5, 0.3, 0.0),          # static friction coefficient
         sigma_c = (1.0e7, 0.0e0, 0e0, 0.0),    # compressive strength [Pa]
@@ -77,6 +77,16 @@ function init_rsf_params_simple_shear(di_min)
         maxit = (8, 8, 8, 8),                    # fixed-point iterations
         rtol = (1.0e-3, 1.0e-3, 1.0e-3, 1.0e-3), # local convergence tolerance
     )
+    # return (
+    #     active = (true, true, true, false),              # phase-wise RSF activation
+    #     mu_d = (0.5, 0.5, 0.5, 0.0),          # dynamic friction coefficient
+    #     mu_s = (0.7, 0.7, 0.7, 0.0),          # static friction coefficient
+    #     sigma_c = (1.0e7, 1.0e7, 1.0e7, 0.0),    # compressive strength [Pa]
+    #     Vc = (1.0e-8, 1.0e-8, 1.0e-8, 1.0e-8),   # characteristic slip velocity [m/s]
+    #     D = (di_min, di_min, di_min, di_min),    # characteristic length scale [m]
+    #     maxit = (8, 8, 8, 8),                    # fixed-point iterations
+    #     rtol = (1.0e-3, 1.0e-3, 1.0e-3, 1.0e-3), # local convergence tolerance
+    # )
 end
 
 function init_rheology_linear()
@@ -91,6 +101,8 @@ function init_rheologies(rheologies)
     # common physical properties
     α = 2.4e-5 # 1 / K
     Cp = 750    # J / kg K
+
+    el_bg = SetConstantElasticity(; G = 3.0e10, ν = 0.25)
     # Define rheolgy struct
     return rheology = (
         # Name = "Media",
@@ -102,19 +114,23 @@ function init_rheologies(rheologies)
             Conductivity = ConstantConductivity(; k = 2.5),
             CompositeRheology = rheologies.media_rheology,
             Gravity = ConstantGravity(; g = 0.0),
+            Elasticity = el_bg,
         ),
         # Name              = "Velocity weakening",
         SetMaterialParams(;
+            Name = "Velocity weakening",
             Phase = 2,
-            Density = PT_Density(; ρ0 = 2.7e3, α = α, β = 0.0e0, T0 = 273 + 1474),
+            Density = PT_Density(; ρ0 = 2.7e3, α = α, β = 0.0e0, T0 = 273 + 1000),
             HeatCapacity = ConstantHeatCapacity(; Cp = Cp),
             Conductivity = ConstantConductivity(; k = 2.5),
             CompositeRheology = rheologies.vel_weak_rheology,
             # CompositeRheology = rheologies.media_rheology,
             Gravity = ConstantGravity(; g = 0.0),
+            Elasticity = el_bg,
         ),
         # Name              = "Velocity strengthening",
         SetMaterialParams(;
+            Name = "Velocity strengthening",
             Phase = 3,
             Density = ConstantDensity(; ρ = 2.7e3),
             HeatCapacity = ConstantHeatCapacity(; Cp = Cp),
@@ -122,9 +138,11 @@ function init_rheologies(rheologies)
             CompositeRheology = rheologies.vel_strength_rheology,
             # CompositeRheology = rheologies.media_rheology,
             Gravity = ConstantGravity(; g = 0.0),
+            Elasticity = el_bg,
         ),
         # Name              = "StickyAir",
         SetMaterialParams(;
+            Name = "StickyAir",
             Phase = 4,
             Density = ConstantDensity(; ρ = 100), # water density
             HeatCapacity = ConstantHeatCapacity(; Cp = 3.0e3),
