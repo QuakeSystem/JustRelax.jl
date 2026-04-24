@@ -35,7 +35,6 @@ end
     DII = abs(AII)
     dP = getproperty(args_ij, :P)
     (DII <= eps() || dP <= 0.0) && return ηi
-
     # Initial yield stress lower bound, like LaMEM RSF branch.
     τy = dP * (μd <= μs ? μd : μs) + σc
     η_test = τy / (2 * DII)
@@ -203,10 +202,9 @@ end
 @parallel_indices (I...) function compute_viscosity_kernel!(
         η, ν, Axx, Ayy, Axyv, args, rheology, cutoff, fn_viscosity::F
     ) where {F}
-
+# Main.@infiltrate
     # convenience closure
     Base.@propagate_inbounds @inline gather(A) = _gather(A, I...)
-
     @inbounds begin
         # cache
         A = Axx[I...], Ayy[I...], Axyv[I...]

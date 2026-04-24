@@ -95,7 +95,7 @@ function _solve_DYREL!(
 
     # Keep viscosity argument interpolation consistent with x-periodic topology.
     set_periodic_x_viscosity_args!(is_periodic_x(flow_bcs))
-
+# Main.@infiltrate
     # unpack
     (;
         γ_eff,

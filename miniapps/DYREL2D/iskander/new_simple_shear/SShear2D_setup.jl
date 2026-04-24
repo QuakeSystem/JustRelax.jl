@@ -195,37 +195,27 @@ function GMG_subduction_2D_with_coords(
         Origin = nothing, StrikeAngle = 0, DipAngle = 0,
         phase = LithosphericPhases(Layers = [], Phases = [1]),
     )
-    # # ADD PUSHING BOX
-    # add_box!(
-    #     Phases,
-    #     Temp,
-    #     Grid2D;
-    #     xlim = (-10.0, 10.0),
-    #     zlim = (-26.0, -10.0),
-    #     Origin = nothing, StrikeAngle = 0, DipAngle = 0,
-    #     phase = LithosphericPhases(Layers = [], Phases = [1]),
-    # )
 
     # Add velocity strengthening zone 
-    # add_box!(
-    #     Phases,
-    #     Temp,
-    #     Grid2D;
-    #     xlim = (x0_km, x1_km),
-    #     zlim = (-25.0, -24.5),
-    #     Origin = nothing, StrikeAngle = 0, DipAngle = 0,
-    #     phase = LithosphericPhases(Layers = [], Phases = [3]),
-    # )
+    add_box!(
+        Phases,
+        Temp,
+        Grid2D;
+        xlim = (x0_km, x1_km),
+        zlim = (-25.0, -24.5),
+        Origin = nothing, StrikeAngle = 0, DipAngle = 0,
+        phase = LithosphericPhases(Layers = [], Phases = [3]),
+    )
     #     # Add velocity weaking zone 
-    # add_box!(
-    #     Phases,
-    #     Temp,
-    #     Grid2D;
-    #     xlim = (-22.0, 22.0),
-    #     zlim = (-25.0, -24.5),
-    #     Origin = nothing, StrikeAngle = 0, DipAngle = 0,
-    #     phase = LithosphericPhases(Layers = [], Phases = [2]),
-    # )
+    add_box!(
+        Phases,
+        Temp,
+        Grid2D;
+        xlim = (-22.0, 22.0),
+        zlim = (-25.0, -24.5),
+        Origin = nothing, StrikeAngle = 0, DipAngle = 0,
+        phase = LithosphericPhases(Layers = [], Phases = [2]),
+    )
     # Velocity box (same values as the uniform setup)
     add_vel_box!(
         cenx = 0.0,  # m

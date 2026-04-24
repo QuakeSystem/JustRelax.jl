@@ -594,7 +594,7 @@ function main(
                 kwargs = (;
                     verbose_PH = true,
                     verbose_DR = true,
-                    iterMax = 50.0e3,
+                    iterMax = 50.0e2,
                     rel_drop = 1.0e-2,
                     nout = 400,
                     λ_relaxation_PH = 1,

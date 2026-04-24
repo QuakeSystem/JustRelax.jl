@@ -1,6 +1,7 @@
 # Load script dependencies
 using GeoParams#, CairoMakie
 using Printf
+using Infiltrator
 const isCUDA = false
 
 @static if isCUDA
@@ -35,6 +36,7 @@ else
     JustPIC.CPUBackend # Options: CPUBackend, CUDABackend, AMDGPUBackend
 end
 
+cd(@__DIR__)
 # Load file with all the rheology configurations
 include("SShear2D_setup.jl")
 include("SShear2D_rheology.jl")
@@ -397,7 +399,7 @@ function main(
     # Physical domain ------------------------------------
     ni = nx, ny           # number of cells
     di = @. li / ni       # grid steps
-
+# @infiltrate
     grid = Geometry(
         PTArray(backend_JR),
         xvi...,
@@ -414,8 +416,8 @@ function main(
     vis = prepare_visualisation(ni)
     # Physical properties using GeoParams ----------------
     rheology = init_rheology_simple_shear()
-    # rsf_params = init_rsf_params_simple_shear(di_min)
-    rsf_params = nothing
+    rsf_params = init_rsf_params_simple_shear(di_min)
+    # rsf_params = nothing
     # dt = 25.0e3 * 3600 * 24 * 365 # diffusive CFL timestep limiter
     dt = 1e7
     dt_max = 25.0e3 * 3600 * 24 * 365 # diffusive CFL timestep limiter
@@ -579,8 +581,8 @@ function main(
                 igg;
                 kwargs = (;
                     verbose_PH = true,
-                    verbose_DR = false,
-                    iterMax = 50.0e3,
+                    verbose_DR = true,
+                    iterMax = 50.0e2,
                     rel_drop = 1.0e-2,
                     nout = 400,
                     λ_relaxation_PH = 1,

@@ -55,6 +55,7 @@ function init_rheology_simple_shear()
     vel_weak_rheology = CompositeRheology(
         (
             el,
+            LinearViscous(; η = 1.0e22),
             #DruckerPrager_regularised(; C = C_wet_olivine, ϕ = ϕ_wet_olivine, η_vp = η_reg, Ψ = 0.0), # non-regularized plasticity
         )
     )
@@ -67,26 +68,26 @@ function init_rsf_params_simple_shear(di_min)
     # Phase-dependent RSF-like parameters used by the DYREL stress update hook.
     # Phase ordering follows init_rheologies:
     # 1: media, 2: velocity weakening, 3: velocity strengthening, 4: sticky air.
-    return (
-        active = (false, false, false, false),              # phase-wise RSF activation
-        mu_d = (0.5, 0.15, 0.15, 0.0),          # dynamic friction coefficient
-        mu_s = (0.7, 0.5, 0.3, 0.0),          # static friction coefficient
-        sigma_c = (1.0e7, 0.0e0, 0e0, 0.0),    # compressive strength [Pa]
-        Vc = (1.0e-8, 1.0e-8, 1.0e-8, 1.0e-8),   # characteristic slip velocity [m/s]
-        D = (di_min, di_min, di_min, di_min),    # characteristic length scale [m]
-        maxit = (8, 8, 8, 8),                    # fixed-point iterations
-        rtol = (1.0e-3, 1.0e-3, 1.0e-3, 1.0e-3), # local convergence tolerance
-    )
     # return (
     #     active = (true, true, true, false),              # phase-wise RSF activation
-    #     mu_d = (0.5, 0.5, 0.5, 0.0),          # dynamic friction coefficient
-    #     mu_s = (0.7, 0.7, 0.7, 0.0),          # static friction coefficient
-    #     sigma_c = (1.0e7, 1.0e7, 1.0e7, 0.0),    # compressive strength [Pa]
+    #     mu_d = (0.5, 0.15, 0.15, 0.0),          # dynamic friction coefficient
+    #     mu_s = (0.7, 0.5, 0.3, 0.0),          # static friction coefficient
+    #     sigma_c = (1.0e7, 0.0e0, 1e6, 0.0),    # compressive strength [Pa]
     #     Vc = (1.0e-8, 1.0e-8, 1.0e-8, 1.0e-8),   # characteristic slip velocity [m/s]
     #     D = (di_min, di_min, di_min, di_min),    # characteristic length scale [m]
     #     maxit = (8, 8, 8, 8),                    # fixed-point iterations
     #     rtol = (1.0e-3, 1.0e-3, 1.0e-3, 1.0e-3), # local convergence tolerance
     # )
+    return (
+        active = (true, true, true, false),              # phase-wise RSF activation
+        mu_d = (0.5, 0.5, 0.5, 0.0),          # dynamic friction coefficient
+        mu_s = (0.7, 0.7, 0.7, 0.0),          # static friction coefficient
+        sigma_c = (1.0e7, 1.0e7, 1.0e7, 0.0),    # compressive strength [Pa]
+        Vc = (1.0e-8, 1.0e-8, 1.0e-8, 1.0e-8),   # characteristic slip velocity [m/s]
+        D = (di_min, di_min, di_min, di_min),    # characteristic length scale [m]
+        maxit = (8, 8, 8, 8),                    # fixed-point iterations
+        rtol = (1.0e-3, 1.0e-3, 1.0e-3, 1.0e-3), # local convergence tolerance
+    )
 end
 
 function init_rheology_linear()
