@@ -197,7 +197,7 @@ function _solve_DYREL!(
         enforce_periodic_solver_fields_x!(stokes, flow_bcs)
 
         if !linear_viscosity
-            args_visc = (; args..., λ = stokes.λ, rsf_params = rsf_params)
+            args_visc = args
             update_viscosity_τII!(
                 stokes,
                 phase_ratios,
@@ -269,7 +269,8 @@ function _solve_DYREL!(
         )
 
         if verbose_PH && igg.me == 0
-            @printf("itPH = %02d iter = %06d iter/nx = %03d, err = %1.3e - norm[Rx=%1.3e %1.3e, Ry=%1.3e %1.3e, Rp=%1.3e %1.3e] \n", itPH, iter, iter / ni[1], err, errVx, errVx / errVx0, errVy, errVy / errVy0, errPt, errPt / errPt0)
+            #@printf("    itPH = %02d iter = %06d iter/nx = %03d, err = %1.3e - norm[Rx=%1.3e %1.3e, Ry=%1.3e %1.3e, Rp=%1.3e %1.3e] \n", itPH, iter, iter / ni[1], err, errVx, errVx / errVx0, errVy, errVy / errVy0, errPt, errPt / errPt0)
+            @printf("itPH = %02d err = %1.3e \n", itPH, err)
         end
         igg.me == 0 && isnan(err) && error("NaN detected in outer loop")
         igg.me == 0 && err > 1.0e10 && error("Kaboom! Error > 1e10 in outer loop")
@@ -337,7 +338,7 @@ function _solve_DYREL!(
             enforce_periodic_solver_fields_x!(stokes, flow_bcs)
 
             if !linear_viscosity
-                args_visc = (; args..., λ = stokes.λ, rsf_params = rsf_params)
+                args_visc = args
                 update_viscosity_τII!(
                     stokes,
                     phase_ratios,
@@ -425,7 +426,7 @@ function _solve_DYREL!(
 
                 # @printf("it = %d, iter = %d, ϵ_vel = %1.3e, err = %1.3e norm[Rx=%1.3e, Ry=%1.3e] \n", itPT, iter, ϵ_vel, err, errVx, errVy)
                 if verbose_DR && igg.me == 0
-                    @printf("it = %d, iter = %d, err = %1.3e \n", itPT, iter, err)
+                    @printf("    it = %d, iter = %d, err = %1.3e \n", itPT, iter, err)
                 end
 
                 @. dVx = dVxdτ * βVx * dτVx

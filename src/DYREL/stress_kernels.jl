@@ -37,6 +37,12 @@ Base.@propagate_inbounds @inline function periodic_indices_x(ni::NTuple{2, Integ
     return i0, j0, ic, jc
 end
 
+@inline _rsf_pick(v::Number, ::Int) = v
+@inline _rsf_pick(v::NTuple{N, <:Number}, phase::Int) where {N} = v[phase]
+@inline _rsf_pick(v::AbstractVector{<:Number}, phase::Int) = v[phase]
+@inline _rsf_phase_on(rsf_params, phase::Int) =
+    hasproperty(rsf_params, :active) ? Bool(_rsf_pick(rsf_params.active, phase)) : true
+
 @parallel_indices (I...) function compute_stress_DRYEL!(
         τ,
         τ_v,
@@ -143,7 +149,48 @@ end
     # Plastic stress correction starts here
     τij = @. 2 * η_ve * εij_eff
     τII = second_invariant(τij)
-    # Drucker-Prager regularized update (RSF handled in viscosity pathway).
+    rsf_on = (!ispl) && rsf_params !== nothing && _rsf_phase_on(rsf_params, phase)
+    if rsf_on && P > 0.0
+        μs = _rsf_pick(rsf_params.mu_s, phase)
+        μd = clamp(_rsf_pick(rsf_params.mu_d, phase), 0.0, μs)
+        σc = _rsf_pick(rsf_params.sigma_c, phase)
+        Vc = _rsf_pick(rsf_params.Vc, phase)
+        D = _rsf_pick(rsf_params.D, phase)
+        maxit = hasproperty(rsf_params, :maxit) ? Int(_rsf_pick(rsf_params.maxit, phase)) : 50
+        rtol = hasproperty(rsf_params, :rtol) ? _rsf_pick(rsf_params.rtol, phase) : 1.0e-5
+        τII_trial = τII
+        τy = P * (μd <= μs ? μd : μs) + σc
+        η_test = τy / (2 * εII)
+        DIIpl = max(εII - (η_test / max(η_ve, eps())) * εII, 0.0)
+        # println("Initial DIIpl is $DIIpl and εII is $εII")
+        # println("Initial τy is $τy and η_test is $η_test")
+        # println("Initial η_ve is $η_ve")
+        # println("Initial τII is $τII")
+        
+        # error("STOPP")
+        for _ in 1:maxit
+            Vp = 2.0 * D * DIIpl
+            μeff = μd + (μs - μd) / (1.0 + Vp / Vc)
+            τy = P * μeff + σc
+            η_test = τy / (2 * εII)
+            DIIpl_new = max(εII - (η_test / max(η_ve, eps())) * εII, 0.0)
+            abs(DIIpl_new - DIIpl) <= rtol * (εII + eps()) && (DIIpl = DIIpl_new; break)
+            DIIpl = DIIpl_new
+        end
+        η_vep = min(η_ve, τy / (2 * εII))
+        τij = @. 2 * η_vep * εij_eff
+        τII = second_invariant(τij)
+        εij_pl = if DIIpl > 0.0 && τII > 0.0
+            @. DIIpl * 0.5 * τij / τII
+        else
+            zero_tuple(εij)
+        end
+        λ = 0.0
+        ΔPψ = 0.0
+        return τij..., εij_pl..., τII, λ, ΔPψ, η_vep
+    end
+
+    # Drucker-Prager regularized update.
     F = τII - C * cosϕ - P * sinϕ
     λ = if ispl && F ≥ 0
         λ_new = F / (η_ve + η_reg + Kb * dt * sinϕ * sinΨ)

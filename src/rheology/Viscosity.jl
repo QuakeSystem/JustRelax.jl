@@ -2,59 +2,6 @@
 
 const PERIODIC_X_VISCOSITY_ARGS = Ref(false)
 
-@inline _rsf_pick(v::Number, ::Int) = v
-@inline _rsf_pick(v::NTuple{N, <:Number}, phase::Int) where {N} = v[phase]
-@inline _rsf_pick(v::AbstractVector{<:Number}, phase::Int) = v[phase]
-
-@inline _rsf_phase_on(rsf_params, phase::Int) =
-    hasproperty(rsf_params, :active) ? Bool(_rsf_pick(rsf_params.active, phase)) : true
-
-@inline function rsf_cons_eq_residual(DII::Real, η_test::Real, η_bg::Real)
-    # LaMEM-like getConsEqRes analogue in SI units:
-    # DII_pl = DII - DII_visc, with DII_visc = τII/(2η_bg), τII = 2η_test*DII.
-    return DII - (η_test / max(η_bg, eps())) * DII
-end
-
-@inline function maybe_apply_rsf_viscosity_cap(ηi, AII, ratio_ij, args_ij)
-    if !hasproperty(args_ij, :rsf_params) || !hasproperty(args_ij, :P) || !hasproperty(args_ij, :λ)
-        return ηi
-    end
-    rsf_params = getproperty(args_ij, :rsf_params)
-    rsf_params === nothing && return ηi
-
-    phase = argmax(ratio_ij)
-    _rsf_phase_on(rsf_params, phase) || return ηi
-    μs = _rsf_pick(rsf_params.mu_s, phase)
-    μd = clamp(_rsf_pick(rsf_params.mu_d, phase), 0.0, μs)
-    σc = _rsf_pick(rsf_params.sigma_c, phase)
-    Vc = _rsf_pick(rsf_params.Vc, phase)
-    D = _rsf_pick(rsf_params.D, phase)
-    maxit = hasproperty(rsf_params, :maxit) ? Int(_rsf_pick(rsf_params.maxit, phase)) : 50
-    rtol = hasproperty(rsf_params, :rtol) ? _rsf_pick(rsf_params.rtol, phase) : 1.0e-5
-
-    DII = abs(AII)
-    dP = getproperty(args_ij, :P)
-    (DII <= eps() || dP <= 0.0) && return ηi
-    # Initial yield stress lower bound, like LaMEM RSF branch.
-    τy = dP * (μd <= μs ? μd : μs) + σc
-    η_test = τy / (2 * DII)
-    DIIpl = max(rsf_cons_eq_residual(DII, η_test, ηi), 0.0)
-    DIIpl == 0.0 && return ηi
-
-    for _ in 1:maxit
-        Vp = 2.0 * D * DIIpl
-        μeff = μd + (μs - μd) / (1.0 + Vp / Vc)
-        τy = dP * μeff + σc
-        η_new = τy / (2 * DII)
-        DIIpl_new = max(rsf_cons_eq_residual(DII, η_new, ηi), 0.0)
-        abs(DIIpl_new - DIIpl) <= rtol * (DII + eps()) && (η_test = η_new; break)
-        DIIpl = DIIpl_new
-        η_test = η_new
-    end
-
-    return min(ηi, η_test)
-end
-
 @inline function set_periodic_x_viscosity_args!(flag::Bool)
     PERIODIC_X_VISCOSITY_ARGS[] = flag
     return nothing
@@ -468,7 +415,6 @@ end
 
         # compute and update stress viscosity
         ηi = compute_phase_viscosity(rheology, ratio_ij, AII, fn_viscosity, args_ij)
-        ηi = maybe_apply_rsf_viscosity_cap(ηi, AII, ratio_ij, args_ij)
         ηi = continuation_linear(ηi, η[I...], ν)
         η[I...] = clamp(ηi, cutoff...)
     end
@@ -555,7 +501,6 @@ end
 
         # update stress and effective viscosity
         ηi = compute_phase_viscosity(rheology, ratio_ijk, AII, fn_viscosity, args_ijk)
-        ηi = maybe_apply_rsf_viscosity_cap(ηi, AII, ratio_ijk, args_ijk)
         ηi = continuation_linear(ηi, η[I...], ν)
         η[I...] = clamp(ηi, cutoff...)
     end

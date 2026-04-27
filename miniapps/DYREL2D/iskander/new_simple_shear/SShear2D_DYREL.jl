@@ -1,7 +1,7 @@
 # Load script dependencies
 using GeoParams#, CairoMakie
 using Printf
-using Infiltrator
+# using Infiltrator
 const isCUDA = false
 
 @static if isCUDA
@@ -112,22 +112,31 @@ end
 @inline _rsf_pick(v::NTuple{N, <:Number}, phase::Int) where {N} = v[phase]
 @inline _rsf_pick(v::AbstractVector{<:Number}, phase::Int) = v[phase]
 
-function compute_mu_eff_field(λ::AbstractMatrix, phase_center, rsf_params)
-    nx, ny = size(λ)
-    μeff = zeros(eltype(λ), nx, ny)
-    Vp = zeros(eltype(λ), nx, ny)
+function compute_mu_eff_field(τII::AbstractMatrix, P::AbstractMatrix, phase_center, rsf_params)
+    nx, ny = size(τII)
+    μeff = zeros(eltype(τII), nx, ny)
+    Vp = zeros(eltype(τII), nx, ny)
     rsf_params === nothing && return μeff, Vp
 
     @inbounds for j in 1:ny, i in 1:nx
         ratios = phase_center[i, j]
         phase = argmax(ratios)
+        hasproperty(rsf_params, :active) && !_rsf_pick(rsf_params.active, phase) && continue
         μs = _rsf_pick(rsf_params.mu_s, phase)
         μd = clamp(_rsf_pick(rsf_params.mu_d, phase), 0.0, μs)
+        σc = _rsf_pick(rsf_params.sigma_c, phase)
         Vc = _rsf_pick(rsf_params.Vc, phase)
-        D = _rsf_pick(rsf_params.D, phase)
-        λij = max(λ[i, j], 0.0)
-        Vp[i, j] = 2.0 * D * λij
-        μeff[i, j] = μd + (μs - μd) / (1.0 + Vp[i, j] / Vc)
+        p_shift = hasproperty(rsf_params, :p_shift) ? _rsf_pick(rsf_params.p_shift, phase) : 0.0
+        P_eff = P[i, j] + p_shift
+        P_eff <= 0.0 && continue
+
+        # Recover μ_eff from local stress state: τy = P_eff*μ_eff + σc.
+        μ_state = (τII[i, j] - σc) / P_eff
+        μeff[i, j] = clamp(μ_state, μd, μs)
+
+        # Diagnostic Vp inferred from RSF law inverse (clamped near μd).
+        denom = max(μeff[i, j] - μd, sqrt(eps(eltype(τII))))
+        Vp[i, j] = max(Vc * ((μs - μd) / denom - 1.0), 0.0)
     end
     return μeff, Vp
 end
@@ -486,7 +495,7 @@ function main(
     stokes.P .= PTArray(backend)(reverse(cumsum(reverse((ρg[2]) .* reshape(di1.vertex[2], 1, :), dims = 2), dims = 2), dims = 2))
     end
     # Pressure shift to reference value
-    P_ref = 5e6*0  # Reference pressure in Pa
+    P_ref = 5e6  # Reference pressure in Pa
     stokes.P .+= P_ref
     # Rheology
     args0 = (T = thermal.Tc, P = stokes.P, dt = Inf)
@@ -546,7 +555,7 @@ function main(
 
     # Time loop
     t, it = 0.0, 0
-    while it < 100 #000 # run only for 5 Myrs
+    while it < 10000 #000 # run only for 5 Myrs
         periodic_x && wrap_particles_x!(particles, xvi)
 
         # interpolate fields from particle to grid vertices
@@ -612,36 +621,37 @@ function main(
         # dt = compute_dt(stokes, di_min, dt_max) #* 0.8
         dt= 1e7
         println("Time step: $dt s")
-        # compute strain rate 2nd invartian - for plotting
-        tensor_invariant!(stokes.τ)
-        tensor_invariant!(stokes.ε)
-        tensor_invariant!(stokes.ε_pl)
-        # ------------------------------
+       
+        # # compute strain rate 2nd invartian - for plotting
+        # tensor_invariant!(stokes.τ)
+        # tensor_invariant!(stokes.ε)
+        # tensor_invariant!(stokes.ε_pl)
+        # # ------------------------------
 
-        # Thermal solver ---------------
-        heatdiffusion_PT!(
-            thermal,
-            pt_thermal,
-            thermal_bc,
-            rheology,
-            args,
-            dt,
-            grid;
-            kwargs = (
-                igg = igg,
-                phase = phase_ratios,
-                iterMax = 50.0e3,
-                nout = 1.0e2,
-                verbose = true,
-            )
-        )
-        subgrid_characteristic_time!(
-            subgrid_arrays, particles, dt₀, phase_ratios, rheology, thermal, stokes
-        )
-        centroid2particle!(subgrid_arrays.dt₀, dt₀, particles)
-        subgrid_diffusion!(
-            pT, thermal.T, thermal.ΔT, subgrid_arrays, particles, dt
-        )
+        # # Thermal solver ---------------
+        # heatdiffusion_PT!(
+        #     thermal,
+        #     pt_thermal,
+        #     thermal_bc,
+        #     rheology,
+        #     args,
+        #     dt,
+        #     grid;
+        #     kwargs = (
+        #         igg = igg,
+        #         phase = phase_ratios,
+        #         iterMax = 50.0e3,
+        #         nout = 1.0e2,
+        #         verbose = true,
+        #     )
+        # )
+        # subgrid_characteristic_time!(
+        #     subgrid_arrays, particles, dt₀, phase_ratios, rheology, thermal, stokes
+        # )
+        # centroid2particle!(subgrid_arrays.dt₀, dt₀, particles)
+        # subgrid_diffusion!(
+        #     pT, thermal.T, thermal.ΔT, subgrid_arrays, particles, dt
+        # )
         # ------------------------------
 
         # Advection --------------------
@@ -668,9 +678,15 @@ function main(
         update_phase_ratios!(phase_ratios, particles, pPhases)
         periodic_x && enforce_periodic_phase_ratios_x!(phase_ratios)
 
-        @show it += 1
-        t += dt
-println("Max τII = $(maximum(stokes.τ.II)) Pa")
+        it += 1
+        println("========================================")
+        println("    Timestep $it")
+        println("    Time = $(t / (1.0e6 * 3600 * 24 * 365.25)) Myrs")
+        println("=========================================")
+        t += dt 
+
+        println("Max τII = $(mean(stokes.τ.II)) Pa")
+        
         ### PARAVIEW PLOTTING
         if it >= 0 #it == 1 || rem(it, 5) == 0
 
@@ -696,7 +712,7 @@ println("Max τII = $(maximum(stokes.τ.II)) Pa")
                 )
                 RP_c = Array(stokes.R.RP)
                 Rx_c, Ry_c, Rmag_c = residuals_to_center(Array(stokes.R.Rx), Array(stokes.R.Ry), RP_c)
-                μ_eff_c, Vp_c = compute_mu_eff_field(Array(stokes.λ), Array(phase_ratios.center), rsf_params)
+                μ_eff_c, Vp_c = compute_mu_eff_field(Array(stokes.τ.II), Array(stokes.P), Array(phase_ratios.center), rsf_params)
                 data_c = (;
                     P   = Array(stokes.P),
                     η_vep   = Array(η_vep),
@@ -788,7 +804,7 @@ end
 n = 64
 nx, ny = n * 1, n
 # Choose grid type: original uniform grid (ref_grid=0) or non-uniform logistic grid (ref_grid=1)
-ref_grid = 0 # 0: original uniform grid, 1: non-uniform logistic grid
+ref_grid = 1 # 0: original uniform grid, 1: non-uniform logistic grid
 periodic_x = true
 disable_injection_when_periodic = false
 Vtop = 4.0e-9
