@@ -150,7 +150,9 @@ end
     τij = @. 2 * η_ve * εij_eff
     τII = second_invariant(τij)
     rsf_on = (!ispl) && rsf_params !== nothing && _rsf_phase_on(rsf_params, phase)
-    if rsf_on && P > 0.0
+    p_shift = rsf_on && hasproperty(rsf_params, :p_shift) ? _rsf_pick(rsf_params.p_shift, phase) : 0.0
+    P_eff = P + p_shift
+    if rsf_on && P_eff > 0.0
         μs = _rsf_pick(rsf_params.mu_s, phase)
         μd = clamp(_rsf_pick(rsf_params.mu_d, phase), 0.0, μs)
         σc = _rsf_pick(rsf_params.sigma_c, phase)
@@ -159,19 +161,13 @@ end
         maxit = hasproperty(rsf_params, :maxit) ? Int(_rsf_pick(rsf_params.maxit, phase)) : 50
         rtol = hasproperty(rsf_params, :rtol) ? _rsf_pick(rsf_params.rtol, phase) : 1.0e-5
         τII_trial = τII
-        τy = P * (μd <= μs ? μd : μs) + σc
+        τy = P_eff * (μd <= μs ? μd : μs) + σc
         η_test = τy / (2 * εII)
         DIIpl = max(εII - (η_test / max(η_ve, eps())) * εII, 0.0)
-        # println("Initial DIIpl is $DIIpl and εII is $εII")
-        # println("Initial τy is $τy and η_test is $η_test")
-        # println("Initial η_ve is $η_ve")
-        # println("Initial τII is $τII")
-        
-        # error("STOPP")
         for _ in 1:maxit
             Vp = 2.0 * D * DIIpl
             μeff = μd + (μs - μd) / (1.0 + Vp / Vc)
-            τy = P * μeff + σc
+            τy = P_eff * μeff + σc
             η_test = τy / (2 * εII)
             DIIpl_new = max(εII - (η_test / max(η_ve, eps())) * εII, 0.0)
             abs(DIIpl_new - DIIpl) <= rtol * (εII + eps()) && (DIIpl = DIIpl_new; break)

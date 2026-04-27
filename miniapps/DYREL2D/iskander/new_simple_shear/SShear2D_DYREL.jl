@@ -227,7 +227,8 @@ function prepare_visualisation(ni)
         checkpoint = joinpath(figdir, "checkpoint")
         take(checkpoint)
     end
-    vis=(;do_vtk,vtk_dir,pvd_name ,figdir,save_particle_points,vtk_every,particle_vtk_every,pictures,checkpoint,Vx_v = @zeros(ni .+ 1...), Vy_v = @zeros(ni .+ 1...),)
+    quiet_runtime = true # silence non-essential console output for GPU tests
+    vis=(;do_vtk,vtk_dir,pvd_name ,figdir,save_particle_points,vtk_every,particle_vtk_every,pictures,checkpoint,quiet_runtime,Vx_v = @zeros(ni .+ 1...), Vy_v = @zeros(ni .+ 1...),)
 
     return vis
 end
@@ -589,8 +590,8 @@ function main(
                 dt,
                 igg;
                 kwargs = (;
-                    verbose_PH = true,
-                    verbose_DR = true,
+                    verbose_PH = !vis.quiet_runtime,
+                    verbose_DR = !vis.quiet_runtime,
                     iterMax = 50.0e2,
                     rel_drop = 1.0e-2,
                     nout = 400,
@@ -611,8 +612,10 @@ function main(
             )
         end
         # print some stuff
-        println("Stokes solver time             ")
-        println("   Total time:      $t_stokes s")
+        if !vis.quiet_runtime
+            println("Stokes solver time             ")
+            println("   Total time:      $t_stokes s")
+        end
         # println("   Time/iteration:  $(t_stokes / out.iter) s")
 
         # rotate stresses
@@ -620,7 +623,9 @@ function main(
         # compute time step
         # dt = compute_dt(stokes, di_min, dt_max) #* 0.8
         dt= 1e7
-        println("Time step: $dt s")
+        if !vis.quiet_runtime
+            println("Time step: $dt s")
+        end
        
         # # compute strain rate 2nd invartian - for plotting
         # tensor_invariant!(stokes.τ)
@@ -679,13 +684,17 @@ function main(
         periodic_x && enforce_periodic_phase_ratios_x!(phase_ratios)
 
         it += 1
-        println("========================================")
-        println("    Timestep $it")
-        println("    Time = $(t / (1.0e6 * 3600 * 24 * 365.25)) Myrs")
-        println("=========================================")
+        if !vis.quiet_runtime
+            println("========================================")
+            println("    Timestep $it")
+            println("    Time = $(t / (1.0e6 * 3600 * 24 * 365.25)) Myrs")
+            println("=========================================")
+        end
         t += dt 
 
-        println("Max τII = $(mean(stokes.τ.II)) Pa")
+        if !vis.quiet_runtime
+            println("Max τII = $(mean(stokes.τ.II)) Pa")
+        end
         
         ### PARAVIEW PLOTTING
         if it >= 0 #it == 1 || rem(it, 5) == 0
@@ -739,7 +748,9 @@ function main(
                     t = t,
                     pvd=joinpath(vis.vtk_dir, vis.pvd_name)
                 )
-                println("Saved VTK file at $(joinpath(vis.vtk_dir, vis.pvd_name))")
+                if !vis.quiet_runtime
+                    println("Saved VTK file at $(joinpath(vis.vtk_dir, vis.pvd_name))")
+                end
                 # Optional particle point-cloud output (large files).
                 if vis.save_particle_points && (it == 1 || rem(it, vis.particle_vtk_every) == 0)
                     save_particles(
@@ -801,10 +812,10 @@ end
 ## END OF MAIN SCRIPT ----------------------------------------------------------------
 
 # MODEL SETUP
-n = 64
+n = 128
 nx, ny = n * 1, n
 # Choose grid type: original uniform grid (ref_grid=0) or non-uniform logistic grid (ref_grid=1)
-ref_grid = 1 # 0: original uniform grid, 1: non-uniform logistic grid
+ref_grid = 0 # 0: original uniform grid, 1: non-uniform logistic grid
 periodic_x = true
 disable_injection_when_periodic = false
 Vtop = 4.0e-9
