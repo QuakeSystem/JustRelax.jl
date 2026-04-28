@@ -91,6 +91,8 @@ function save_vtk(
     data_arrays_v = values(data_v)
     data_names_c = string.(keys(data_c))
     data_arrays_c = values(data_c)
+    xvi_cpu = Array.(xvi)
+    xci_cpu = Array.(xci)
 
     velocity_field = rand(N, size(first(velocity))...)
     for (i, v) in enumerate(velocity)
@@ -100,14 +102,14 @@ function save_vtk(
     vtk_multiblock(fname) do vtm
         # First block.
         # Variables stores in cell centers
-        vtk_grid(vtm, xci...) do vtk
+        vtk_grid(vtm, xci_cpu...) do vtk
             for (name_i, array_i) in zip(data_names_c, data_arrays_c)
                 vtk[name_i] = precision.(Array(array_i))
             end
         end
         # Second block.
         # Variables stores in cell vertices
-        vtk_grid(vtm, xvi...) do vtk
+        vtk_grid(vtm, xvi_cpu...) do vtk
             for (name_i, array_i) in zip(data_names_v, data_arrays_v)
                 vtk[name_i] = precision.(Array(array_i))
             end
@@ -161,6 +163,7 @@ function save_vtk(
     # unpack data names and arrays
     data_names_c = string.(keys(data_c))
     data_arrays_c = values(data_c)
+    xci_cpu = Array.(xci)
 
     velocity_field = rand(N, size(first(velocity))...)
     for (i, v) in enumerate(velocity)
@@ -168,7 +171,7 @@ function save_vtk(
     end
 
     # Create the VTK file
-    vtk_grid(fname, xci...) do vtk
+    vtk_grid(fname, xci_cpu...) do vtk
         for (name_i, array_i) in zip(data_names_c, data_arrays_c)
             vtk[name_i] = precision.(Array(array_i))
         end

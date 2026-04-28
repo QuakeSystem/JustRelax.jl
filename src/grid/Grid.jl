@@ -245,6 +245,12 @@ end
 
 # Velocity helper grids for the particle advection
 
+@inline _with_ghost_nodes(x::AbstractVector, west, east) = vcat(
+    (@view x[1:1]) .- west,
+    x,
+    (@view x[end:end]) .+ east,
+)
+
 """
     velocity_grids(xci, xvi, di)
 
@@ -261,8 +267,8 @@ Both uniform spacings and nonuniform spacing vectors are supported in 2D and 3D.
 """
 function velocity_grids(xci, xvi, di::NTuple{2, Number})
     dx, dy = @dxi(di, 1, 1)
-    yVx = LinRange(xci[2][1] - dy, xci[2][end] + dy, length(xci[2]) + 2)
-    xVy = LinRange(xci[1][1] - dx, xci[1][end] + dx, length(xci[1]) + 2)
+    yVx = _with_ghost_nodes(xci[2], dy, dy)
+    xVy = _with_ghost_nodes(xci[1], dx, dx)
     grid_vx = xvi[1], yVx
     grid_vy = xVy, xvi[2]
 
@@ -273,8 +279,8 @@ function velocity_grids(xci, xvi, di::NTuple{2, T}) where {T <: AbstractVector}
     dxW, dyW = @dxi(di, 1, 1)
     dxE, dyE = @dxi(di, length.(di)...)
 
-    xghost = vcat(xci[1][1] - dxW, xci[1], xci[1][end] + dxE)
-    yghost = vcat(xci[2][1] - dyW, xci[2], xci[2][end] + dyE)
+    xghost = _with_ghost_nodes(xci[1], dxW, dxE)
+    yghost = _with_ghost_nodes(xci[2], dyW, dyE)
 
     grid_vx = xvi[1], yghost
     grid_vy = xghost, xvi[2]
@@ -291,7 +297,7 @@ function velocity_grids(xci, xvi, di::NTuple{3, Number})
         else
             @dz(di, 1)
         end
-        return LinRange(xci[i][1] - dii, xci[i][end] + dii, length(xci[i]) + 2)
+        return _with_ghost_nodes(xci[i], dii, dii)
     end
     grid_vx = xvi[1], xghost[2], xghost[3]
     grid_vy = xghost[1], xvi[2], xghost[3]
@@ -304,9 +310,9 @@ function velocity_grids(xci, xvi, di::NTuple{3, T}) where {T <: AbstractVector}
     dxW, dyW, dzW = @dxi(di, 1, 1, 1)
     dxE, dyE, dzE = @dxi(di, length.(di)...)
 
-    xghost = vcat(xci[1][1] - dxW, xci[1], xci[1][end] + dxE)
-    yghost = vcat(xci[2][1] - dyW, xci[2], xci[2][end] + dyE)
-    zghost = vcat(xci[3][1] - dzW, xci[3], xci[3][end] + dzE)
+    xghost = _with_ghost_nodes(xci[1], dxW, dxE)
+    yghost = _with_ghost_nodes(xci[2], dyW, dyE)
+    zghost = _with_ghost_nodes(xci[3], dzW, dzE)
 
     grid_vx = xvi[1], yghost, zghost
     grid_vy = xghost, xvi[2], zghost

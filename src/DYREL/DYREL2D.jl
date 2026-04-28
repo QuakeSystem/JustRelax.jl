@@ -94,7 +94,8 @@ function _solve_DYREL!(
     )
 
     # Keep viscosity argument interpolation consistent with x-periodic topology.
-    set_periodic_x_viscosity_args!(is_periodic_x(flow_bcs))
+    periodic_x = is_periodic_x(flow_bcs)
+    args_visc = (; args..., periodic_x = periodic_x)
 # Main.@infiltrate
     # unpack
     (;
@@ -159,9 +160,9 @@ function _solve_DYREL!(
     P_num = similar(stokes.P)
 
     # recompute all the DYREL variables
-    compute_viscosity!(stokes, phase_ratios, args, rheology, viscosity_cutoff)
+    compute_viscosity!(stokes, phase_ratios, args_visc, rheology, viscosity_cutoff)
     compute_ρg!(ρg[end], phase_ratios, rheology, args)
-    DYREL!(dyrel, stokes, rheology, phase_ratios, grid.di, dt; periodic_x = is_periodic_x(flow_bcs))
+    DYREL!(dyrel, stokes, rheology, phase_ratios, grid.di, dt; periodic_x = periodic_x)
 
     # Powell-Hestenes iterations
     for itPH in 1:10#00
@@ -197,7 +198,6 @@ function _solve_DYREL!(
         enforce_periodic_solver_fields_x!(stokes, flow_bcs)
 
         if !linear_viscosity
-            args_visc = args
             update_viscosity_τII!(
                 stokes,
                 phase_ratios,
@@ -338,7 +338,6 @@ function _solve_DYREL!(
             enforce_periodic_solver_fields_x!(stokes, flow_bcs)
 
             if !linear_viscosity
-                args_visc = args
                 update_viscosity_τII!(
                     stokes,
                     phase_ratios,
@@ -484,7 +483,6 @@ function _solve_DYREL!(
     stokes.τ_o.yy_v .= stokes.τ.yy_v
 
 
-    set_periodic_x_viscosity_args!(false)
     return (; err_evo_it, err_evo_V, err_evo_P)
 
 end

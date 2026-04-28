@@ -2,7 +2,7 @@
 using GeoParams#, CairoMakie
 using Printf
 # using Infiltrator
-const isCUDA = false
+const isCUDA = true
 
 @static if isCUDA
     using CUDA
@@ -36,7 +36,7 @@ else
     JustPIC.CPUBackend # Options: CPUBackend, CUDABackend, AMDGPUBackend
 end
 
-cd(@__DIR__)
+# cd(@__DIR__)
 # Load file with all the rheology configurations
 include("SShear2D_setup.jl")
 include("SShear2D_rheology.jl")
@@ -59,27 +59,34 @@ function copyinn_x!(A, B)
 end
 
 function wrap_particles_x!(particles, xvi)
-    xmin = xvi[1][1]
-    xmax = xvi[1][end]
+    xmin = minimum(xvi[1])
+    xmax = maximum(xvi[1])
     lx = xmax - xmin
     ppx = particles.coords[1].data
     idx = particles.index.data
 
-    @inbounds for k in eachindex(idx)
-        if idx[k]
-            x = ppx[k]
+    @parallel_indices (I) function _wrap_particles_x_kernel!(ppx, idx, xmin, xmax, lx)
+        @inbounds if idx[I] > 0
+            x = ppx[I]
             if x < xmin
-                ppx[k] = x + lx
+                ppx[I] = x + lx
             elseif x >= xmax
-                ppx[k] = x - lx
+                ppx[I] = x - lx
             end
         end
+        return nothing
     end
+
+    @parallel (@idx length(idx)) _wrap_particles_x_kernel!(ppx, idx, xmin, xmax, lx)
     return nothing
 end
 
 function enforce_periodic_phase_ratios_x!(phase_ratios)
-    @views phase_ratios.vertex[end, :] .= phase_ratios.vertex[1, :]
+    @parallel_indices (j) function _copy_periodic_vertex_x!(vertex)
+        vertex[size(vertex, 1), j] = vertex[1, j]
+        return nothing
+    end
+    @parallel (@idx (size(phase_ratios.vertex, 2))) _copy_periodic_vertex_x!(phase_ratios.vertex)
     return nothing
 end
 
@@ -146,40 +153,47 @@ function sanitize_particle_coords!(particles, xvi; periodic_x = false)
     ppy = particles.coords[2].data
     idx = particles.index.data
 
-    xmin, xmax = xvi[1][1], xvi[1][end]
-    ymin, ymax = xvi[2][1], xvi[2][end]
+    xmin, xmax = minimum(xvi[1]), maximum(xvi[1])
+    ymin, ymax = minimum(xvi[2]), maximum(xvi[2])
     lx = xmax - xmin
     ϵx = max(eps(Float64), 1.0e-12 * lx)
     ϵy = max(eps(Float64), 1.0e-12 * (ymax - ymin))
     xmid = 0.5 * (xmin + xmax)
     ymid = 0.5 * (ymin + ymax)
 
-    for I in eachindex(idx)
-        idx[I] <= 0 && continue
+    @parallel_indices (I) function _sanitize_particle_coords_kernel!(
+            ppx, ppy, idx, xmin, xmax, ymin, ymax, lx, ϵx, ϵy, xmid, ymid, periodic_x
+        )
+        @inbounds if idx[I] > 0
+            x = ppx[I]
+            y = ppy[I]
 
-        x = ppx[I]
-        y = ppy[I]
-
-        if !isfinite(x)
-            x = xmid
-        end
-        if !isfinite(y)
-            y = ymid
-        end
-
-        if periodic_x
-            if x < xmin || x ≥ xmax
-                x = xmin + mod(x - xmin, lx)
+            if !isfinite(x)
+                x = xmid
             end
-        else
-            x = clamp(x, xmin + ϵx, xmax - ϵx)
+            if !isfinite(y)
+                y = ymid
+            end
+
+            if periodic_x
+                if x < xmin || x >= xmax
+                    x = xmin + mod(x - xmin, lx)
+                end
+            else
+                x = clamp(x, xmin + ϵx, xmax - ϵx)
+            end
+
+            y = clamp(y, ymin + ϵy, ymax - ϵy)
+
+            ppx[I] = x
+            ppy[I] = y
         end
-
-        y = clamp(y, ymin + ϵy, ymax - ϵy)
-
-        ppx[I] = x
-        ppy[I] = y
+        return nothing
     end
+
+    @parallel (@idx length(idx)) _sanitize_particle_coords_kernel!(
+        ppx, ppy, idx, xmin, xmax, ymin, ymax, lx, ϵx, ϵy, xmid, ymid, periodic_x
+    )
     return nothing
 end
 
@@ -425,9 +439,10 @@ function main(
     # Set flags and parameters for visualization and output and create folders for output
     vis = prepare_visualisation(ni)
     # Physical properties using GeoParams ----------------
-    rheology = init_rheology_simple_shear()
-    rsf_params = init_rsf_params_simple_shear(di_min)
-    # rsf_params = nothing
+    # rheology = init_rheology_simple_shear()
+    rheology = init_rheology_nonNewtonian_plastic()
+    # rsf_params = init_rsf_params_simple_shear(di_min)
+    rsf_params = nothing
     # dt = 25.0e3 * 3600 * 24 * 365 # diffusive CFL timestep limiter
     dt = 1e7
     dt_max = 25.0e3 * 3600 * 24 * 365 # diffusive CFL timestep limiter
@@ -446,7 +461,7 @@ function main(
         Base.@_inline_meta
         ntuple(Val(length(grid_vxi_raw[i]))) do j
             Base.@_inline_meta
-            collect(grid_vxi_raw[i][j])
+            PTArray(backend_JP)(collect(grid_vxi_raw[i][j]))
         end
     end
     # material phase & temperature
@@ -499,7 +514,7 @@ function main(
     P_ref = 5e6  # Reference pressure in Pa
     stokes.P .+= P_ref
     # Rheology
-    args0 = (T = thermal.Tc, P = stokes.P, dt = Inf)
+    args0 = (T = thermal.Tc, P = stokes.P, dt = Inf, periodic_x = periodic_x)
     viscosity_cutoff = (1.0e18, 1.0e24)
     compute_viscosity!(stokes, phase_ratios, args0, rheology, viscosity_cutoff)
     center2vertex!(stokes.viscosity.ηv, stokes.viscosity.η)
@@ -507,7 +522,7 @@ function main(
 
     # PT coefficients for thermal diffusion
     pt_thermal = PTThermalCoeffs(
-        backend, rheology, phase_ratios, args0, dt, ni, di1, li; ϵ = 1.0e-8, CFL = 0.95 / √2
+        backend, rheology, phase_ratios, args0, dt, ni, di1.center, li; ϵ = 1.0e-8, CFL = 0.95 / √2
     )
 
     # Boundary conditions

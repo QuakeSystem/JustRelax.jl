@@ -108,11 +108,11 @@ function wrap_particles_x!(particles, xvi)
 end
 
 function enforce_periodic_phase_ratios_x!(phase_ratios)
-    @views begin
-        # center ratios are cell-centered physical DOFs; do not overwrite
-        # first/last columns in periodic mode.
-        phase_ratios.vertex[end, :] .= phase_ratios.vertex[1, :]
+    @parallel_indices (j) function _copy_periodic_vertex_x!(vertex)
+        vertex[size(vertex, 1), j] = vertex[1, j]
+        return nothing
     end
+    @parallel (@idx (size(phase_ratios.vertex, 2))) _copy_periodic_vertex_x!(phase_ratios.vertex)
     return nothing
 end
 
@@ -463,7 +463,7 @@ function main(
         Base.@_inline_meta
         ntuple(Val(length(grid_vxi_raw[i]))) do j
             Base.@_inline_meta
-            collect(grid_vxi_raw[i][j])
+            PTArray(backend_JP)(collect(grid_vxi_raw[i][j]))
         end
     end
     # material phase & temperature

@@ -1,12 +1,5 @@
 # # Traits
 
-const PERIODIC_X_VISCOSITY_ARGS = Ref(false)
-
-@inline function set_periodic_x_viscosity_args!(flag::Bool)
-    PERIODIC_X_VISCOSITY_ARGS[] = flag
-    return nothing
-end
-
 # without phase ratios
 @inline function update_viscosity_εII!(
         stokes::JustRelax.StokesArrays, args, rheology, cutoff; relaxation = 1.0e0
@@ -106,9 +99,7 @@ end
 
     fn = get_viscosity_fn(fn_viscosity)
 
-    fn(
-        stokes, phase_ratios, args, rheology, cutoff; relaxation = relaxation, air_phase = air_phase
-    )
+    fn(stokes, phase_ratios, args, rheology, cutoff; relaxation = relaxation, air_phase = air_phase)
     return nothing
 end
 
@@ -295,6 +286,8 @@ function _compute_viscosity!(
         cutoff,
         fn_viscosity::F
     ) where {F}
+    periodic_x = _extract_periodic_x(args)
+    args_kernel = _strip_viscosity_meta(args)
     ni = size(stokes.viscosity.η)
     # centered viscosity
     @parallel (@idx ni) compute_viscosity_kernel!(
@@ -302,12 +295,13 @@ function _compute_viscosity!(
         ν,
         phase_ratios.center,
         select_tensor_center(stokes, fn_viscosity)...,
-        args,
+        args_kernel,
         rheology,
         air_phase,
         cutoff,
         fn_viscosity,
         local_viscosity_args,
+        periodic_x,
     )
     # vertex viscosity
     # skip for 3D for now, may change in the future
@@ -317,12 +311,13 @@ function _compute_viscosity!(
             ν,
             phase_ratios.vertex,
             select_tensor_vertex(stokes, fn_viscosity)...,
-            args,
+            args_kernel,
             rheology,
             air_phase,
             cutoff,
             fn_viscosity,
             local_viscosity_args_vertex,
+            periodic_x,
         )
     end
     return nothing
@@ -338,17 +333,20 @@ function _compute_viscosity!(
         fn_viscosity::F,
         # do_vertices
     ) where {F}
+    periodic_x = _extract_periodic_x(args)
+    args_kernel = _strip_viscosity_meta(args)
     ni = size(stokes.viscosity.η)
     @parallel (@idx ni) compute_viscosity_kernel!(
         stokes.viscosity.η,
         ν,
         select_tensor_center(stokes, fn_viscosity)...,
-        args,
+        args_kernel,
         rheology,
         air_phase,
         cutoff,
         fn_viscosity,
         local_viscosity_args,
+        periodic_x,
     )
     # skip for 3D for now, may change in the future
     length(size(phase_ratios.center)) == 3 && return
@@ -357,11 +355,12 @@ function _compute_viscosity!(
         stokes.viscosity.ηv,
         ν,
         select_tensor_vertex(stokes, fn_viscosity)...,
-        args,
+        args_kernel,
         rheology,
         air_phase,
         cutoff,
         local_viscosity_args_vertex,
+        periodic_x,
     )
     return nothing
 end
@@ -385,7 +384,7 @@ end
 @inline select_tensor_vertex(stokes, ::typeof(compute_viscosity_τII), ::Val{3}) = @stress(stokes.τ)
 
 @parallel_indices (I...) function compute_viscosity_kernel!(
-        η, ν, ratios_center, Axx, Ayy, Axyv, args, rheology, air_phase::Integer, cutoff, fn_viscosity::F1, fn_args::F2
+        η, ν, ratios_center, Axx, Ayy, Axyv, args, rheology, air_phase::Integer, cutoff, fn_viscosity::F1, fn_args::F2, periodic_x::Bool
     ) where {F1, F2}
 
     # convenience closure
@@ -399,7 +398,7 @@ end
         AII_0 = allzero(A...) * eps()
 
         # argument fields at local index
-        args_ij = fn_args(args, I...)
+        args_ij = fn_args(args, I..., periodic_x)
         # args_ij = local_viscosity_args(args, I...)
 
         # local phase ratio
@@ -471,7 +470,8 @@ end
         air_phase::Integer,
         cutoff,
         fn_viscosity::F1,
-        fn_args::F2
+        fn_args::F2,
+        periodic_x::Bool
     ) where {F1, F2}
 
     # convenience closures
@@ -486,7 +486,7 @@ end
         AII_0 = allzero(Aij_normal...) * eps()
 
         # # argument fields at local index
-        args_ijk = fn_args(args, I...)
+        args_ijk = fn_args(args, I..., periodic_x)
 
         # local phase ratio
         ratio_ijk = @cell ratios_center[I...]
@@ -510,7 +510,17 @@ end
 
 ## HELPER FUNCTIONS
 
-@inline function local_viscosity_args(args, I::Vararg{Integer, N}) where {N}
+@generated function _strip_viscosity_meta(args::NamedTuple{K}) where {K}
+    kept = Tuple(k for k in K if k != :periodic_x)
+    vals = [:(getproperty(args, $(QuoteNode(k)))) for k in kept]
+    return :(NamedTuple{$kept}(($(vals...),)))
+end
+
+@inline function _extract_periodic_x(args::NamedTuple{K}) where {K}
+    return :periodic_x in K ? getproperty(args, :periodic_x) : false
+end
+
+@inline function local_viscosity_args(args::NamedTuple, I::Vararg{Integer, N}) where {N}
     v = map(values(args)) do a
         a isa AbstractArray ? getindex(a, I...) : a
     end
@@ -519,9 +529,13 @@ end
 end
 
 @inline function local_viscosity_args_vertex(args, i, j)
+    return local_viscosity_args_vertex(args, i, j, false)
+end
+
+@inline function local_viscosity_args_vertex(args::NamedTuple{K}, i::Integer, j::Integer, periodic_x::Bool) where {K}
     # clamp/wrap indices
-    nx, ny = size(args[1])
-    if PERIODIC_X_VISCOSITY_ARGS[]
+    nx, ny = size(getfield(args, 1))
+    if periodic_x
         # periodic-x mapping from vertex index i -> neighboring center columns
         ir = mod1(i, nx)
         il = mod1(i - 1, nx)
@@ -532,27 +546,45 @@ end
     jb = max(j - 1, 1)  # bottom
     jt = min(j, ny)   # top
     # average values at cell centers surrounding vertex
-    vals = values(args)
-    v = map(vals) do a
-        if a isa AbstractArray
-            v11 = getindex(a, il, jb)
-            v12 = getindex(a, ir, jb)
-            v21 = getindex(a, il, jt)
-            v22 = getindex(a, ir, jt)
-            0.25 * (v11 + v12 + v21 + v22)
-        else
-            a
-        end
-    end
+    v11 = getindex.(values(args), il, jb)
+    v12 = getindex.(values(args), ir, jb)
+    v21 = getindex.(values(args), il, jt)
+    v22 = getindex.(values(args), ir, jt)
+    v = @. 0.25 * (v11 + v12 + v21 + v22)
+    # create local args
+    local_args = (; zip(keys(args), v)..., dt = Inf, τII_old = 0.0)
+    return local_args
+end
+
+
+@inline function local_viscosity_args_vertex_correct(args, i, j)
+    # clamp indices
+    nx, ny = size(args[1])
+    il = max(i - 1, 1)  # left
+    ir = min(i, nx)   # right
+    jb = max(j - 1, 1)  # bottom
+    jt = min(j, ny)   # top
+    # average values at cell centers surrounding vertex
+    v11 = getindex.(values(args), il, jb)
+    v12 = getindex.(values(args), ir, jb)
+    v21 = getindex.(values(args), il, jt)
+    v22 = getindex.(values(args), ir, jt)
+    v = @. 0.25 * (v11 + v12 + v21 + v22)
     # create local args
     local_args = (; zip(keys(args), v)..., dt = Inf, τII_old = 0.0)
     return local_args
 end
 
 @inline function local_viscosity_args_vertex(args, i, j, k)
+    return local_viscosity_args_vertex(args, i, j, k, false)
+end
+
+@inline function local_viscosity_args_vertex(
+        args::NamedTuple{K}, i::Integer, j::Integer, k::Integer, periodic_x::Bool
+    ) where {K}
     # clamp/wrap indices
-    nx, ny, nz = size(args[1])
-    if PERIODIC_X_VISCOSITY_ARGS[]
+    nx, ny, nz = size(getfield(args, 1))
+    if periodic_x
         ir = mod1(i, nx)
         il = mod1(i - 1, nx)
     else
@@ -564,22 +596,15 @@ end
     kf = max(k - 1, 1)  # front
     kb = min(k, nz)   # back
     # average values at cell centers surrounding vertex
-    vals = values(args)
-    v = map(vals) do a
-        if a isa AbstractArray
-            v111 = getindex(a, il, jb, kf)
-            v121 = getindex(a, ir, jb, kf)
-            v211 = getindex(a, il, jt, kf)
-            v221 = getindex(a, ir, jt, kf)
-            v112 = getindex(a, il, jb, kb)
-            v122 = getindex(a, ir, jb, kb)
-            v212 = getindex(a, il, jt, kb)
-            v222 = getindex(a, ir, jt, kb)
-            0.125 * (v111 + v121 + v211 + v221 + v112 + v122 + v212 + v222)
-        else
-            a
-        end
-    end
+    v111 = getindex.(values(args), il, jb, kf)
+    v121 = getindex.(values(args), ir, jb, kf)
+    v211 = getindex.(values(args), il, jt, kf)
+    v221 = getindex.(values(args), ir, jt, kf)
+    v112 = getindex.(values(args), il, jb, kb)
+    v122 = getindex.(values(args), ir, jb, kb)
+    v212 = getindex.(values(args), il, jt, kb)
+    v222 = getindex.(values(args), ir, jt, kb)
+    v = @. 0.125 * (v111 + v121 + v211 + v221 + v112 + v122 + v212 + v222)
     # create local args
     local_args = (; zip(keys(args), v)..., dt = Inf, τII_old = 0.0)
     return local_args

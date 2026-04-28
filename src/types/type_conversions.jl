@@ -20,6 +20,7 @@ const JR_T = Union{
 Array(x::T) where {T <: JR_T} = Array(backend(x), x)
 Array(::Nothing) = nothing
 Array(::CPUBackendTrait, x) = x
+Array(m::Mask) = Mask(Array(m.mask))
 
 function Array(::GPUBackendTrait, x::T) where {T <: JR_T}
     nfields = fieldcount(T)
@@ -34,6 +35,7 @@ end
 ## Copy JustRelax custom structs
 
 copy(::Nothing) = nothing
+copy(m::Mask) = Mask(copy(m.mask))
 
 function copy(x::T) where {T <: JR_T}
     nfields = fieldcount(T)
@@ -60,5 +62,6 @@ end
 
 # Helper function to handle the conversion logic
 @inline _convert_to_backend(backend, field::T) where {T <: JR_T} = PTArray(backend, field)
+@inline _convert_to_backend(backend, field::Mask) = Mask(PTArray(backend)(field.mask))
 @inline _convert_to_backend(backend, field) = PTArray(backend)(field)
 @inline _convert_to_backend(backend, ::Nothing) = nothing

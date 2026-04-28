@@ -210,7 +210,9 @@ end
 
 ## viscosity
 
-function JR3D.compute_viscosity!(::CUDABackendTrait, stokes, ν, args, rheology, cutoff, fn_viscosity::F) where {F}
+function JR3D.compute_viscosity!(
+        ::CUDABackendTrait, stokes, ν, args, rheology, cutoff, fn_viscosity::F
+    ) where {F}
     return _compute_viscosity!(stokes, ν, args, rheology, cutoff, fn_viscosity)
 end
 
@@ -221,7 +223,15 @@ function JR3D.compute_viscosity!(
 end
 
 function JR3D.compute_viscosity!(
-        ::CUDABackendTrait, stokes, ν, phase_ratios, args, rheology, air_phase, cutoff, fn_viscosity::F
+        ::CUDABackendTrait,
+        stokes,
+        ν,
+        phase_ratios,
+        args,
+        rheology,
+        air_phase,
+        cutoff,
+        fn_viscosity::F
     ) where {F}
     return _compute_viscosity!(stokes, ν, phase_ratios, args, rheology, air_phase, cutoff, fn_viscosity)
 end
@@ -230,12 +240,22 @@ function JR3D.compute_viscosity!(η, ν, εII::CuArray, args, rheology, cutoff)
     return compute_viscosity!(η, ν, εII, args, rheology, cutoff)
 end
 
-function compute_viscosity!(::CUDABackendTrait, stokes, ν, args, rheology, cutoff, fn_viscosity::F) where {F}
+function compute_viscosity!(
+        ::CUDABackendTrait, stokes, ν, args, rheology, cutoff, fn_viscosity::F
+    ) where {F}
     return _compute_viscosity!(stokes, ν, args, rheology, cutoff, fn_viscosity)
 end
 
 function compute_viscosity!(
-        ::CUDABackendTrait, stokes, ν, phase_ratios, args, rheology, air_phase, cutoff, fn_viscosity::F
+        ::CUDABackendTrait,
+        stokes,
+        ν,
+        phase_ratios,
+        args,
+        rheology,
+        air_phase,
+        cutoff,
+        fn_viscosity::F
     ) where {F}
     return _compute_viscosity!(stokes, ν, phase_ratios, args, rheology, air_phase, cutoff, fn_viscosity)
 end
