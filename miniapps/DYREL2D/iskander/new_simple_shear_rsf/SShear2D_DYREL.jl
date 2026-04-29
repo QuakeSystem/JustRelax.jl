@@ -2,7 +2,7 @@
 using GeoParams#, CairoMakie
 using Printf
 # using Infiltrator
-const isCUDA = false
+const isCUDA = true
 
 @static if isCUDA
     using CUDA
@@ -167,24 +167,36 @@ function max_state_change_rsf(a, b, L, D, λ, P, G, ν)
     return clamp(θmax, 0.1, 0.2)
 end
 
-function compute_dt_ratestate_global(rsf_params, rsf_state, P; dt_min = 1.0e-4, dt_max = 1.0e8, f_courant = 1.0e-3)
-    phase = 2 # use velocity-weakening branch as conservative controller
+function compute_dt_ratestate_global(
+    rsf_params,
+    rsf_state,
+    P;
+    dt_min = 1.0e-4,
+    dt_max = 1.0e8,
+    f_courant = 1.0e-3,
+    # Match `init_rheology_simple_shear` / `SetConstantElasticity` shear modulus (not 40 GPa).
+    G = 3.0e10,
+    ν = 0.49,
+)
+    # Use velocity-weakening layer (phase 2) as conservative RSF timestep controller.
+    phase = 2
     a = _rsf_pick(rsf_params.a, phase)
     b = _rsf_pick(rsf_params.b, phase)
     L = _rsf_pick(rsf_params.L, phase)
     D = _rsf_pick(rsf_params.D, phase)
     λ = _rsf_pick(rsf_params.λ, phase)
     V0 = hasproperty(rsf_params, :V0) ? _rsf_pick(rsf_params.V0, phase) : rsf_params.V0_model
-    Vp = maximum(Array(rsf_state.Vp_center))
+    Vp_raw = maximum(Array(rsf_state.Vp_center))
+    # Floor slip rate so Courant / weakening limits stay finite (same spirit as first RSF substeps).
+    Vp = max(Vp_raw, 1.0e-6 * V0)
     Ω = minimum(Array(rsf_state.Ω_center))
     Pm = maximum(Array(P))
-    # keep G,ν explicit and aligned with miniapp rheology init for now
-    θmax = max_state_change_rsf(a, b, L, D, λ, Pm, 40.0e9, 0.25)
+    θmax = max_state_change_rsf(a, b, L, D, λ, Pm, G, ν)
     dt_c = dt_courant_rsf(Vp, D; f = f_courant)
     dt_h = dt_healing_rsf(L, V0, Ω)
     dt_w = dt_weakening_rsf(L, θmax, Vp)
-    return clamp(min(dt_c, dt_h, dt_w), dt_min, dt_max)*10
-    return (1/Vp)/8.0
+    dt = min(dt_c, dt_h, dt_w)
+    return clamp(dt, dt_min, dt_max)
 end
 
 function compute_mu_eff_field(τII::AbstractMatrix, P::AbstractMatrix, phase_center, rsf_params)

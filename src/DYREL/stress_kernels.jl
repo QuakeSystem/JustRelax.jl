@@ -51,6 +51,19 @@ end
 @inline _rsf_phase_on(rsf_params, phase::Int) =
     hasproperty(rsf_params, :active) ? Bool(_rsf_pick(rsf_params.active, phase)) : true
 
+# Slip velocity for state evolution: sinh form as in RheologyCalculator `RateState_HypoPlastic.compute_strain_rate`
+# (Herrendörfer et al. style). Used for Ω update and returned Vp so 0D state tracks the same law as the RC example.
+@inline function _rsf_vp_sinh_ratestate(
+        τ::T, Ω_old::T, P::T, λ_rsf::T, C_rsf::T, a::T, b::T, μ0::T, V0::T, Vp_max::T,
+    ) where {T <: Real}
+    denom = max(a * P * (1.0 - λ_rsf), eps(T))
+    x = max(τ - C_rsf, zero(T)) / denom
+    x = min(x, T(350.0))
+    ex = exp(-(μ0 + b * Ω_old) / max(a, eps(T)))
+    vp = T(2.0) * V0 * sinh(x) * ex
+    return clamp(vp, zero(T), Vp_max)
+end
+
 @parallel_indices (I...) function compute_stress_DRYEL!(
         τ,
         τ_v,
@@ -200,17 +213,64 @@ end
             η_max = hasproperty(rsf_params, :η_max) ? _rsf_pick(rsf_params.η_max, phase) : 1.0e23
             P_rsf = max(P * (1.0 - λ_rsf) + p_shift, eps(Float64))
 
-            # RSF viscous form driven by local strain rate (stable in Stokes solve).
-            Vp = 2.0 * D * εII
-            # println("Vp = $Vp")
+            # Local RSF consistency solve:
+            # keep Ω_old fixed during nonlinear iterations and only commit Ω after solver convergence.
             Vp_max = hasproperty(rsf_params, :Vp_max) ? _rsf_pick(rsf_params.Vp_max, phase) : 1.0e19
-            Vp = clamp(Vp, 0.0, Vp_max)
+            use_bisection = hasproperty(rsf_params, :use_bisection) ? Bool(_rsf_pick(rsf_params.use_bisection, phase)) : false
+            maxit = hasproperty(rsf_params, :maxit) ? Int(_rsf_pick(rsf_params.maxit, phase)) : (use_bisection ? 30 : 8)
+            rtol = hasproperty(rsf_params, :rtol) ? _rsf_pick(rsf_params.rtol, phase) : 1.0e-6
 
             exp_arg = (μ0 + b * Ω_old) / max(a, eps(Float64))
-            # exp_arg = min(exp_arg, 700.0)
-            μd = a * asinh(Vp / max(2.0 * V0, eps(Float64)) * exp(exp_arg))
-            τII_rsf = P_rsf * μd + C_rsf
-            η_rsf = τII_rsf / max(2.0 * εII, eps(Float64))
+            exp_arg = min(exp_arg, 700.0)
+            εII_loc = max(εII, eps(Float64))
+
+            @inline eval_tau_rsf_from_tau(τc) = begin
+                DIIpl = max(εII_loc - τc / max(2.0 * η_ve, eps(Float64)), 0.0)
+                Vpc = clamp(2.0 * D * DIIpl, 0.0, Vp_max)
+                μc = a * asinh(Vpc / max(2.0 * V0, eps(Float64)) * exp(exp_arg))
+                τrsf = P_rsf * μc + C_rsf
+                τrsf, Vpc
+            end
+
+            τ_hi = max(2.0 * η_ve * εII_loc, C_rsf + P_rsf * (μ0 + abs(b * Ω_old) + 1.0))
+            τ_lo = 0.0
+            τ_rsf_lo, Vp_lo = eval_tau_rsf_from_tau(τ_lo)
+            τ_rsf_hi, Vp_hi = eval_tau_rsf_from_tau(τ_hi)
+            g_lo = τ_lo - τ_rsf_lo
+            g_hi = τ_hi - τ_rsf_hi
+
+            τ_sol = τII
+            Vp = clamp(2.0 * D * εII_loc, 0.0, Vp_max)
+            if use_bisection && g_lo * g_hi <= 0.0
+                for _ in 1:maxit
+                    τ_mid = 0.5 * (τ_lo + τ_hi)
+                    τ_rsf_mid, Vp_mid = eval_tau_rsf_from_tau(τ_mid)
+                    g_mid = τ_mid - τ_rsf_mid
+                    τ_sol = τ_mid
+                    Vp = Vp_mid
+                    abs(g_mid) <= rtol * max(abs(τ_mid), 1.0) && break
+                    if g_lo * g_mid <= 0.0
+                        τ_hi = τ_mid
+                        g_hi = g_mid
+                    else
+                        τ_lo = τ_mid
+                        g_lo = g_mid
+                    end
+                end
+            else
+                # Fast fixed-point update (default) or fallback if no strict sign change in bracket.
+                τ_fp = clamp(τII, 0.0, τ_hi)
+                for _ in 1:maxit
+                    τ_rsf_fp, Vp_fp = eval_tau_rsf_from_tau(τ_fp)
+                    τ_new = clamp(0.5 * τ_fp + 0.5 * τ_rsf_fp, 0.0, τ_hi)
+                    τ_sol = τ_new
+                    Vp = Vp_fp
+                    abs(τ_new - τ_fp) <= rtol * max(abs(τ_fp), 1.0) && break
+                    τ_fp = τ_new
+                end
+            end
+
+            η_rsf = τ_sol / max(2.0 * εII_loc, eps(Float64))
             η_rsf = clamp(η_rsf, η_min, η_max)
             η_vep = min(η_ve, η_rsf)
             if !isfinite(η_vep)
@@ -222,7 +282,7 @@ end
                 return (zero_tuple(εij)..., zero_tuple(εij)..., 0.0, 0.0, 0.0, η, Ω_old, 0.0)
             end
             εij_pl = zero_tuple(εij)
-            Vp = 2.0 * V0 * sinh(max(τII - C_rsf, 0.0) / (a * P_rsf)) * exp(-exp_arg)
+            Vp = _rsf_vp_sinh_ratestate(τII, Ω_old, P, λ_rsf, C_rsf, a, b, μ0, V0, Vp_max)
             var_rsf = (Vp * dt) / max(L, eps(Float64))
             Ω = if var_rsf <= 1.0e-6
                 log(exp(Ω_old) * (1.0 - var_rsf) + V0 * dt / max(L, eps(Float64)))
@@ -230,14 +290,6 @@ end
                 log(V0 / max(Vp, eps(Float64)) + (exp(Ω_old) - V0 / max(Vp, eps(Float64))) * exp(-var_rsf))
             end
             Ω = clamp(Ω, -100.0, 100.0)
-            # println("Ω = $Ω")
-            # println("P_rsf = $P_rsf")
-            # println("Vp = $Vp")
-            # println("dt = $dt")
-            # println("var_rsf = $var_rsf")
-            # println("μd = $μd")
-            # println("τII = $τII")
-            # error("stop")   
             if !isfinite(Ω)
                 Ω = Ω_old
             end

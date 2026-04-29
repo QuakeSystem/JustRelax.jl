@@ -90,7 +90,7 @@ function init_rsf_params_ratestate_simple_shear(di_min; V0_model = 4.0e-9)
     # Phase order follows init_rheologies:
     # 1: media, 2: velocity weakening, 3: velocity strengthening, 4: sticky air.
     return (
-        active = (true, true, true, false),
+        active = (false, true, false, false),
         λ = (0.0, 0.0, 0.0, 0.0),
         μ0 = (0.2, 0.2, 0.2, 0.0),
         a = (0.011, 0.011, 0.011, 0.0),
@@ -99,17 +99,22 @@ function init_rsf_params_ratestate_simple_shear(di_min; V0_model = 4.0e-9)
         C = (0.0, 0.0, 0.0, 0.0),
         D = (di_min, di_min, di_min, di_min),
         Ω_init = (40.0, 40.0, 40.0, 0.0),
+        V0 = (V0_model, V0_model, V0_model, V0_model),
         V0_model = V0_model,
         Vp_max = 1.0e19,
+        p_shift = (0.0, 0.0, 0.0, 0.0),
         η_min = (1.0e18, 1.0e18, 1.0e18, 1.0e18),
         η_max = (1.0e23, 1.0e23, 1.0e23, 1.0e23),
+        use_bisection = (false, false, false, false),
+        maxit = (12, 12, 12, 8),
+        rtol = (1.0e-6, 1.0e-6, 1.0e-6, 1.0e-6),
     )
 end
 
 function init_rsf_params_lamem_simple_shear(di_min; V0_model = 4.0e-9)
     # Parameters aligned with the LaMEM RSF example shared earlier:
     # a_rsf=0.011, b_rsf=0.017, mu0_rsf=0.2, L_rsf=0.01, state_rsf_init=40, V0_rsf=4e-9.
-    # Activate RSF only on phase 2 (velocity-weakening layer) for a cleaner benchmark.
+    # `V0` / `p_shift` / solver knobs mirror `stress_kernels.jl` + `ratestate_0d_coupled` tests.
     return (
         active = (true, true, true, false),
         λ = (0.0, 0.0, 0.0, 0.0),
@@ -120,10 +125,15 @@ function init_rsf_params_lamem_simple_shear(di_min; V0_model = 4.0e-9)
         C = (0e0, 0.0, 0.0, 0.0),
         D = (di_min, di_min, di_min, di_min),
         Ω_init = (40.0, 0.0, 0.0, 0.0),
+        V0 = (V0_model, V0_model, V0_model, V0_model),
         V0_model = V0_model,
         Vp_max = 1.0e19,
+        p_shift = (0.0, 0.0, 0.0, 0.0),
         η_min = (1.0e18, 1.0e18, 1.0e18, 1.0e18),
         η_max = (1.0e23, 1.0e23, 1.0e23, 1.0e23),
+        use_bisection = (false, false, false, false),
+        maxit = (12, 12, 12, 8),
+        rtol = (1.0e-6, 1.0e-6, 1.0e-6, 1.0e-6),
     )
 end
 
