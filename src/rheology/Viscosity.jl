@@ -528,6 +528,15 @@ end
     return local_args
 end
 
+# Allow kernels to pass periodic_x without treating Bool as an array index.
+@inline function local_viscosity_args(args::NamedTuple, i::Integer, j::Integer, ::Bool)
+    return local_viscosity_args(args, i, j)
+end
+
+@inline function local_viscosity_args(args::NamedTuple, i::Integer, j::Integer, k::Integer, ::Bool)
+    return local_viscosity_args(args, i, j, k)
+end
+
 @inline function local_viscosity_args_vertex(args, i, j)
     return local_viscosity_args_vertex(args, i, j, false)
 end

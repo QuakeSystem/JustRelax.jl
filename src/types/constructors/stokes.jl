@@ -296,8 +296,10 @@ function StokesArrays(ni::NTuple{N, Integer}; periodic_x::Bool = false) where {N
     λ = @zeros(ni...)
     λv = @zeros(ni .+ 1...)
     ΔPψ = @zeros(ni...)
-    mask_vbox_x = JustRelax.Mask(similar(R.Rx))
-    mask_vbox_y = JustRelax.Mask(similar(R.Ry))
+    # IMPORTANT: `similar(...)` is uninitialized; masks must start at zero
+    # otherwise `apply_mask!` can inject NaN/garbage into residuals.
+    mask_vbox_x = JustRelax.Mask(@zeros(size(R.Rx)...))
+    mask_vbox_y = JustRelax.Mask(@zeros(size(R.Ry)...))
 
     return JustRelax.StokesArrays(
         P,

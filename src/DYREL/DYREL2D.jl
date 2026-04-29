@@ -28,6 +28,7 @@ end
     τo_xy_mis = maximum(abs.(Array(stokes.τ_o.xy[end, :]) .- Array(stokes.τ_o.xy[1, :])))
     return (; P = p_mis, ΔPψ = ΔPψ_mis, τxx = τxx_mis, τyy = τyy_mis, τxy = τxy_mis, τo_xy = τo_xy_mis)
 end
+
 """
     solve_DYREL!(stokes::JustRelax.StokesArrays, args...; kwargs)
 
@@ -90,6 +91,7 @@ function _solve_DYREL!(
         linear_viscosity = false,
         apply_velocity_box = nothing,  # optional f(stokes) to enforce internal velocity boxes after each V update
         rsf_params = nothing,          # optional RSF-like plasticity parameters
+        rsf_state = nothing,           # optional RSF state fields (Ω, Vp)
         kwargs...,
     )
 
@@ -188,12 +190,12 @@ function _solve_DYREL!(
             λ_relaxation_PH,
             dt;
             rsf_params = rsf_params,
+            rsf_state = rsf_state,
             periodic_x = is_periodic_x(flow_bcs),
         ) # not resetting λ in every PH iteration seems to work better
-        # update_halo!(stokes.λv)
-        # update_halo!(stokes.τ.xx_v)
-        # update_halo!(stokes.τ.yy_v)
-        # update_halo!(stokes.τ.xy)
+        update_halo!(stokes.τ.xx_v)
+        update_halo!(stokes.τ.yy_v)
+        update_halo!(stokes.τ.xy)
 
         enforce_periodic_solver_fields_x!(stokes, flow_bcs)
 
@@ -269,8 +271,8 @@ function _solve_DYREL!(
         )
 
         if verbose_PH && igg.me == 0
-            #@printf("    itPH = %02d iter = %06d iter/nx = %03d, err = %1.3e - norm[Rx=%1.3e %1.3e, Ry=%1.3e %1.3e, Rp=%1.3e %1.3e] \n", itPH, iter, iter / ni[1], err, errVx, errVx / errVx0, errVy, errVy / errVy0, errPt, errPt / errPt0)
-            @printf("itPH = %02d err = %1.3e \n", itPH, err)
+            @printf("    itPH = %02d iter = %06d iter/nx = %03d, err = %1.3e - norm[Rx=%1.3e %1.3e, Ry=%1.3e %1.3e, Rp=%1.3e %1.3e] \n", itPH, iter, iter / ni[1], err, errVx, errVx / errVx0, errVy, errVy / errVy0, errPt, errPt / errPt0)
+            # @printf("itPH = %02d err = %1.3e \n", itPH, err)
         end
         igg.me == 0 && isnan(err) && error("NaN detected in outer loop")
         igg.me == 0 && err > 1.0e10 && error("Kaboom! Error > 1e10 in outer loop")
@@ -328,12 +330,12 @@ function _solve_DYREL!(
                 λ_relaxation_DR,
                 dt;
                 rsf_params = rsf_params,
+                rsf_state = rsf_state,
                 periodic_x = is_periodic_x(flow_bcs),
             )
-            # update_halo!(stokes.λv)
-            # update_halo!(stokes.τ.xx_v)
-            # update_halo!(stokes.τ.yy_v)
-            # update_halo!(stokes.τ.xy)
+            update_halo!(stokes.τ.xx_v)
+            update_halo!(stokes.τ.yy_v)
+            update_halo!(stokes.τ.xy)
 
             enforce_periodic_solver_fields_x!(stokes, flow_bcs)
 
@@ -481,6 +483,11 @@ function _solve_DYREL!(
     @parallel (@idx ni) multi_copy!(@tensor_center(stokes.τ_o), @tensor_center(stokes.τ))
     stokes.τ_o.xx_v .= stokes.τ.xx_v
     stokes.τ_o.yy_v .= stokes.τ.yy_v
+
+    if rsf_state !== nothing
+        copyto!(rsf_state.Ω_center, rsf_state.Ω_center_new)
+        copyto!(rsf_state.Ω_vertex, rsf_state.Ω_vertex_new)
+    end
 
 
     return (; err_evo_it, err_evo_V, err_evo_P)
