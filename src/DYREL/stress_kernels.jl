@@ -64,6 +64,18 @@ end
     return clamp(vp, zero(T), Vp_max)
 end
 
+# Local RSF residual τ − τ_rsf(τ): must be a plain function (no nested closure), otherwise
+# GPUCompiler rejects `compute_stress_DRYEL!` with "unsupported dynamic function invocation".
+@inline function _eval_tau_rsf_from_tau(
+        τc::T, εII_loc::T, η_ve::T, D::T, Vp_max::T, a::T, V0::T, exp_arg::T, P_rsf::T, C_rsf::T,
+    ) where {T <: Real}
+    DIIpl = max(εII_loc - τc / max(T(2.0) * η_ve, eps(T)), T(0.0))
+    Vpc = clamp(T(2.0) * D * DIIpl, T(0.0), Vp_max)
+    μc = a * asinh(Vpc / max(T(2.0) * V0, eps(T)) * exp(exp_arg))
+    τrsf = P_rsf * μc + C_rsf
+    return τrsf, Vpc
+end
+
 @parallel_indices (I...) function compute_stress_DRYEL!(
         τ,
         τ_v,
@@ -209,7 +221,7 @@ end
             C_rsf = hasproperty(rsf_params, :C) ? _rsf_pick(rsf_params.C, phase) : 0.0
             V0 = hasproperty(rsf_params, :V0) ? _rsf_pick(rsf_params.V0, phase) :
                 (hasproperty(rsf_params, :V0_model) ? rsf_params.V0_model : 1.0e-9)
-            η_min = hasproperty(rsf_params, :η_min) ? _rsf_pick(rsf_params.η_min, phase) : 1.0e18
+            η_min = hasproperty(rsf_params, :η_min) ? _rsf_pick(rsf_params.η_min, phase) : 1.0e0
             η_max = hasproperty(rsf_params, :η_max) ? _rsf_pick(rsf_params.η_max, phase) : 1.0e23
             P_rsf = max(P * (1.0 - λ_rsf) + p_shift, eps(Float64))
 
@@ -218,24 +230,16 @@ end
             Vp_max = hasproperty(rsf_params, :Vp_max) ? _rsf_pick(rsf_params.Vp_max, phase) : 1.0e19
             use_bisection = hasproperty(rsf_params, :use_bisection) ? Bool(_rsf_pick(rsf_params.use_bisection, phase)) : false
             maxit = hasproperty(rsf_params, :maxit) ? Int(_rsf_pick(rsf_params.maxit, phase)) : (use_bisection ? 30 : 8)
-            rtol = hasproperty(rsf_params, :rtol) ? _rsf_pick(rsf_params.rtol, phase) : 1.0e-6
+            rtol = hasproperty(rsf_params, :rtol) ? _rsf_pick(rsf_params.rtol, phase) : 1.0e-2
 
             exp_arg = (μ0 + b * Ω_old) / max(a, eps(Float64))
-            exp_arg = min(exp_arg, 700.0)
+            # exp_arg = min(exp_arg, 700.0)
             εII_loc = max(εII, eps(Float64))
-
-            @inline eval_tau_rsf_from_tau(τc) = begin
-                DIIpl = max(εII_loc - τc / max(2.0 * η_ve, eps(Float64)), 0.0)
-                Vpc = clamp(2.0 * D * DIIpl, 0.0, Vp_max)
-                μc = a * asinh(Vpc / max(2.0 * V0, eps(Float64)) * exp(exp_arg))
-                τrsf = P_rsf * μc + C_rsf
-                τrsf, Vpc
-            end
 
             τ_hi = max(2.0 * η_ve * εII_loc, C_rsf + P_rsf * (μ0 + abs(b * Ω_old) + 1.0))
             τ_lo = 0.0
-            τ_rsf_lo, Vp_lo = eval_tau_rsf_from_tau(τ_lo)
-            τ_rsf_hi, Vp_hi = eval_tau_rsf_from_tau(τ_hi)
+            τ_rsf_lo, Vp_lo = _eval_tau_rsf_from_tau(τ_lo, εII_loc, η_ve, D, Vp_max, a, V0, exp_arg, P_rsf, C_rsf)
+            τ_rsf_hi, Vp_hi = _eval_tau_rsf_from_tau(τ_hi, εII_loc, η_ve, D, Vp_max, a, V0, exp_arg, P_rsf, C_rsf)
             g_lo = τ_lo - τ_rsf_lo
             g_hi = τ_hi - τ_rsf_hi
 
@@ -244,7 +248,7 @@ end
             if use_bisection && g_lo * g_hi <= 0.0
                 for _ in 1:maxit
                     τ_mid = 0.5 * (τ_lo + τ_hi)
-                    τ_rsf_mid, Vp_mid = eval_tau_rsf_from_tau(τ_mid)
+                    τ_rsf_mid, Vp_mid = _eval_tau_rsf_from_tau(τ_mid, εII_loc, η_ve, D, Vp_max, a, V0, exp_arg, P_rsf, C_rsf)
                     g_mid = τ_mid - τ_rsf_mid
                     τ_sol = τ_mid
                     Vp = Vp_mid
@@ -261,7 +265,7 @@ end
                 # Fast fixed-point update (default) or fallback if no strict sign change in bracket.
                 τ_fp = clamp(τII, 0.0, τ_hi)
                 for _ in 1:maxit
-                    τ_rsf_fp, Vp_fp = eval_tau_rsf_from_tau(τ_fp)
+                    τ_rsf_fp, Vp_fp = _eval_tau_rsf_from_tau(τ_fp, εII_loc, η_ve, D, Vp_max, a, V0, exp_arg, P_rsf, C_rsf)
                     τ_new = clamp(0.5 * τ_fp + 0.5 * τ_rsf_fp, 0.0, τ_hi)
                     τ_sol = τ_new
                     Vp = Vp_fp

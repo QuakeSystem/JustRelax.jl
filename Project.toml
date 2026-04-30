@@ -21,7 +21,6 @@ ParallelStencil = "94395366-693c-11ea-3b26-d9b7aac5d958"
 Plots = "91a5bcdd-55d7-5caf-9e0b-520d859cae80"
 Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
 Reexport = "189a3867-3050-52da-a836-e630ba90ab69"
-RheologyCalculator = "62cdc9a2-0e94-40de-8fb5-c079398d65d0"
 StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
 Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
 TOML = "fa267f1f-6049-4f14-aa54-33bafae1ed76"
@@ -31,9 +30,6 @@ WriteVTK = "64499a7a-5c06-52f2-abe2-ccb03c286192"
 AMDGPU = "21141c5a-9bdb-4563-92ae-f87d6854732e"
 CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
 Makie = "ee78f7c6-11fb-53f2-987a-cfe4a2b5a57a"
-
-[sources]
-RheologyCalculator = {path = "RheologyCalculator.jl"}
 
 [extensions]
 JustRelaxAMDGPUExt = "AMDGPU"
@@ -59,7 +55,6 @@ MuladdMacro = "0.2"
 ParallelStencil = "0.14.2, 0.15, 0.16"
 Plots = "1"
 Reexport = "1.2.2"
-RheologyCalculator = "0.1.0"
 StaticArrays = "1"
 Statistics = "1"
 TOML = "1.0.3"

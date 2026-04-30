@@ -129,10 +129,10 @@ function init_rsf_params_lamem_simple_shear(di_min; V0_model = 4.0e-9)
         V0_model = V0_model,
         Vp_max = 1.0e19,
         p_shift = (0.0, 0.0, 0.0, 0.0),
-        η_min = (1.0e18, 1.0e18, 1.0e18, 1.0e18),
+        η_min = (1.0e1, 1.0e1, 1.0e1, 1.0e1),
         η_max = (1.0e23, 1.0e23, 1.0e23, 1.0e23),
-        use_bisection = (false, false, false, false),
-        maxit = (12, 12, 12, 8),
+        use_bisection = (true, true, true, false),
+        maxit = (120, 120, 120, 8),
         rtol = (1.0e-6, 1.0e-6, 1.0e-6, 1.0e-6),
     )
 end

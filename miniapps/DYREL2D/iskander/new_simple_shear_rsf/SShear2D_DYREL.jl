@@ -196,7 +196,8 @@ function compute_dt_ratestate_global(
     dt_h = dt_healing_rsf(L, V0, Ω)
     dt_w = dt_weakening_rsf(L, θmax, Vp)
     dt = min(dt_c, dt_h, dt_w)
-    return clamp(dt, dt_min, dt_max)
+    # return clamp(dt, dt_min, dt_max)
+    return min((1/Vp)/8.0,5e8)
 end
 
 function compute_mu_eff_field(τII::AbstractMatrix, P::AbstractMatrix, phase_center, rsf_params)
@@ -321,7 +322,7 @@ function prepare_visualisation(ni)
     pictures = false # set to true to generate PNG figures of particles and fields using Makie
     # IF VTK OUTPUT YES
     pvd_name = "Simple_Shear_2d"
-    figdir   = "Simple_Shear_results"
+    figdir   = "Simple_Shear_results_rsf_unhinged"
     save_particle_points = false # set to true to save particle point clouds as VTK files (can generate large files)
     vtk_every = 1 # save VTK every N iterations
     particle_vtk_every = 1 # save particle VTK every N iterations
@@ -618,7 +619,7 @@ function main(
     stokes.P .+= P_ref
     # Rheology
     args0 = (T = thermal.Tc, P = stokes.P, dt = Inf, periodic_x = periodic_x)
-    viscosity_cutoff = (1.0e18, 1.0e24)
+    viscosity_cutoff = (1.0e1, 1.0e24)
     compute_viscosity!(stokes, phase_ratios, args0, rheology, viscosity_cutoff)
     center2vertex!(stokes.viscosity.ηv, stokes.viscosity.η)
     # ----------------------------------------------------
@@ -725,7 +726,7 @@ function main(
                     end,
                     rsf_params = rsf_params,
                     rsf_state = rsf_state,
-                    viscosity_cutoff = (1.0e18, 1.0e23),
+                    viscosity_cutoff = (1.0e1, 1.0e23),
                 )
             )
         end
