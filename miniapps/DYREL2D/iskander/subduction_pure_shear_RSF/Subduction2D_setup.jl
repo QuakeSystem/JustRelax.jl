@@ -139,7 +139,7 @@ function GMG_subduction_2D_with_coords(
     w_ref_ratio::Float64 = 1 / 2, 
     k::Float64 = 16.0,
     x_center_frac::Float64 = 0.5,
-    y_center_frac::Float64 = 0.5,
+    y_center_frac::Float64 = 0.57,
     verbose::Int = 1,
 )
     model_depth = 150.0 # POSITIVE VALUE IN KM
@@ -165,8 +165,8 @@ function GMG_subduction_2D_with_coords(
         z0_km,
         z1_km;
         ref_grid = ref_grid,
-        refine_factor = refine_factor/4,
-        w_ref_ratio = w_ref_ratio/1.5,
+        refine_factor = refine_factor/3,
+        w_ref_ratio = w_ref_ratio/1.3,
         x_center_frac = y_center_frac,
         k = k,
         verbose = verbose,
@@ -191,7 +191,7 @@ function GMG_subduction_2D_with_coords(
         Temp,
         Grid2D;
         xlim = (-230.0, 230.0),
-        zlim = (-80.0, 0.0),
+        zlim = (-60.0, 0.0),
         Origin = nothing, StrikeAngle = 0, DipAngle = 0,
         phase = LithosphericPhases(Layers = [], Phases = [2]),
     )
@@ -201,8 +201,8 @@ function GMG_subduction_2D_with_coords(
         Phases,
         Temp,
         Grid2D;
-        xlim = (-125.0,125.0),
-        zlim = (-100.0, -95.0),
+        xlim = (-80.0,125.0),
+        zlim = (-65.0, -60.0),
         Origin = nothing, StrikeAngle = 0, DipAngle = -30,
         phase = LithosphericPhases(Layers = [8], Phases = [3], Tlab = Tlab),
         T = HalfspaceCoolingTemp(Tsurface = 20, Tmantle = Tbot, Age = 50, Adiabat = 0)
@@ -224,7 +224,7 @@ function GMG_subduction_2D_with_coords(
         cenz = -40.0 * 1.0e3,         # m
         widthx = 30.0 * 1.0e3,      # m
         widthz = 80.0 * 1.0e3,      # m
-         vx = 4.0e-9,                  # m/s
+         vx = 4.0e-7,                  # m/s
         # vy = -4.0e-9,              # m/s (optional)
     )
 
@@ -233,7 +233,7 @@ function GMG_subduction_2D_with_coords(
         cenz = -40.0 * 1.0e3,         # m
         widthx = 30.0 * 1.0e3,      # m
         widthz = 80.0 * 1.0e3,      # m
-        vx = -4.0e-9,                  # m/s
+        vx = -4.0e-7,                  # m/s
         # vy = -4.0e-9,              # m/s (optional)
     )
     # Surface overwrite

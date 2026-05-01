@@ -197,7 +197,7 @@ function compute_dt_ratestate_global(
     dt_w = dt_weakening_rsf(L, θmax, Vp)
     dt = min(dt_c, dt_h, dt_w)
     # return clamp(dt, dt_min, dt_max)
-    return min((1/Vp)/8.0,5e8)
+    return min((1/Vp)/8.0,5e9)
 end
 
 function compute_mu_eff_field(τII::AbstractMatrix, P::AbstractMatrix, phase_center, rsf_params)
@@ -952,10 +952,10 @@ end
 ## END OF MAIN SCRIPT ----------------------------------------------------------------
 
 # MODEL SETUP
-n = 64
+n = 128
 nx, ny = n * 1, n
 # Choose grid type: original uniform grid (ref_grid=0) or non-uniform logistic grid (ref_grid=1)
-ref_grid = 0 # 0: original uniform grid, 1: non-uniform logistic grid
+ref_grid = 1 # 0: original uniform grid, 1: non-uniform logistic grid
 periodic_x = false
 disable_injection_when_periodic = false
 Vtop = nothing

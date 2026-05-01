@@ -14,7 +14,7 @@ function init_rsf_params_lamem_simple_shear(di_min; V0_model = 4.0e-9)
         L = (0.01, 0.01, 0.01, 1.0),
         C = (0e0, 0.0, 0.0, 0.0),
         D = (di_min, di_min, di_min, di_min),
-        Ω_init = (0.0, 0.0, 0.0, 0.0),
+        Ω_init = (40.0, 40.0, 0.0, 40.0),
         V0 = (V0_model, V0_model, V0_model, V0_model),
         V0_model = V0_model,
         Vp_max = 1.0e19,
@@ -30,13 +30,15 @@ end
 
 function init_rheology_simple_shear()
 
+    ϕ_wet_olivine = asind(0.1)
+    C_wet_olivine = 1.0e6
     η_reg = 1.0e20
     # Elasticity
     el = ConstantElasticity(; G = 3.0e10, ν = 0.49)
     asthenosphere = CompositeRheology(
         (
-            el,
-            LinearViscous(; η = 1.0e21),
+           # el,
+            LinearViscous(; η = 1.0e18),
         )
     )
 
@@ -50,6 +52,8 @@ function init_rheology_simple_shear()
         (
             el,
             LinearViscous(; η = 1.0e23),
+           #DruckerPrager_regularised(; C = C_wet_olivine, ϕ = ϕ_wet_olivine, η_vp = η_reg, Ψ = 0.0), # non-regularized plasticity
+       
         )
     )
     rheologies = (;asthenosphere, lithosphere, subduction_lithosphere)
