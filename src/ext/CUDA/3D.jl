@@ -38,6 +38,19 @@ function JR3D.StokesArrays(::Type{CUDABackend}, ni::NTuple{N, Integer}) where {N
     return StokesArrays(ni)
 end
 
+function JR3D.DYREL(::Type{CUDABackend}, ni::NTuple{N, Integer}; ϵ = 1.0e-6, ϵ_vel = 1.0e-6, CFL = 0.99, c_fact = 0.5) where {N}
+    return DYREL(ni; ϵ = ϵ, ϵ_vel = ϵ_vel, CFL = CFL, c_fact = c_fact)
+end
+
+function JR3D.DYREL(::Type{CUDABackend}, nx::Integer, ny::Integer, nz::Integer; ϵ = 1.0e-6, ϵ_vel = 1.0e-6, CFL = 0.99, c_fact = 0.5)
+    return DYREL((nx, ny, nz); ϵ = ϵ, ϵ_vel = ϵ_vel, CFL = CFL, c_fact = c_fact)
+end
+
+function JR3D.DYREL(::Type{CUDABackend}, stokes::JustRelax.StokesArrays, rheology, phase_ratios, di, dt; ϵ = 1.0e-6, ϵ_vel = 1.0e-6, CFL = 0.99, c_fact = 0.5, γfact = 20.0)
+    return DYREL(stokes, rheology, phase_ratios, di, dt; ϵ = ϵ, ϵ_vel = ϵ_vel, CFL = CFL, c_fact = c_fact, γfact = γfact)
+end
+
+
 function JR3D.ThermalArrays(::Type{CUDABackend}, ni::NTuple{N, Number}) where {N}
     return ThermalArrays(ni...)
 end
@@ -51,6 +64,10 @@ function JR3D.WENO5(::Type{CUDABackend}, method::Val{T}, ni::NTuple{N, Integer})
 end
 
 function JR3D.RockRatio(::Type{CUDABackend}, ni::NTuple{N, Integer}) where {N}
+    return RockRatio(ni...)
+end
+
+function JR3D.RockRatio(::Type{CUDABackend}, ni::Vararg{Integer, N}) where {N}
     return RockRatio(ni...)
 end
 
@@ -257,6 +274,14 @@ function accumulate_tensor!(::CUDABackendTrait, II, A::JustRelax.SymmetricTensor
     return _accumulate_tensor!(II, A, dt)
 end
 
+function JR3D.accumulate_vol!(::CUDABackendTrait, EVol_pl, ε_vol_pl, dt)
+    return _accumulate_vol!(EVol_pl, ε_vol_pl, dt)
+end
+
+function accumulate_vol!(::CUDABackendTrait, EVol_pl, ε_vol_pl, dt)
+    return _accumulate_vol!(EVol_pl, ε_vol_pl, dt)
+end
+
 ## Buoyancy forces
 function JR3D.compute_ρg!(ρg::Union{CuArray, NTuple{N, CuArray}}, rheology, args) where {N}
     return compute_ρg!(ρg, rheology, args)
@@ -283,15 +308,6 @@ function JR3D.compute_melt_fraction!(
     return compute_melt_fraction!(ϕ, phase_ratios, rheology, args)
 end
 
-# Interpolations
-function JR3D.temperature2center!(::CUDABackendTrait, thermal::JustRelax.ThermalArrays)
-    return _temperature2center!(thermal)
-end
-
-function temperature2center!(::CUDABackendTrait, thermal::JustRelax.ThermalArrays)
-    return _temperature2center!(thermal)
-end
-
 function JR3D.shear2center!(::CUDABackendTrait, A::JustRelax.SymmetricTensor)
     _shear2center!(A)
     return nothing
@@ -302,8 +318,10 @@ function shear2center!(::CUDABackendTrait, A::JustRelax.SymmetricTensor)
     return nothing
 end
 
-function JR3D.vertex2center!(center::T, vertex::T) where {T <: CuArray}
-    return vertex2center!(center, vertex)
+function JR3D.vertex2center!(
+        center::T, vertex::T; ghost_x::Bool = false, ghost_y::Bool = false, ghost_z::Bool = false
+    ) where {T <: CuArray}
+    return vertex2center!(center, vertex; ghost_x, ghost_y, ghost_z)
 end
 
 function JR3D.center2vertex!(vertex::T, center::T) where {T <: CuArray}
@@ -371,12 +389,10 @@ function JR3D.subgrid_characteristic_time!(
         rheology,
         thermal::JustRelax.ThermalArrays,
         stokes::JustRelax.StokesArrays,
-        xci,
-        di,
     )
     ni = size(stokes.P)
     @parallel (@idx ni) subgrid_characteristic_time!(
-        dt₀, phases.center, rheology, thermal.Tc, stokes.P, di
+        dt₀, phases.center, rheology, thermal.T, stokes.P, particles.di.vertex
     )
     return nothing
 end
@@ -389,12 +405,10 @@ function JR3D.subgrid_characteristic_time!(
         rheology,
         thermal::JustRelax.ThermalArrays,
         stokes::JustRelax.StokesArrays,
-        xci,
-        di,
     ) where {N}
     ni = size(stokes.P)
     @parallel (@idx ni) subgrid_characteristic_time!(
-        dt₀, phases, rheology, thermal.Tc, stokes.P, di
+        dt₀, phases, rheology, thermal.T, stokes.P, particles.di.vertex
     )
     return nothing
 end
@@ -479,16 +493,16 @@ function JR3D.update_rock_ratio!(
 end
 
 function JR3D.stress2grid!(
-        stokes, τ_particles::JustRelax.StressParticles{CUDABackend}, xvi, xci, particles
+        stokes, τ_particles::JustRelax.StressParticles{CUDABackend}, particles
     )
     stress2grid!(stokes, τ_particles, xvi, xci, particles)
     return nothing
 end
 
 function JR3D.rotate_stress!(
-        τ_particles::JustRelax.StressParticles{CUDABackend}, stokes, particles, xci, xvi, dt
+        τ_particles::JustRelax.StressParticles{CUDABackend}, stokes, particles, dt
     )
-    rotate_stress!(τ_particles, stokes, particles, xci, xvi, dt)
+    rotate_stress!(τ_particles, stokes, particles, dt)
     return nothing
 end
 
@@ -502,17 +516,17 @@ function JR3D.update_phase_ratios_3D!(
     ) where {T <: AbstractMatrix, N, U}
 
     phase_ratios_center_from_arrays!(phase_ratios, phase_arrays)
-    phase_ratios_vertex_from_arrays!(phase_ratios, phase_arrays, xvi, xci)
+    phase_ratios_vertex_from_arrays!(phase_ratios, phase_arrays)
 
     # velocity nodes
-    phase_ratios_face_from_arrays!(phase_ratios.Vx, phase_arrays, xci, :x)
-    phase_ratios_face_from_arrays!(phase_ratios.Vy, phase_arrays, xci, :y)
-    phase_ratios_face_from_arrays!(phase_ratios.Vz, phase_arrays, xci, :z)
+    phase_ratios_face_from_arrays!(phase_ratios.Vx, phase_arrays, :x)
+    phase_ratios_face_from_arrays!(phase_ratios.Vy, phase_arrays, :y)
+    phase_ratios_face_from_arrays!(phase_ratios.Vz, phase_arrays, :z)
 
     # shear stress nodes
-    phase_ratios_midpoint_from_centers!(phase_ratios.xy, phase_arrays, xci, :xy)
-    phase_ratios_midpoint_from_centers!(phase_ratios.yz, phase_arrays, xci, :yz)
-    phase_ratios_midpoint_from_centers!(phase_ratios.xz, phase_arrays, xci, :xz)
+    phase_ratios_midpoint_from_centers!(phase_ratios.xy, phase_arrays, :xy)
+    phase_ratios_midpoint_from_centers!(phase_ratios.yz, phase_arrays, :yz)
+    phase_ratios_midpoint_from_centers!(phase_ratios.xz, phase_arrays, :xz)
     return nothing
 end
 

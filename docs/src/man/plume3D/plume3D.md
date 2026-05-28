@@ -45,10 +45,8 @@ For the rheology we will use the `rheology` object we created in the previous se
 nxcell         = 25
 max_xcell      = 35
 min_xcell      = 8
-particles      = init_particles(backend, nxcell, max_xcell, min_xcell, xvi...)
+particles      = init_particles(backend, nxcell, max_xcell, min_xcell, grid.xi_vel...)
 subgrid_arrays = SubgridDiffusionCellArrays(particles)
-# velocity staggered grids
-grid_vxi       = velocity_grids(xci, xvi, di)
 ```
 
 We would like to advect two fields stored at the particles, the temperature `pT`, and the material phases of each particle `pPhases`, which we initialize as `CellArray` objects:
@@ -106,7 +104,7 @@ zc_anomaly = -610.0e3 # origin of thermal anomaly
 r_anomaly  = 50.0e3   # radius of perturbation
 init_phases!(pPhases, particles, lx, ly; d = abs(zc_anomaly), r = r_anomaly)
 phase_ratios = PhaseRatios(backend, length(rheology), ni)
-update_phase_ratios!(phase_ratios, particles, xci, xvi, pPhases)
+update_phase_ratios!(phase_ratios, particles, pPhases)
 ```
 
 ## Define temperature profile
@@ -177,7 +175,6 @@ thermal_bc = TemperatureBoundaryConditions(;
     no_flux = (left = true, right = true, top = false, bot = false, front = true, back = true),
 )
 thermal_bcs!(thermal, thermal_bc)
-temperature2center!(thermal)
 ```
 
 ## Instantiate Stokes arrays
@@ -191,7 +188,7 @@ pt_stokes = PTStokesCoeffs(li, di; ϵ_rel=1e-4, Re=3π, r=1e0, CFL = 0.98 / √3
 ## Initialize buoyancy forces and lithostatic pressure
 ```julia
 ρg        = ntuple(_ -> @zeros(ni...), Val(3))
-compute_ρg!(ρg[end], phase_ratios, rheology, (T=thermal.Tc, P=stokes.P))
+compute_ρg!(ρg[end], phase_ratios, rheology, (T = thermal.T, P = stokes.P))
 stokes.P .= PTArray(backend)(reverse(cumsum(reverse((ρg[end]).* di[end], dims=3), dims=3), dims=3))
 ```
 
@@ -216,7 +213,7 @@ pt_thermal = PTThermalCoeffs(
 ## Just before solving the problem...
 ```julia
 dt₀         = similar(stokes.P)
-grid2particle!(pT, xvi, T_buffer, particles)
+grid2particle!(pT, T_buffer, particles)
 ```
 
 # Solving the problem
@@ -226,8 +223,7 @@ We will now advance the model in time, solving the Stokes and thermal equations,
 
 1. Interpolate fields from particle to grid vertices
 ```julia
-particle2grid!(T_buffer, pT, xvi, particles)
-temperature2center!(thermal)
+particle2grid!(T_buffer, pT, particles)
 ```
 2. Solve stokes
 ```julia
@@ -279,24 +275,24 @@ heatdiffusion_PT!(
 )
 # Subgrid diffusion
 subgrid_characteristic_time!(
-    subgrid_arrays, particles, dt₀, phase_ratios, rheology, thermal, stokes, xci, di
+    subgrid_arrays, particles, dt₀, phase_ratios, rheology, thermal, stokes
 )
-centroid2particle!(subgrid_arrays.dt₀, xci, dt₀, particles)
+centroid2particle!(subgrid_arrays.dt₀, dt₀, particles)
 subgrid_diffusion!(
-    pT, thermal.T, thermal.ΔT, subgrid_arrays, particles, xvi,  di, dt
+    pT, thermal.T, thermal.ΔT, subgrid_arrays, particles, dt
 )
 ```
 
 5. Particles advection
 ```julia
 # advect particles in space
-advection!(particles, RungeKutta2(), @velocity(stokes), grid_vxi, dt)
+advection!(particles, RungeKutta2(), @velocity(stokes), dt)
 # advect particles in memory
-move_particles!(particles, xvi, particle_args)
+move_particles!(particles, particle_args)
 # check if we need to inject particles
-inject_particles_phase!(particles, pPhases, (pT, ), (thermal.T, ), xvi)
+inject_particles_phase!(particles, pPhases, (pT, ), (thermal.T, ))
 # update phase ratios
-update_phase_ratios!(phase_ratios, particles, xci, xvi, pPhases)
+update_phase_ratios!(phase_ratios, particles, pPhases)
 ```
 
 6. **Optional:** Save data as VTK to visualize it later with [ParaView](https://www.paraview.org/)
@@ -309,7 +305,7 @@ data_v = (;
     T = Array(thermal.T),
 )
 data_c = (;
-    Tc = Array(thermal.Tc),
+    T = Array(thermal.T[2:end-1, 2:end-1, 2:end-1]),
     P = Array(stokes.P),
     η = Array(log10.(stokes.viscosity.η_vep)),
 )

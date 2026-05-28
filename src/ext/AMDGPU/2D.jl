@@ -41,10 +41,35 @@ __init__() = @init_parallel_stencil(AMDGPU, Float64, 2)
 include("../../common.jl")
 include("../../stokes/Stokes2D.jl")
 include("../../variational_stokes/Stokes2D.jl")
+include("../../DYREL/DYREL2D.jl")
 
 # Types
 function JR2D.StokesArrays(::Type{AMDGPUBackend}, ni::NTuple{N, Integer}) where {N}
     return StokesArrays(ni)
+end
+
+function JR2D.DYREL(::Type{AMDGPUBackend}, ni::NTuple{N, Integer}; ϵ = 1.0e-6, ϵ_vel = 1.0e-6, CFL = 0.99, c_fact = 0.5) where {N}
+    return DYREL(ni; ϵ = ϵ, ϵ_vel = ϵ_vel, CFL = CFL, c_fact = c_fact)
+end
+
+function JR2D.DYREL(::Type{AMDGPUBackend}, stokes::JustRelax.StokesArrays, rheology, phase_ratios, di, dt; ϵ = 1.0e-6, ϵ_vel = 1.0e-6, CFL = 0.99, c_fact = 0.5, γfact = 20.0)
+    return DYREL(stokes, rheology, phase_ratios, di, dt; ϵ = ϵ, ϵ_vel = ϵ_vel, CFL = CFL, c_fact = c_fact, γfact = γfact)
+end
+
+function JR2D.update_α_β!(βVx::ROCArray, βVy, αVx, αVy, dτVx, dτVy, cVx, cVy)
+    return update_α_β!(βVx, βVy, αVx, αVy, dτVx, dτVy, cVx, cVy)
+end
+
+function JR2D.update_α_β!(dyrel::JustRelax.DYREL{<:ROCArray})
+    return update_α_β!(dyrel)
+end
+
+function JR2D.update_dτV_α_β!(dτVx::ROCArray, dτVy, βVx, βVy, αVx, αVy, cVx, cVy, λmaxVx, λmaxVy, CFL_v)
+    return update_dτV_α_β!(dτVx, dτVy, βVx, βVy, αVx, αVy, cVx, cVy, λmaxVx, λmaxVy, CFL_v)
+end
+
+function JR2D.update_dτV_α_β!(dyrel::JustRelax.DYREL{<:ROCArray})
+    return update_dτV_α_β!(dyrel)
 end
 
 function JR2D.ThermalArrays(::Type{AMDGPUBackend}, ni::NTuple{N, Number}) where {N}
@@ -62,6 +87,10 @@ function JR2D.WENO5(
 end
 
 function JR2D.RockRatio(::Type{AMDGPUBackend}, ni::NTuple{N, Integer}) where {N}
+    return RockRatio(ni...)
+end
+
+function JR2D.RockRatio(::Type{AMDGPUBackend}, ni::Vararg{Integer, N}) where {N}
     return RockRatio(ni...)
 end
 
@@ -148,6 +177,24 @@ function JR2D.update_thermal_coeffs!(
     )
     return nothing
 end
+
+function JR2D.PrincipalStress(backend::Type{AMDGPUBackend}, ni::NTuple{N, Integer}) where {N}
+    return PrincipalStress(ni)
+end
+
+function JR2D.compute_principal_stresses(backend::Type{AMDGPUBackend}, stokes::JustRelax.StokesArrays)
+    ni = size(stokes.P)
+    σ = JR2D.PrincipalStress(backend, ni)
+    compute_principal_stresses!(stokes, σ)
+    return σ
+end
+
+function JR2D.compute_principal_stresses!(stokes, σ::JustRelax.PrincipalStress{<:ROCArray})
+    ni = size(stokes.P)
+    @parallel (@idx ni) principal_stresses_eigen!(σ, @stress_center(stokes)...)
+    return nothing
+end
+
 
 # Boundary conditions
 function JR2D.flow_bcs!(
@@ -237,6 +284,14 @@ function accumulate_tensor!(::AMDGPUBackendTrait, II, A::JustRelax.SymmetricTens
     return _accumulate_tensor!(II, A, dt)
 end
 
+function JR2D.accumulate_vol!(::AMDGPUBackendTrait, EVol_pl, ε_vol_pl, dt)
+    return _accumulate_vol!(EVol_pl, ε_vol_pl, dt)
+end
+
+function accumulate_vol!(::AMDGPUBackendTrait, EVol_pl, ε_vol_pl, dt)
+    return _accumulate_vol!(EVol_pl, ε_vol_pl, dt)
+end
+
 ## Buoyancy forces
 function JR2D.compute_ρg!(ρg::Union{ROCArray, NTuple{N, ROCArray}}, rheology, args) where {N}
     return compute_ρg!(ρg, rheology, args)
@@ -261,15 +316,6 @@ function JR2D.compute_melt_fraction!(
     return compute_melt_fraction!(ϕ, phase_ratios, rheology, args)
 end
 
-# Interpolations
-function JR2D.temperature2center!(::AMDGPUBackendTrait, thermal::JustRelax.ThermalArrays)
-    return _temperature2center!(thermal)
-end
-
-function temperature2center!(::AMDGPUBackendTrait, thermal::JustRelax.ThermalArrays)
-    return _temperature2center!(thermal)
-end
-
 function JR2D.shear2center!(::AMDGPUBackendTrait, A::JustRelax.SymmetricTensor)
     _shear2center!(A)
     return nothing
@@ -280,8 +326,10 @@ function shear2center!(::AMDGPUBackendTrait, A::JustRelax.SymmetricTensor)
     return nothing
 end
 
-function JR2D.vertex2center!(center::T, vertex::T) where {T <: ROCArray}
-    return vertex2center!(center, vertex)
+function JR2D.vertex2center!(
+        center::T, vertex::T; ghost_x::Bool = false, ghost_y::Bool = false, ghost_z::Bool = false
+    ) where {T <: ROCArray}
+    return vertex2center!(center, vertex; ghost_x, ghost_y, ghost_z)
 end
 
 function JR2D.center2vertex!(vertex::T, center::T) where {T <: ROCArray}
@@ -352,12 +400,10 @@ function JR2D.subgrid_characteristic_time!(
         rheology,
         thermal::JustRelax.ThermalArrays,
         stokes::JustRelax.StokesArrays,
-        xci,
-        di,
     )
     ni = size(stokes.P)
     @parallel (@idx ni) subgrid_characteristic_time!(
-        dt₀, phases.center, rheology, thermal.Tc, stokes.P, di
+        dt₀, phases.center, rheology, thermal.T, stokes.P, particles.di.vertex
     )
     return nothing
 end
@@ -370,12 +416,10 @@ function JR2D.subgrid_characteristic_time!(
         rheology,
         thermal::JustRelax.ThermalArrays,
         stokes::JustRelax.StokesArrays,
-        xci,
-        di,
     ) where {N}
     ni = size(stokes.P)
     @parallel (@idx ni) subgrid_characteristic_time!(
-        dt₀, phases, rheology, thermal.Tc, stokes.P, di
+        dt₀, phases, rheology, thermal.T, stokes.P, particles.di.vertex
     )
     return nothing
 end
@@ -450,11 +494,9 @@ end
 function JR2D.stress2grid!(
         stokes,
         τ_particles::JustRelax.StressParticles{JustPIC.AMDGPUBackend},
-        xvi,
-        xci,
         particles,
     )
-    stress2grid!(stokes, τ_particles, xvi, xci, particles)
+    stress2grid!(stokes, τ_particles, particles)
     return nothing
 end
 
@@ -462,11 +504,9 @@ function JR2D.rotate_stress!(
         τ_particles::JustRelax.StressParticles{JustPIC.AMDGPUBackend},
         stokes,
         particles,
-        xci,
-        xvi,
         dt,
     )
-    rotate_stress!(τ_particles, stokes, particles, xci, xvi, dt)
+    rotate_stress!(τ_particles, stokes, particles, dt)
     return nothing
 end
 

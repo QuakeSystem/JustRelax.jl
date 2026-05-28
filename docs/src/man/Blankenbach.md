@@ -67,11 +67,9 @@ nxcell              = 24 # initial number of perticles per cell
 max_xcell           = 35 # maximum number of perticles per cell
 min_xcell           = 12 # minimum number of perticles per cell
 particles           = init_particles(
-    backend, nxcell, max_xcell, min_xcell, xvi..., di..., ni...
+    backend, nxcell, max_xcell, min_xcell, grid.xi_vel...
 ) # particles object
 subgrid_arrays      = SubgridDiffusionCellArrays(particles) # arrays needed for subgrid diffusion
-# velocity grids
-grid_vx, grid_vy    = velocity_grids(xci, xvi, di) # staggered velocity grids
 ```
 
 and we want to keep track of the temperature `pT`, temperature of the previous time step `pT0`, and material phase `pPhase`:
@@ -106,22 +104,22 @@ function init_phases!(phases, particles)
     @parallel (@idx ni) init_phases!(phases, particles.index)
 end
 
-init_phases!(pPhases, particles, lx, yc_anomaly, r_anomaly)
+init_phases!(pPhases, particles)
 ```
 
 or we can use the alternative one-liners
 ```julia
-@views pPhase.data[!isnan.(particles.index.data)] .= 1.0
+@views pPhases.data[!isnan.(particles.index.data)] .= 1.0
 ```
 or
 ```julia
-map!(x -> isnan(x) ? NaN : 1.0, pPhase.data, particles.index.data)
+map!(x -> isnan(x) ? NaN : 1.0, pPhases.data, particles.index.data)
 ```
 
 and finally we need the phase ratios at the cell centers:
 ```julia
 phase_ratios = PhaseRatios(backend, length(rheology), ni)
-update_phase_ratios!(phase_ratios, particles, xci, xvi, pPhases)
+update_phase_ratios!(phase_ratios, particles, pPhases)
 ```
 
 ### Stokes and heat diffusion arrays
@@ -145,8 +143,7 @@ To initialize the thermal profile we use [ParallelStencil.jl](https://github.com
     return nothing
 end
 
-@parallel (@idx size(thermal.T))  init_T!(thermal.T,  xvi[2]) # cell vertices
-@parallel (@idx size(thermal.Tc)) init_T!(thermal.Tc, xci[2]) # cell centers
+@parallel (@idx ni) init_T!((thermal.T[2:end-1, 2:end-1]), xci[2]) # physical cell centers
 ```
 
 and we define a rectangular thermal anomaly at $x \in [0, 0.05]$, $y \in [\frac{1}{3} - 0.05, \frac{1}{3} + 0.05]$
@@ -173,7 +170,7 @@ We initialize the buoyancy forces and viscosity
 ```julia
 ρg               = @zeros(ni...), @zeros(ni...)
 η                = @ones(ni...)
-args             = (; T = thermal.Tc, P = stokes.P, dt = Inf)
+args             = (; T = thermal.T, P = stokes.P, dt = Inf)
 compute_ρg!(ρg[2], phase_ratios, rheology, args)
 compute_viscosity!(stokes, 1.0, phase_ratios, args, rheology, (-Inf, Inf))
 ```
@@ -210,7 +207,7 @@ for (dst, src) in zip((T_buffer, Told_buffer), (thermal.T, thermal.Told))
     copyinn_x!(dst, src)
 end
 # interpolate temperatyre on the particles
-grid2particle!(pT, xvi, T_buffer, particles)
+grid2particle!(pT, T_buffer, particles)
 pT0.data    .= pT.data
 ```
 where
@@ -296,37 +293,36 @@ for (dst, src) in zip((T_buffer, Told_buffer), (thermal.T, thermal.Told))
     copyinn_x!(dst, src)
 end
 subgrid_characteristic_time!(
-    subgrid_arrays, particles, dt₀, phase_ratios, rheology, thermal, stokes, xci, di
+    subgrid_arrays, particles, dt₀, phase_ratios, rheology, thermal, stokes
 )
-centroid2particle!(subgrid_arrays.dt₀, xci, dt₀, particles)
+centroid2particle!(subgrid_arrays.dt₀, dt₀, particles)
 subgrid_diffusion!(
-    pT, T_buffer, thermal.ΔT[2:end-1, :], subgrid_arrays, particles, xvi,  di, dt
+    pT, T_buffer, thermal.ΔT[2:end-1, :], subgrid_arrays, particles, dt
 )
 ```
 4. Advect particles
 ```julia
 # advect particles in space
-advection!(particles, RungeKutta2(), @velocity(stokes), (grid_vx, grid_vy), dt)
+advection!(particles, RungeKutta2(), @velocity(stokes), dt)
 # advect particles in memory
-move_particles!(particles, xvi, particle_args)
+move_particles!(particles, particle_args)
 # check if we need to inject particles
-inject_particles_phase!(particles, pPhases, (pT, ), (T_buffer, ), xvi)
+inject_particles_phase!(particles, pPhases, (pT, ), (T_buffer, ))
 # update phase ratios
-update_phase_ratios!(phase_ratios, particles, xci, xvi, pPhases)
+update_phase_ratios!(phase_ratios, particles, pPhases)
 ```
 5.  Interpolate `T` back to the grid
 ```julia
 # interpolate fields from particle to grid vertices
-particle2grid!(T_buffer, pT, xvi, particles)
+particle2grid!(T_buffer, pT, particles)
 @views T_buffer[:, end]      .= 0.0
 @views T_buffer[:, 1]        .= 1.0
 @views thermal.T[2:end-1, :] .= T_buffer
 flow_bcs!(stokes, flow_bcs) # apply boundary conditions
-temperature2center!(thermal)
 ```
 6. Update buoyancy forces and viscosity
 ```julia
-args = (; T = thermal.Tc, P = stokes.P,  dt=Inf)
+args = (; T = thermal.T, P = stokes.P,  dt=Inf)
 compute_viscosity!(stokes, 1.0, phase_ratios, args, rheology, (-Inf, Inf))
 compute_ρg!(ρg[2], phase_ratios, rheology, args)
 ```
