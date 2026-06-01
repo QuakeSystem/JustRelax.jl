@@ -3,7 +3,10 @@
 @inline get_phase(x::JustPIC.PhaseRatios) = x.center
 @inline get_phase(x) = x
 
-# update_pt_thermal_arrays!(::Vararg{Any,N}) where {N} = nothing
+@inline get_phase_fluxes(x::JustPIC.PhaseRatios, ::NTuple{2}) = x.Vx, x.Vy
+@inline get_phase_fluxes(x, ::NTuple{2}) = x, x
+@inline get_phase_fluxes(x::JustPIC.PhaseRatios, ::NTuple{3}) = x.Vx, x.Vy, x.Vz
+@inline get_phase_fluxes(x, ::NTuple{3}) = x, x, x
 
 """
     update_pt_thermal_arrays!(pt_thermal, phase_ratios, rheology, args, _dt)
@@ -86,10 +89,7 @@ end
 @inline function compute_diffusivity(
         rheology::NTuple{N, AbstractMaterialParamsStruct}, phase_ratios::SArray, args
     ) where {N}
-    ρ = compute_density_ratio(phase_ratios, rheology, args)
-    conductivity = fn_ratio(compute_conductivity, rheology, phase_ratios, args)
-    heatcapacity = fn_ratio(compute_heatcapacity, rheology, phase_ratios, args)
-    return conductivity * inv(heatcapacity * ρ)
+    return fn_ratio(compute_diffusivity, rheology, phase_ratios, args)
 end
 
 # ρ*Cp
@@ -112,8 +112,7 @@ end
 end
 
 @inline function compute_ρCp(rheology, phase_ratios::SArray, args)
-    return fn_ratio(compute_heatcapacity, rheology, phase_ratios, args) *
-        fn_ratio(compute_density, rheology, phase_ratios, args)
+    return fn_ratio(compute_ρCp, rheology, phase_ratios, args)
 end
 
 @inline function compute_ρCp(rheology, ρ, phase_ratios::SArray, args)

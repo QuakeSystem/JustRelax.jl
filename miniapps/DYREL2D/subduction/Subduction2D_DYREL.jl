@@ -192,14 +192,12 @@ function main(li, origin, phases_GMG, igg; nx = 16, ny = 16, figdir = "figs2D", 
     Ttop = 20 + 273
     Tbot = maximum(T_GMG)
     thermal = ThermalArrays(backend, ni)
-    @views thermal.T[2:(end - 1), 2:(end - 1)] .= PTArray(backend)(T_GMG)
+    vertex2center!(thermal.T, PTArray(backend)(T_GMG); ghost_x = true, ghost_y = true)
     thermal_bc = TemperatureBoundaryConditions(;
         no_flux = (left = true, right = true, top = false, bot = false),
         constant_value = (left = false, right = false, top = Ttop, bot = Tbot),
     )
     thermal_bcs!(thermal, thermal_bc)
-    @views thermal.T[:, end - 1] .= Ttop
-    @views thermal.T[:, 2] .= Tbot
     # ----------------------------------------------------
 
     # Buoyancy forces
@@ -245,9 +243,7 @@ function main(li, origin, phases_GMG, igg; nx = 16, ny = 16, figdir = "figs2D", 
     end
 
     T_buffer = thermal.T[2:(end - 1), 2:(end - 1)]
-    Told_buffer = similar(T_buffer)
     dt₀ = similar(stokes.P)
-    @views Told_buffer .= thermal.Told[2:(end - 1), 2:(end - 1)]
     centroid2particle!(pT, T_buffer, particles)
 
     τxx_v = @zeros(ni .+ 1...)
@@ -257,7 +253,7 @@ function main(li, origin, phases_GMG, igg; nx = 16, ny = 16, figdir = "figs2D", 
 
     # Time loop
     t, it = 0.0, 0
-    while it < 100 #000 # run only for 5 Myrs
+    while it < 1000 # run only for 5 Myrs
 
         # interpolate fields from particles to centroids
         particle2centroid!(T_buffer, pT, particles)
@@ -305,7 +301,7 @@ function main(li, origin, phases_GMG, igg; nx = 16, ny = 16, figdir = "figs2D", 
         # rotate stresses
         rotate_stress!(pτ, stokes, particles, dt)
         # compute time step
-        dt = compute_dt(stokes, di, dt_max) #* 0.8
+        dt = compute_dt(stokes, di, dt_max)
         # compute strain rate 2nd invartian - for plotting
         tensor_invariant!(stokes.τ)
         tensor_invariant!(stokes.ε)
@@ -333,9 +329,8 @@ function main(li, origin, phases_GMG, igg; nx = 16, ny = 16, figdir = "figs2D", 
             subgrid_arrays, particles, dt₀, phase_ratios, rheology, thermal, stokes
         )
         centroid2particle!(subgrid_arrays.dt₀, dt₀, particles)
-        @views Told_buffer .= thermal.ΔT[2:(end - 1), 2:(end - 1)]
         subgrid_diffusion_centroid!(
-            pT, T_buffer, Told_buffer, subgrid_arrays, particles, dt
+            pT, T_buffer, thermal.ΔT, subgrid_arrays, particles, dt
         )
         # ------------------------------
 
@@ -345,9 +340,6 @@ function main(li, origin, phases_GMG, igg; nx = 16, ny = 16, figdir = "figs2D", 
         # advect particles in memory
         move_particles!(particles, particle_args)
         # check if we need to inject particles
-        # need stresses on the vertices for injection purposes
-        # center2vertex!(τxx_v, stokes.τ.xx)
-        # center2vertex!(τyy_v, stokes.τ.yy)
         inject_particles_phase!(
             particles,
             pPhases,
