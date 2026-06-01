@@ -8,12 +8,10 @@ function subgrid_characteristic_time!(
         rheology,
         thermal::JustRelax.ThermalArrays,
         stokes::JustRelax.StokesArrays,
-        xci,
-        di,
     )
     ni = size(stokes.P)
     @parallel (@idx ni) subgrid_characteristic_time!(
-        dt₀, phases.center, rheology, thermal.Tc, stokes.P, di
+        dt₀, phases.center, rheology, thermal.T, stokes.P, particles.di.vertex
     )
     return nothing
 end
@@ -26,12 +24,11 @@ function subgrid_characteristic_time!(
         rheology,
         thermal::JustRelax.ThermalArrays,
         stokes::JustRelax.StokesArrays,
-        xci,
         di,
     ) where {N}
     ni = size(stokes.P)
     @parallel (@idx ni) subgrid_characteristic_time!(
-        dt₀, phases, rheology, thermal.Tc, stokes.P, di
+        dt₀, phases, rheology, thermal.T, stokes.P, di
     )
     return nothing
 end
@@ -39,14 +36,14 @@ end
 @parallel_indices (I...) function subgrid_characteristic_time!(
         dt₀, phase_ratios, rheology, T, P, di
     )
-    Pᵢ, Tᵢ = P[I...], T[I...]
+    Pᵢ, Tᵢ = P[I...], T[I .+ 1...]
     argsᵢ = (; P = Pᵢ, T = Tᵢ)
     phaseᵢ = @cell phase_ratios[I...]
 
     # Compute the characteristic timescale `dt₀` of the local cell
     ρCp = compute_ρCp(rheology, phaseᵢ, argsᵢ)
     K = compute_conductivity(rheology, phaseᵢ, argsᵢ)
-    sum_dxi = mapreduce(x -> inv(x)^2, +, di)
+    sum_dxi = mapreduce(x -> inv(x)^2, +, @dxi(di, I...))
     dt₀[I...] = ρCp / (2 * K * sum_dxi)
 
     return nothing

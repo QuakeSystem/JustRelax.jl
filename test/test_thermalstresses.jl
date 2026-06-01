@@ -38,7 +38,6 @@ end
 # Load script dependencies
 using Printf, Statistics, LinearAlgebra, CellArrays, StaticArrays
 
-
 # -----------------------------------------------------------------------------------------
 ## SET OF HELPER FUNCTIONS PARTICULAR FOR THIS SCRIPT --------------------------------
 function copyinn_x!(A, B)
@@ -107,12 +106,12 @@ end
     depth = y[j]
 
     if depth ≥ 0.0e0
-        T[i + 1, j] = offset
+        T[i + 1, j + 1] = offset
 
     else # if top ≤ (depth) < bottom
         dTdZ = dTdz
         offset = offset
-        T[i + 1, j] = abs(depth) * dTdZ + offset
+        T[i + 1, j + 1] = abs(depth) * dTdZ + offset
 
     end
 
@@ -125,15 +124,15 @@ function circular_perturbation!(T, δT, xc_anomaly, yc_anomaly, r_anomaly, xvi, 
         )
         depth = -y[j] #- sticky_air
         if ((x[i] - xc_anomaly)^2 + (depth[j] + yc_anomaly)^2 ≤ r_anomaly^2)
-            # T[i + 1, j] *= δT / 100 + 1
-            T[i + 1, j] = δT
+            # T[i + 1, j + 1] *= δT / 100 + 1
+            T[i + 1, j + 1] = δT
         end
         return nothing
     end
 
-    nx, ny = size(T)
+    ni = size(T) .- 2
 
-    return @parallel (1:(nx - 2), 1:ny) _circular_perturbation!(
+    return @parallel (@idx ni) _circular_perturbation!(
         T, δT, xc_anomaly, yc_anomaly, r_anomaly, xvi..., sticky_air
     )
 end
@@ -255,10 +254,8 @@ function main2D(igg; nx = 32, ny = 32, do_vtk = false)
 
     # Initialize particles -------------------------------
     nxcell, max_xcell, min_xcell = 60, 80, 30
-    particles = init_particles(backend, nxcell, max_xcell, min_xcell, xvi...)
-    subgrid_arrays = SubgridDiffusionCellArrays(particles)
-    # velocity grids
-    grid_vx, grid_vy = velocity_grids(xci, xvi, di)
+    particles = init_particles(backend, nxcell, max_xcell, min_xcell, grid.xi_vel...)
+    subgrid_arrays = SubgridDiffusionCellArrays(particles; loc = :center)
     # temperature
     pT, pPhases = init_cell_arrays(particles, Val(2))
     particle_args = (pT, pPhases)
@@ -270,26 +267,25 @@ function main2D(igg; nx = 32, ny = 32, do_vtk = false)
     anomaly = nondimensionalize((750 + 273)K, CharDim) # thermal perturbation (in K)
     init_phases!(pPhases, particles, x_anomaly, y_anomaly, r_anomaly, sticky_air, nondimensionalize(0.0km, CharDim), nondimensionalize(20km, CharDim))
     phase_ratios = PhaseRatios(backend, length(rheology), ni)
-    update_phase_ratios!(phase_ratios, particles, xci, xvi, pPhases)
+    update_phase_ratios!(phase_ratios, particles, pPhases)
 
     # Initialisation of thermal profile
     thermal = ThermalArrays(backend_JR, ni) # initialise thermal arrays and boundary conditions
-    thermal_bc = TemperatureBoundaryConditions(;
-        no_flux = (left = true, right = true, top = false, bot = false),
-    )
     Ttop = nondimensionalize((20 + 273)K, CharDim)
     Tbot = nondimensionalize((450 + 273)K, CharDim)
+    thermal_bc = TemperatureBoundaryConditions(;
+        no_flux = (left = true, right = true, top = false, bot = false),
+        constant_value = (left = true, right = true, top = Ttop, bot = Tbot),
+    )
     ∇Tz = (Ttop - Tbot) / (L - sticky_air)
     # dTdz = nondimensionalize((450-20+273)K, CharDim) / (nondimensionalize(12.5km, CharDim))
-    T1D = @. (∇Tz * (xvi[2]) + Ttop) * (xvi[2] < 0.0e0)
-    T1D[xvi[2] .≥ 0.0e0] .= Ttop
-    thermal.T .+= PTArray(backend_JR)(T1D')
-
+    T1D = @. (∇Tz * (xci[2]) + Ttop) * (xci[2] < 0.0e0)
+    T1D[xci[2] .≥ 0.0e0] .= Ttop
+    thermal.T[:, 2:(end - 1)] .+= PTArray(backend_JR)(T1D')
     circular_perturbation!(
         thermal.T, anomaly, x_anomaly, y_anomaly, r_anomaly, xvi, sticky_air
     )
     thermal_bcs!(thermal, thermal_bc)
-    temperature2center!(thermal)
 
     # STOKES ---------------------------------------------
     # Allocate arrays needed for every Stokes problem
@@ -297,7 +293,7 @@ function main2D(igg; nx = 32, ny = 32, do_vtk = false)
     pt_stokes = PTStokesCoeffs(li, di; ϵ_abs = 1.0e-3, ϵ_rel = 1.0e-2, CFL = 1 / √2.1)
     # ----------------------------------------------------
 
-    args = (; T = thermal.Tc, P = stokes.P, dt = dt)
+    args = (; T = thermal.T, P = stokes.P, dt = dt)
     pt_thermal = PTThermalCoeffs(
         backend_JR, rheology, phase_ratios, args, dt, ni, di, li; ϵ = 1.0e-5, CFL = 0.8 / √2.1
     )
@@ -323,18 +319,18 @@ function main2D(igg; nx = 32, ny = 32, do_vtk = false)
 
     ϕ = @zeros(ni...)
     compute_melt_fraction!(
-        ϕ, phase_ratios, rheology, (T = thermal.Tc, P = stokes.P)
+        ϕ, phase_ratios, rheology, (T = thermal.T, P = stokes.P)
     )
     # Buoyancy force
     ρg = @zeros(ni...), @zeros(ni...) # ρg[1] is the buoyancy force in the x direction, ρg[2] is the buoyancy force in the y direction
     for _ in 1:5
-        compute_ρg!(ρg[2], phase_ratios, rheology, (T = thermal.Tc, P = stokes.P))
+        compute_ρg!(ρg[2], phase_ratios, rheology, (T = thermal.T, P = stokes.P))
         # @parallel init_P!(stokes.P, ρg[2], xci[2])
         stokes.P .= PTArray(backend_JR)(reverse(cumsum(reverse((ρg[2]) .* di[2], dims = 2), dims = 2), dims = 2))
     end
 
     # Arguments for functions
-    args = (; T = thermal.Tc, P = stokes.P, dt = dt, ΔTc = thermal.ΔTc)
+    args = (; T = thermal.T, P = stokes.P, dt = dt, ΔT = @view(thermal.ΔT[2:(end - 1), 2:(end - 1)]))
     @copy thermal.Told thermal.T
     stokes.ε.xx .= nondimensionalize(1.0e-20 / s, CharDim)
     compute_viscosity!(stokes, phase_ratios, args, rheology, cutoff_visc)
@@ -343,29 +339,22 @@ function main2D(igg; nx = 32, ny = 32, do_vtk = false)
 
     # Time loop
     t, it = 0.0, 0
-    local Vx_v, Vy_v
-    if do_vtk
-        Vx_v = @zeros(ni .+ 1...)
-        Vy_v = @zeros(ni .+ 1...)
-    end
 
-    T_buffer = @zeros(ni .+ 1)
+    T_buffer = thermal.T[2:(end - 1), 2:(end - 1)]
     Told_buffer = similar(T_buffer)
     dt₀ = similar(stokes.P)
-    for (dst, src) in zip((T_buffer, Told_buffer), (thermal.T, thermal.Told))
-        copyinn_x!(dst, src)
-    end
-    grid2particle!(pT, xvi, T_buffer, particles)
+    @views Told_buffer .= thermal.Told[2:(end - 1), 2:(end - 1)]
+    centroid2particle!(pT, T_buffer, particles)
     @copy stokes.P0 stokes.P
     thermal.Told .= thermal.T
     P_init = deepcopy(stokes.P)
 
     # Stokes solver -----------------
-    args = (; T = thermal.Tc, P = stokes.P, dt = Inf, ΔTc = thermal.ΔTc)
+    args = (; T = thermal.T, P = stokes.P, dt = Inf, ΔT = thermal.ΔT)
     solve!(
         stokes,
         pt_stokes,
-        di,
+        grid,
         flow_bcs,
         ρg,
         phase_ratios,
@@ -386,13 +375,13 @@ function main2D(igg; nx = 32, ny = 32, do_vtk = false)
     while it < 1
 
         # Update buoyancy and viscosity -
-        args = (; T = thermal.Tc, P = stokes.P, dt = Inf, ΔTc = thermal.ΔTc)
+        args = (; T = thermal.T, P = stokes.P, dt = Inf, ΔT = thermal.ΔT)
 
         # Stokes solver -----------------
         solve!(
             stokes,
             pt_stokes,
-            di,
+            grid,
             flow_bcs,
             ρg,
             phase_ratios,
@@ -430,7 +419,7 @@ function main2D(igg; nx = 32, ny = 32, do_vtk = false)
             rheology,
             args,
             dt,
-            di;
+            grid;
             kwargs = (;
                 igg = igg,
                 phase = phase_ratios,
@@ -439,44 +428,38 @@ function main2D(igg; nx = 32, ny = 32, do_vtk = false)
                 verbose = true,
             )
         )
-        for (dst, src) in zip((T_buffer, Told_buffer), (thermal.T, thermal.Told))
-            copyinn_x!(dst, src)
-        end
+        @views Told_buffer .= thermal.Told[2:(end - 1), 2:(end - 1)]
+        @views Told_buffer .= thermal.ΔT[2:(end - 1), 2:(end - 1)]
         subgrid_characteristic_time!(
-            subgrid_arrays, particles, dt₀, phase_ratios, rheology, thermal, stokes, xci, di
+            subgrid_arrays, particles, dt₀, phase_ratios, rheology, thermal, stokes
         )
-        centroid2particle!(subgrid_arrays.dt₀, xci, dt₀, particles)
-        subgrid_diffusion!(
-            pT, T_buffer, thermal.ΔT[2:(end - 1), :], subgrid_arrays, particles, xvi, di, dt
+        centroid2particle!(subgrid_arrays.dt₀, dt₀, particles)
+        subgrid_diffusion_centroid!(
+            pT, T_buffer, Told_buffer, subgrid_arrays, particles, dt
         )
         # ------------------------------
         compute_melt_fraction!(
-            ϕ, phase_ratios, rheology, (T = thermal.Tc, P = stokes.P)
+            ϕ, phase_ratios, rheology, (T = thermal.T, P = stokes.P)
         )
         # Advection --------------------
         # advect particles in space
-        advection_MQS!(particles, RungeKutta2(), @velocity(stokes), (grid_vx, grid_vy), dt)
+        advection_MQS!(particles, RungeKutta2(), @velocity(stokes), dt)
         # advect particles in memory
-        move_particles!(particles, xvi, particle_args)
+        move_particles!(particles, particle_args)
         # check if we need to inject particles
-        inject_particles_phase!(particles, pPhases, (pT,), (T_buffer,), xvi)
+        inject_particles_phase!(particles, pPhases, (pT,), (T_buffer,))
         # update phase ratios
-        update_phase_ratios!(phase_ratios, particles, xci, xvi, pPhases)
+        update_phase_ratios!(phase_ratios, particles, pPhases)
 
-        particle2grid!(T_buffer, pT, xvi, particles)
-        @views T_buffer[:, end] .= Ttop
-        @views T_buffer[:, 1] .= Tbot
-        @views thermal.T[2:(end - 1), :] .= T_buffer
+        particle2centroid!(T_buffer, pT, particles)
         thermal_bcs!(thermal, thermal_bc)
-        temperature2center!(thermal)
         thermal.ΔT .= thermal.T .- thermal.Told
-        vertex2center!(thermal.ΔTc, thermal.ΔT[2:(end - 1), :])
 
         @show it += 1
         t += dt
     end
 
-    finalize_global_grid()
+    # finalize_global_grid()
 
     return ϕ, stokes, thermal
 end
@@ -490,10 +473,10 @@ end
             igg
         end
 
-        ϕ, stokes, thermal = main2D(igg; nx = 32, ny = 32)
+        ϕ, stokes, thermal = main2D(igg; nx = nx, ny = ny)
 
         nx_T, ny_T = size(thermal.T)
-        @test  Array(thermal.T)[nx_T >>> 1 + 1, ny_T >>> 1 + 1] ≈ 1.4134 rtol = 1.0e-2
-        @test  Array(ϕ)[nx_T >>> 1 + 1, ny_T >>> 1 + 1] ≈ 0.0819 rtol = 1.0e-2
+        @test Array(thermal.T)[nx_T >>> 1 + 1, ny_T >>> 1 + 1] ≈ 1.4134 rtol = 1.0e-2
+        @test Array(ϕ)[nx_T >>> 1 + 1, ny_T >>> 1 + 1] ≈ 0.098 rtol = 1.0e-2
     end
 end
