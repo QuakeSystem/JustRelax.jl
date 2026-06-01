@@ -125,7 +125,7 @@ function main(igg; nx = 64, ny = 64, figdir = "model_figs")
 
     # IO -------------------------------------------------
     take(figdir)
-    dyrel = DYREL(backend, stokes, rheology, phase_ratios, di, dt; ϵ = 1.0e-6)
+    dyrel = DYREL(backend, stokes, rheology, phase_ratios, grid.di, dt; ϵ = 1.0e-6)
 
     # Time loop
     t, it = 0.0, 0
@@ -144,19 +144,18 @@ function main(igg; nx = 64, ny = 64, figdir = "model_figs")
             phase_ratios,
             rheology,
             args,
-            di,
+            grid,
             dt,
             igg;
             kwargs = (;
-                verbose = false,
-                iterMax = 50.0e3,
-                nout = 10,
-                rel_drop = 0.75,
-                λ_relaxation_PH = 1,
-                λ_relaxation_DR = 1,
                 verbose_PH = false,
                 verbose_DR = false,
-                viscosity_relaxation = 1 / 2,
+                iterMax = 50.0e3,
+                nout = 50,
+                rel_drop = 0.5,
+                λ_relaxation_PH = 1,
+                λ_relaxation_DR = 1,
+                viscosity_relaxation = 1,
                 linear_viscosity = true,
                 viscosity_cutoff = (-Inf, Inf),
             )
@@ -205,9 +204,9 @@ function main(igg; nx = 64, ny = 64, figdir = "model_figs")
     return nothing
 end
 
-n = 2
-nx = 32 * n
-ny = 32 * n
+n = 3
+nx = 128
+ny = 128
 figdir = "ShearBands2D_DYREL"
 igg = if !(JustRelax.MPI.Initialized())
     IGG(init_global_grid(nx, ny, 1; init_MPI = true)...)

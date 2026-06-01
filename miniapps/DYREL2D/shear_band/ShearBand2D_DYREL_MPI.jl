@@ -151,7 +151,7 @@ function main(igg; nx = 64, ny = 64, figdir = "model_figs")
     sol = [0.0e0]
     ttot = [0.0e0]
 
-    dyrel = DYREL(backend, stokes, rheology, phase_ratios, di, dt; ϵ = 1.0e-6)
+    dyrel = DYREL(backend, stokes, rheology, phase_ratios, grid.di, dt; ϵ = 1.0e-6)
 
     for _ in 1:15
 
@@ -164,11 +164,10 @@ function main(igg; nx = 64, ny = 64, figdir = "model_figs")
             phase_ratios,
             rheology,
             args,
-            di,
+            grid,
             dt,
             igg;
             kwargs = (;
-                verbose = false,
                 iterMax = 50.0e3,
                 nout = 10,
                 rel_drop = 0.75,

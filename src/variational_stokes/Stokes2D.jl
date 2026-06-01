@@ -1,12 +1,22 @@
 ## 2D VISCO-ELASTIC STOKES SOLVER
 
 # backend trait
+"""
+    solve_VariationalStokes!(stokes::JustRelax.StokesArrays, args...; kwargs)
+
+Stokes solver entry point for variational Stokes solvers. This function dispatches to the appropriate implementation based on the arguments given in the function call.
+"""
 function solve_VariationalStokes!(stokes::JustRelax.StokesArrays, args...; kwargs)
     out = solve_VariationalStokes!(backend(stokes), stokes, args...; kwargs)
     return out
 end
 
 # entry point for extensions
+"""
+    solve_VariationalStokes!(backend::BackendTrait, stokes::JustRelax.StokesArrays, args...; kwargs)
+
+Stokes solver entry point for variational Stokes solvers. This function dispatches to the appropriate implementation based on the backend provided in the function call.
+"""
 function solve_VariationalStokes!(::CPUBackendTrait, stokes, args...; kwargs)
     return _solve_VS!(stokes, args...; kwargs...)
 end
@@ -14,7 +24,7 @@ end
 function _solve_VS!(
         stokes::JustRelax.StokesArrays,
         pt_stokes,
-        di::NTuple{2, T},
+        grid::Geometry{2},
         flow_bcs::AbstractFlowBoundaryConditions,
         ρg,
         phase_ratios::JustPIC.PhaseRatios,
@@ -35,11 +45,12 @@ function _solve_VS!(
         verbose = true,
         free_surface = false,
         kwargs...,
-    ) where {T}
+    )
 
     # unpack
 
-    _di = inv.(di)
+    di = grid.di
+    _di = grid._di
     _dt = inv.(dt)
     (; ϵ_rel, ϵ_abs, r, θ_dτ, ηdτ) = pt_stokes
     (; η, η_vep) = stokes.viscosity
@@ -98,10 +109,10 @@ function _solve_VS!(
             compute_maxloc!(ητ, η; window = (1, 1))
             update_halo!(ητ)
 
-            @parallel (@idx ni) compute_∇V!(stokes.∇V, @velocity(stokes), ϕ, _di)
+            @parallel (@idx ni) compute_∇V!(stokes.∇V, @velocity(stokes), ϕ, _di.vertex)
 
             if strain_increment
-                @parallel (@idx ni) compute_∇V!(stokes.∇U, @displacement(stokes), ϕ, _di)
+                @parallel (@idx ni) compute_∇V!(stokes.∇U, @displacement(stokes), ϕ, _di.vertex)
             end
 
             compute_P!(
@@ -123,7 +134,13 @@ function _solve_VS!(
 
             if strain_increment
                 @parallel (@idx ni .+ 1) compute_strain_rate!(
-                    @strain_increment(stokes)..., stokes.∇U, @displacement(stokes)..., ϕ, _di...
+                    @strain_increment(stokes)...,
+                    stokes.∇U,
+                    @displacement(stokes)...,
+                    ϕ,
+                    _di.vertex,
+                    _di.velocity[1],
+                    _di.velocity[2],
                 )
 
                 @parallel (@idx ni .+ 1) compute_strain_rate_from_increment!(
@@ -131,7 +148,13 @@ function _solve_VS!(
                 )
             else
                 @parallel (@idx ni .+ 1) compute_strain_rate!(
-                    @strain(stokes)..., stokes.∇V, @velocity(stokes)..., ϕ, _di...
+                    @strain(stokes)...,
+                    stokes.∇V,
+                    @velocity(stokes)...,
+                    ϕ,
+                    _di.vertex,
+                    _di.velocity[1],
+                    _di.velocity[2],
                 )
             end
 
@@ -151,6 +174,8 @@ function _solve_VS!(
                     @strain_increment(stokes),
                     @plastic_strain(stokes),
                     stokes.EII_pl,
+                    stokes.ε_vol_pl,
+                    stokes.EVol_pl,
                     @tensor_center(stokes.τ),
                     (stokes.τ.xy,),
                     @tensor_center(stokes.τ_o),
@@ -175,6 +200,8 @@ function _solve_VS!(
                     @strain(stokes),
                     @plastic_strain(stokes),
                     stokes.EII_pl,
+                    stokes.ε_vol_pl,
+                    stokes.EVol_pl,
                     @tensor_center(stokes.τ),
                     (stokes.τ.xy,),
                     @tensor_center(stokes.τ_o),
@@ -209,7 +236,8 @@ function _solve_VS!(
                 ρg...,
                 ητ,
                 ϕ,
-                _di...,
+                _di.center,
+                _di.vertex,
                 dt * free_surface,
             )
             # apply boundary conditions
@@ -224,7 +252,6 @@ function _solve_VS!(
 
         if iter % nout == 0 && iter > 1
 
-            Acell = prod(di)
             errs = (
                 norm_mpi(@views stokes.R.Rx[ϕ.Vx[2:(end - 1), :] .> 0]) / nRx,
                 norm_mpi(@views stokes.R.Ry[ϕ.Vy[:, 2:(end - 1)] .> 0]) / nRy,
@@ -261,7 +288,7 @@ function _solve_VS!(
 
     # compute vorticity
     @parallel (@idx ni .+ 1) compute_vorticity!(
-        stokes.ω.xy, @velocity(stokes)..., inv.(di)...
+        stokes.ω.xy, @velocity(stokes)..., _di.velocity[1], _di.velocity[2]
     )
 
     # Interpolate shear components to cell center arrays
@@ -271,6 +298,7 @@ function _solve_VS!(
 
     # accumulate plastic strain tensor
     accumulate_tensor!(stokes.EII_pl, stokes.ε_pl, dt)
+    accumulate_vol!(stokes.EVol_pl, stokes.ε_vol_pl, dt)
 
     @parallel (@idx ni .+ 1) multi_copy!(@tensor(stokes.τ_o), @tensor(stokes.τ))
     @parallel (@idx ni) multi_copy!(@tensor_center(stokes.τ_o), @tensor_center(stokes.τ))
@@ -283,4 +311,22 @@ function _solve_VS!(
         norm_Ry = norm_Ry,
         norm_∇V = norm_∇V,
     )
+end
+
+function _solve_VS!(
+        stokes::JustRelax.StokesArrays,
+        pt_stokes,
+        di::Union{NTuple{2, <:Real}, NamedTuple},
+        flow_bcs::AbstractFlowBoundaryConditions,
+        ρg,
+        phase_ratios::JustPIC.PhaseRatios,
+        ϕ::JustRelax.RockRatio,
+        rheology,
+        args,
+        dt,
+        igg::IGG;
+        kwargs...,
+    )
+    grid = JustRelax.legacy_uniform_grid(size(stokes.P), di)
+    return _solve_VS!(stokes, pt_stokes, grid, flow_bcs, ρg, phase_ratios, ϕ, rheology, args, dt, igg; kwargs...)
 end
