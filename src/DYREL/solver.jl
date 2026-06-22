@@ -1,3 +1,4 @@
+import JustRelax: apply_mask!
 ## VISCO-ELASTIC STOKES SOLVER
 """
     solve_DYREL!(

@@ -622,6 +622,30 @@ end
     return nothing
 end
 
+@parallel_indices (I...) function update_V_damping_DR_V!(
+        V::NTuple{N, AbstractArray{T, N}},
+        dVdτ::NTuple{N, AbstractArray{T, N}},
+        R::NTuple{N, AbstractArray{T, N}},
+        αV::NTuple{N, AbstractArray{T, N}},
+        βV::NTuple{N, AbstractArray{T, N}},
+        dτV::NTuple{N, AbstractArray{T, N}},
+        mask_vbox::NTuple{N, AbstractArray{<:Number, N}},
+    ) where {N, T}
+
+    ntuple(Val(N)) do d
+        @inline
+        if all(I .≤ size(R[d]))
+            # if mask==1 => prescribed region, do not update this velocity DoF
+            if mask_vbox[d][I...] == 0
+                dVdτ[d][I...] = αV[d][I...] * dVdτ[d][I...] + R[d][I...]
+                V[d][I .+ 1...] += dVdτ[d][I...] * βV[d][I...] * dτV[d][I...]
+            end
+        end
+    end
+
+    return nothing
+end
+
 @parallel_indices (I...) function compute_dV!(
         dV::NTuple{N, AbstractArray{T, N}},
         dVdτ::NTuple{N, AbstractArray{T, N}},
