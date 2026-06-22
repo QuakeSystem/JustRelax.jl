@@ -1,3 +1,4 @@
+import JustRelax: apply_mask!
 ## VISCO-ELASTIC STOKES SOLVER
 """
     solve_DYREL!(
@@ -66,6 +67,7 @@ function _solve_DYREL!(
         verbose_DR = true,
         linear_viscosity = false,
         free_surface = false,
+        apply_velocity_box = nothing,  # optional f(stokes) to enforce internal velocity boxes after each V update
         kwargs...,
     ) where {N}
 
