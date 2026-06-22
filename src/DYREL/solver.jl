@@ -1,3 +1,4 @@
+import JustRelax: apply_mask!
 ## VISCO-ELASTIC STOKES SOLVER
 """
     solve_DYREL!(
@@ -64,6 +65,7 @@ function _solve_DYREL!(
         verbose_PH = true,
         verbose_DR = true,
         linear_viscosity = false,
+        apply_velocity_box = nothing,  # optional f(stokes) to enforce internal velocity boxes after each V update
         kwargs...,
     ) where {N}
 
@@ -151,6 +153,11 @@ function _solve_DYREL!(
             _di.center,
             _di.vertex,
         )
+
+        if apply_velocity_box !== nothing
+            apply_mask!(stokes.R.Rx, 0.0, stokes.mask_vbox_x)
+            apply_mask!(stokes.R.Ry, 0.0, stokes.mask_vbox_y)
+        end
 
         # compute pressure residual
         compute_residual_P!(
@@ -257,6 +264,12 @@ function _solve_DYREL!(
                 _di.vertex,
             )
 
+            if apply_velocity_box !== nothing
+                apply_mask!(stokes.R.Rx, 0.0, stokes.mask_vbox_x)
+                apply_mask!(stokes.R.Ry, 0.0, stokes.mask_vbox_y)
+            end
+
+
             # Damping and pseudo-transient velocity updates
             @parallel (@idx ni) update_V_damping_DR_V!(
                 @velocity(stokes),
@@ -265,6 +278,7 @@ function _solve_DYREL!(
                 fields.αV,
                 fields.βV,
                 fields.dτV,
+                (stokes.mask_vbox_x.mask, stokes.mask_vbox_y.mask),
             )
             flow_bcs!(stokes, flow_bcs)
             update_halo!(@velocity(stokes)...)
