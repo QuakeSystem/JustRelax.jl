@@ -1,0 +1,500 @@
+\documentclass{article}
+
+\usepackage[toc,page]{appendix}
+\usepackage{url}
+\usepackage{a4wide}
+
+
+\begin{document}
+\title{How to install Julia and run a model of JustRelax on Eejit}
+\author{Lukas van de Wiel}
+\date{\today}
+
+\maketitle
+
+\section{Acknowledgements}
+
+This manual was created with the valuable help of Ludovic Raas and Albert de Montserrat
+
+\section{Prerequisites}
+
+You can use the existing installation of Julia on Eejit, which is nice and stable, 
+or install your own version, if you want to try the latest git versions.
+This section explains the installation of Julia and the required modules (called `packages' 
+in Julia), and uses the existing Julia installation as example.
+
+\subsection{Directory structure}
+
+To install Julia, first select a directory in which you want to install it.
+
+On Eejit, this is:
+\begin{verbatim}
+/scratch/tectonics/GPU4GEO/julia_local
+\end{verbatim}
+
+In this directory, create three subdirectories:
+
+\begin{enumerate}
+\item JuliaUp  
+\item julia\_depot  
+\item julia\_prefs
+\end{enumerate}
+
+\subsection{bashrc}
+
+\begin{enumerate}
+\item In your ~/.bashrc file, link to these directories, by adding:
+\begin{verbatim}
+export JULIA_DEPOT_PATH=/scratch/tectonics/GPU4GEO/julia_local/julia_depot
+export JULIA_LOAD_PATH="$JULIA_LOAD_PATH:/scratch/tectonics/GPU4GEO/julia_local/julia_prefs/"
+\end{verbatim}
+
+Note that these paths cannot be relative, and cannot contain variables
+
+(We tried:
+\begin{verbatim}
+SCRATCH=/scratch/tectonics/GPU4GEO
+export JULIA_DEPOT_PATH=$SCRATCH/julia_local/julia_depot
+export JULIA_LOAD_PATH="$JULIA_LOAD_PATH:$SCRATCH/julia_local/julia_prefs/"
+\end{verbatim}
+but that failed because it could not find the julia\_depot directory and did not apply the 
+preferences; more about that later.)
+
+\item Source the bashrc:
+
+\begin{verbatim}
+$> source ~/.bashrc
+\end{verbatim}
+
+\end{enumerate}
+
+\subsection{toml files}
+
+In the \textit{julia\_prefs} directory, create files
+\begin{enumerate}
+\item Project.toml
+\begin{verbatim}
+[extras]
+CUDA_Runtime_jll = "76a88914-d11a-5bdc-97e0-2f5a05c973a2"
+MPIPreferences = "3da0fdf6-3ccc-4f1b-acd9-58baa6c99267"
+\end{verbatim}
+\item localPreferences.toml
+\begin{verbatim}
+[CUDA_Runtime_jll]
+local = "true"
+
+[MPIPreferences]
+_format = "1.0"
+abi = "OpenMPI"
+binary = "system"
+libmpi = "/trinity/opt/apps/development/dev2024/install/lib"
+mpiexec = "mpirun"
+\end{verbatim}
+(and possible hdf5 preferences if it is MPI-aware. Still look at that. Not urgent)
+\end{enumerate}
+
+\subsection{juliaUp}
+
+\begin{enumerate} 
+
+\item In the directory JuliaUp, run:
+\begin{verbatim}
+curl -fsSL https://install.julialang.org | sh
+\end{verbatim}
+(stolen from: \url{https://github.com/JuliaLang/juliaup} )
+
+Thanks to the proper setting of \textit{JULIA\_DEPOT\_PATH} and \textit{JULIA\_LOAD\_PATH},
+this will install the desired Julia in this desired directory.
+
+JuliaUp will also make changes to your ~/.bashrc, to ensure that the path to the
+Julia binary is in \$PATH. This addition is marked by
+
+\begin{verbatim}
+# >>> juliaup initialize >>>
+# !! Contents within this block are managed by juliaup !!
+[Julia environment variables are set here.]
+# <<< juliaup initialize <<<
+\end{verbatim}
+
+\item Source the updated bashrc:
+
+\begin{verbatim}
+$> source ~/.bashrc
+\end{verbatim}
+
+The correctness of the procedure can be validated by testing:
+
+\begin{verbatim}
+$> which julia
+julia is /scratch/tectonics/GPU4GEO/julia_local/JuliaUp/bin/julia
+\end{verbatim}
+
+\end{enumerate} 
+
+
+\subsection{Install the Julia packages}
+There are two ways to install the packages.
+\begin{enumerate}
+\item Using the Julia package manager
+\begin{itemize}
+\item Pro: Usually working
+\item Con: Last release version, so can be not state of the art
+\end{itemize}
+\item From Github
+\begin{itemize}
+\item Pro: State of the art
+\item Con: Can be broken every now and then, when one of the packages has changed something,
+but a related package has not yet adapted. 
+\end{itemize}
+\end{enumerate}
+As we aim for a stable working installation, we use the Julia package manager
+
+This can be done from the REPL (The interactive Julia shell; \textit{Read-Evaluate-Print Loop}).
+Can be entered by typing 'julia' without any arguments, that should now be possible
+if JuliaUp has functioned properly.
+
+The Julia REPL has 4 modes, a bit like the vi editor on steroids.
+\begin{enumerate}
+\item The default is the \textit{Julian mode} (green prompt),
+\item The \textit{package manager mode} (blue prompt, can be entered with ']' and left to Julia mode with [backspace])
+\item The \textit{help mode} (yellow prompt, can be entered with '?' and left to Julia mode with [backspace])
+\item The \textit{shell mode} (red prompt, can be entered with ';' and left to Julia mode with [backspace]. From here you have a bash shell... and can even run Julia again!)
+\end{enumerate}
+From any mode, Julia can be exited with ctrl-d. From the Julian mode also with 'exit()'
+
+Go into Julia with the option \textit{--project:}
+\begin{verbatim}
+$> julia --project
+\end{verbatim}
+
+and check the status.
+\begin{verbatim}
+pkg> st
+\end{verbatim}
+
+If you have used the existing install on Eejit, this should now give a list of the installed packages:
+
+\begin{verbatim}
+Status `/scratch/tectonics/GPU4GEO/testSubduct/Project.toml`
+  [052768ef] CUDA v5.9.5
+  [13f3f980] CairoMakie v0.15.7
+  [d35fcfd7] CellArrays v0.3.2
+  [e018b62d] GeoParams v0.7.8
+  [3700c31b] GeophysicalModelGenerator v0.7.14
+  [10dc771f] JustPIC v0.5.11
+  [34418575] JustRelax v0.4.2
+  [da04e1cc] MPI v0.20.23
+  [94395366] ParallelStencil v0.14.3
+\end{verbatim}
+
+And if you make a fresh installation, you should get:
+\begin{verbatim}
+Status `[your favourite Julia path here]` (empty project)
+\end{verbatim}
+
+In that case, those packages still have to be installed.
+For running the 2D subduction model, that is all the packages 
+that have been included with the \textit{using foo}:
+\begin{verbatim}
+(@v1.12) pkg> add GeoParams, GeoParams, CairoMakie, JustRelax, ParallelStencil, JustPIC
+\end{verbatim}
+If you want to run this model in parallel, add:
+\begin{verbatim}
+(@v1.12) pkg> add MPI, CellArrays
+\end{verbatim}
+If you want to run on GPUs, 
+load Eejit modules:
+\begin{verbatim}
+
+\end{verbatim}
+
+
+add:
+\begin{verbatim}
+(@v1.12) pkg> add CUDA
+\end{verbatim}
+
+Similar to your \textit{~/.bash\_history}, the REPL also logs your commands for later reference, in
+\begin{verbatim}
+$HOME/.julia/logs/repl_history.jl
+\end{verbatim}
+
+
+\section{The subduction2D model}
+
+\subsection{Getting the model}
+
+Get the subduction2D model. They can be obtained in two ways, each leading to a vastly different model:
+\begin{enumerate} 
+\item Via Github, as part of the JustRelax package, hidden in directory \url{JustRelax.jl/miniapps/subduction/2D}.
+This version works!
+\item Via the online documentation at: \url{https://ptsolvers.github.io/JustRelax.jl/dev/man/subduction2D/subduction2D}.
+This version does not work!
+\end{enumerate}
+
+\subsection{Fixing the model}
+
+A few changes need to be made for the model to run somewhat properly:
+
+\begin{enumerate}
+\item On line 1, replace 'GLMakie' by 'CairoMakie'. GLMakie generates windows with images in them, 
+which is not allowed from the compute nodes. CairoMakie writes them to file instead, which is fine.
+\item by default, CUDA is enabled, with line four:
+\begin{verbatim}
+const isCUDA = true
+\end{verbatim}
+Change to `false' if you want to run on CPU only.
+\item Near line 86, change the arguments of the call to \textit{init\_particles} from
+\begin{verbatim}
+    particles = init_particles(backend_JP, nxcell, max_xcell, min_xcell, xvi, di, ni)
+\end{verbatim}
+to
+\begin{verbatim}
+    particles = init_particles(backend_JP, nxcell, max_xcell, min_xcell, xvi... )
+\end{verbatim}
+
+\item Near line 260, change the call
+\begin{verbatim}
+advection!(particles
+\end{verbatim}
+to
+\begin{verbatim}
+advection_MQS!(particles
+\end{verbatim}
+
+\item The number of timesteps make the model run about 15 hours in serial.
+To reduce, this, adapt the number of time steps near line 180, for example from:
+
+\begin{verbatim}
+    while it < 1000 # run only for 5 Myrs
+\end{verbatim}
+to
+\begin{verbatim}
+    while it < 100 # run only for 5 Myrs
+\end{verbatim}
+
+\end{enumerate}
+
+
+
+\subsection{Run the model in serial}
+
+The model can be run from the command line from the directory 
+\textit{miniapps/subduction/2D/Subduction2D} with a simple
+
+\begin{verbatim}
+$> julia Subduction2D.jl
+\end{verbatim}
+(but do this only from an interactive session on a compute node)
+or from the REPL in the Julian mode with
+
+While running, the model will create a directory and add output data it: images and vti files. 
+The vti files can be viewed in Paraview.
+
+\begin{verbatim}
+julia> include("Subduction2D.jl")
+\end{verbatim}
+
+A directory called 'Subduction2D' will de created containing:
+\begin{enumerate}
+\item Images of the reasult
+\item A directory called \textit{vtk} containing VTK files of every timesteps
+\end{enumerate}
+
+The model will run a thousand time steps of 55-ish seconds each to complete in about 15 hours.
+
+Such a long model should be run via the scheduler, via a Slurm script:
+
+\begin{verbatim}
+#!/bin/bash
+#SBATCH --ntasks=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --threads-per-core=1
+#SBATCH --time=3-12:00:00
+#SBATCH --partition=allq
+#SBATCH --nodes=1
+#SBATCH --exclusive
+#SBATCH -o job.%N.%j.out  # STDOUT
+#SBATCH -e job.%N.%j.err  # STDERR
+#SBATCH --job-name subduction2D
+
+module purge
+module load development
+module load dev2024
+
+julia Subduction2D.jl
+\end{verbatim}
+
+
+\subsection{Run the model in parallel}
+
+Julia kan run in parallel, but it comes with its own MPI version.
+This can bite the system-MPI.
+
+To isolate it, in the slurm script, do not load the Eejit development environment.
+
+This is installed in \textit{mpiexecjl}.
+
+Syntax to run takes the form of:
+
+\begin{verbatim}
+/scratch/tectonics/GPU4GEO/julia_local/julia_depot/bin/mpiexecjl -np 8 julia --project Subduction2D_MPI.jl
+\end{verbatim}
+
+\subsection{Run the model on GPUs}
+
+To run on CUDA, the CUDA module on Eejit is needed.
+To prevent requiring the entire dev202x module (causing conflicts with the Julia in it), 
+there is a separate CUDA module that can be loaded:
+
+\begin{verbatim}
+module purge
+module load development
+module load CUDA/12.5
+\end{verbatim}
+
+Be sure to set in Subduction2D.jl:
+
+\begin{verbatim}
+const isCUDA = true
+\end{verbatim}
+
+after which a quick test on the login node can be run with:
+
+\begin{verbatim}
+julia --project Subduction2D.jl
+\end{verbatim}
+
+and if everything has gone well, the job can be seen in the GPU processes:
+
+\begin{verbatim}
+$> nvidia-smi
+\end{verbatim}
+
+Similarly this model can be run on a compute node with GPUs, with the slurm script:
+
+\begin{verbatim}
+#!/bin/bash
+#SBATCH --ntasks=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --threads-per-core=1
+#SBATCH --time=3-12:00:00
+#SBATCH --partition=gpu
+#SBATCH --gres=gpu
+#SBATCH --nodes=1
+#SBATCH --exclusive
+#SBATCH -o job.%N.%j.out  # STDOUT
+#SBATCH -e job.%N.%j.err  # STDERR
+#SBATCH --job-name IIsNotAnEejit
+
+module purge
+module load development
+module load CUDA/12.5
+
+julia --project Subduction2D.jl
+\end{verbatim}
+
+Timesteps are run an order of magnitude faster on the GPU than on the CPU. :-)
+
+
+\section{The shearband2D model}
+
+The shearband model is also located in the justRelax package, at:
+\textit{julia\_depot/packages/JustRelax/3qFRD/miniapps/benchmarks/stokes2D/shear\_band}
+
+\subsection{Run the model in serial}
+
+\begin{verbatim}
+$> julia --project ShearBand2D.jl
+\end{verbatim}
+
+It takes a few minbutes to run
+
+\subsection{Run the model in parallel}
+
+This model can be run interactively, or via slurm:
+
+\subsubsection{Interactively}
+
+An interactive session to a compute node can be opened with the shell command:
+
+\begin{verbatim}
+srun -p allq --ntasks-per-node=48 --exclusive --pty bash
+\end{verbatim}
+
+or for a node with a GPU:
+
+\begin{verbatim}
+srun -p gpu --gres=gpu --ntasks-per-node=48 --exclusive --pty bash
+\end{verbatim}
+
+The prompt will change from 
+
+\begin{verbatim}
+(16:25 lukas@login01 ~) >
+\end{verbatim}
+
+(or similar to:)
+
+\begin{verbatim}
+(16:25 lukas@gpu004 ~) > 
+\end{verbatim}
+
+Note that even though this node is called a gpu004, it is not a node with GPUs.
+It used to have in the past. The only nodes with actual GPUs are gpu041-045.
+
+The model can then be run interactively from this single compute node:
+
+\begin{verbatim}
+$> /scratch/tectonics/GPU4GEO/julia_local/julia_depot/bin/mpiexecjl -np 8 julia --project ShearBand2D_MPI.jl
+\end{verbatim}
+
+Apply the option `--project' to ensure that the packages defined in
+\textit{/scratch/tectonics/GPU4GEO/julia\_local/julia\_prefs/Project.toml} are available.
+Julia finds this Project.toml because of environment variable:
+\textit{JULIA\_LOAD\_PATH=:/scratch/tectonics/GPU4GEO/julia\_local/julia\_prefs}.
+
+\subsubsection{slurm}
+
+The same can also be run in a Slurm script, on multiple nodes, for example on 4, using this script.
+Notice that no modules are loaded.
+
+\begin{verbatim}
+#!/bin/bash
+#SBATCH --ntasks=192
+#SBATCH --ntasks-per-node=48
+#SBATCH --threads-per-core=1
+#SBATCH --time=3-12:00:00
+#SBATCH --partition=allq
+#SBATCH --nodes=4
+#SBATCH -o job.%N.%j.out  # STDOUT
+#SBATCH -e job.%N.%j.err  # STDERR
+#SBATCH --job-name shearBand
+
+module purge
+
+/scratch/tectonics/GPU4GEO/julia_local/julia_depot/bin/mpiexecjl \
+-np 192 julia --project ShearBand2D_MPI.jl
+\end{verbatim}
+
+Not that many of the SBATCH flags are the same to arguments of the \textit{srun}-command above.
+
+
+\end{document}
+
+% add package#branch
+
+% dev justRelax    <- gets dev version
+
+
+% run tests:
+% pkg > activate .
+% pkg > test
+% and it runs! :)
+% pre(-release) checks oftenb fail; this is no problem
+
+
+
+
+
+
