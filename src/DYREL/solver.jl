@@ -66,6 +66,7 @@ function _solve_DYREL!(
         verbose_DR = true,
         linear_viscosity = false,
         apply_velocity_box = nothing,  # optional f(stokes) to enforce internal velocity boxes after each V update
+        mask_vbox_center = nothing,
         kwargs...,
     ) where {N}
 
@@ -76,6 +77,7 @@ function _solve_DYREL!(
     _di = grid._di
     di_center = di.center
     ni = size(stokes.P)
+    typesafe_mask_vbox_center = mask_vbox_center === nothing ? (@zeros(ni...)) : mask_vbox_center
 
     residuals = @residuals(stokes.R)
     fields = dyrel_fields(dyrel, dim)
@@ -127,7 +129,7 @@ function _solve_DYREL!(
 
         # compute divergence, deviatoric strain rate and pressure residual in one pass
         # isone(itPH) &&
-        compute_∇V_strain_rate_RP!(stokes, dyrel, rheology, phase_ratios, _di, ni, dt, args, true)
+        compute_∇V_strain_rate_RP!(stokes, dyrel, rheology, phase_ratios, _di, ni, dt, args, true, typesafe_mask_vbox_center)
 
         # compute deviatoric stress, refresh τII viscosity, and assemble θc = γ_eff·RP + ΔPψ in one pass
         compute_stress_viscosity_DRYEL!(stokes, θc, dyrel.γ_eff, rheology, phase_ratios, λ_relaxation_PH, dt, viscosity_relaxation, args, viscosity_cutoff, linear_viscosity)
@@ -197,7 +199,7 @@ function _solve_DYREL!(
             iszero(iter % nout) && foreach(copyto!, residuals0, residuals)
 
             # compute divergence, deviatoric strain rate and pressure residual in one pass
-            compute_∇V_strain_rate_RP!(stokes, dyrel, rheology, phase_ratios, _di, ni, dt, args, true)
+            compute_∇V_strain_rate_RP!(stokes, dyrel, rheology, phase_ratios, _di, ni, dt, args, true, typesafe_mask_vbox_center)
 
             # Deviatoric stress, τII viscosity refresh, and θc = γ_eff·RP + ΔPψ assembly in one pass
             compute_stress_viscosity_DRYEL!(stokes, θc, dyrel.γ_eff, rheology, phase_ratios, λ_relaxation_DR, dt, viscosity_relaxation, args, viscosity_cutoff, linear_viscosity)
@@ -230,10 +232,6 @@ function _solve_DYREL!(
                 (stokes.mask_vbox_x.mask, stokes.mask_vbox_y.mask),
             )
 
-            if apply_velocity_box !== nothing
-                apply_mask!(stokes.R.Rx, 0.0, stokes.mask_vbox_x)
-                apply_mask!(stokes.R.Ry, 0.0, stokes.mask_vbox_y)
-            end
             flow_bcs!(stokes, flow_bcs)
             update_halo!(@velocity(stokes)...)
 
@@ -257,9 +255,36 @@ function _solve_DYREL!(
 
                 # @printf("it = %d, iter = %d, ϵ_vel = %1.3e, err = %1.3e norm[Rx=%1.3e, Ry=%1.3e] \n", itPT, iter, ϵ_vel, err, errVx, errVy)
                 if verbose_DR && igg.me == 0
-                    @printf("it = %d, iter = %d, err = %1.3e \n", itPT, iter, err)
+                @printf("it = %d, iter = %d, err = %1.3e \n", itPT, iter, err)
+
+                    # --- velocity-box diagnostics ---
+                    if apply_velocity_box !== nothing
+                        mx = Array(stokes.mask_vbox_x.mask) .!= 0
+                        my = Array(stokes.mask_vbox_y.mask) .!= 0
+                        if any(mx) || any(my)
+                            Rx_masked  = any(mx) ? extrema(Array(residuals[1])[mx]) : (0.0, 0.0)
+                            Ry_masked  = any(my) ? extrema(Array(residuals[2])[my]) : (0.0, 0.0)
+                            dVx_masked = any(mx) ? extrema(Array(fields.dVdτ[1])[mx]) : (0.0, 0.0)
+                            dVy_masked = any(my) ? extrema(Array(fields.dVdτ[2])[my]) : (0.0, 0.0)
+                            # @printf("  [vbox] Rx(masked)=%1.3e:%1.3e  Ry(masked)=%1.3e:%1.3e\n",
+                            #     Rx_masked..., Ry_masked...)
+                            # @printf("  [vbox] dVxdτ(masked)=%1.3e:%1.3e  dVydτ(masked)=%1.3e:%1.3e\n",
+                            #     dVx_masked..., dVy_masked...)
+                        else
+                            @printf("  [vbox] no masked nodes yet\n")
+                        end
+                        maskcenter = Array(typesafe_mask_vbox_center) .!= 0
+                        if any(maskcenter)
+                            RP_masked = extrema(Array(stokes.R.RP)[maskcenter])
+                            @printf("  [vbox] RP(masked)=%1.3e:%1.3e\n", RP_masked...)
+                        end
+                    end
                 end
+
                 λminV = compute_λminV!(fields, residuals, residuals0, ni, dim)
+                if verbose_DR && igg.me == 0
+                    @printf("  λminV = %1.3e  λmaxVx=%1.3e  λmaxVy=%1.3e\n", λminV, extrema(Array(dyrel.λmaxVx))[2], extrema(Array(dyrel.λmaxVy))[2])
+                end
                 @parallel (@idx ni) update_cV!(fields.cV, 2 * √(λminV) * dyrel.c_fact)
 
                 # Optimal pseudo-time steps - can be replaced by AD
@@ -271,7 +296,7 @@ function _solve_DYREL!(
         end
 
         # update pressure
-        compute_∇V_strain_rate_RP!(stokes, dyrel, rheology, phase_ratios, _di, ni, dt, args, false)
+        compute_∇V_strain_rate_RP!(stokes, dyrel, rheology, phase_ratios, _di, ni, dt, args, false, typesafe_mask_vbox_center)
         @. stokes.P += dyrel.γ_eff .* stokes.R.RP
 
         iter > total_iterMax && break
