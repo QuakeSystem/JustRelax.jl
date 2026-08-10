@@ -298,8 +298,6 @@ function StokesArrays(ni::NTuple{N, Integer}) where {N}
     λ = @zeros(ni...)
     λv = @zeros(ni .+ 1...)
     ΔPψ = @zeros(ni...)
-    mask_vbox_x = JustRelax.Mask(@zeros(size(R.Rx)...))
-    mask_vbox_y = JustRelax.Mask(@zeros(size(R.Ry)...))
 
-    return JustRelax.StokesArrays(P, P0, V, ∇V, Q, τ, ε, ε_pl, EII_pl, EVol_pl, ε_vol_pl, viscosity, τ_o, R, U, ω, Δε, ∇U, λ, λv, ΔPψ, mask_vbox_x, mask_vbox_y)
+    return JustRelax.StokesArrays(P, P0, V, ∇V, Q, τ, ε, ε_pl, EII_pl, EVol_pl, ε_vol_pl, viscosity, τ_o, R, U, ω, Δε, ∇U, λ, λv, ΔPψ)
 end
