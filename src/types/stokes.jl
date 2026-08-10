@@ -158,7 +158,7 @@ Adapt.@adapt_structure PrincipalStress
 
 ## StokesArrays type
 
-struct StokesArrays{A, B, C, D, E, F, T, M}
+struct StokesArrays{A, B, C, D, E, F, T}
     P::T
     P0::T
     V::A
@@ -180,8 +180,6 @@ struct StokesArrays{A, B, C, D, E, F, T, M}
     λ::T
     λv::T
     ΔPψ::T
-    mask_vbox_x::M
-    mask_vbox_y::M
 end
 
 Adapt.@adapt_structure StokesArrays
