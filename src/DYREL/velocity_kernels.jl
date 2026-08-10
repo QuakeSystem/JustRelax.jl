@@ -617,6 +617,29 @@ end
     return nothing
 end
 
+@parallel_indices (I...) function update_V_damping_DR_V!(
+        V::NTuple{N, AbstractArray{T, N}},
+        dVdτ::NTuple{N, AbstractArray{T, N}},
+        R::NTuple{N, AbstractArray{T, N}},
+        αV::NTuple{N, AbstractArray{T, N}},
+        βV::NTuple{N, AbstractArray{T, N}},
+        dτV::NTuple{N, AbstractArray{T, N}},
+        mask_vbox::NTuple{N, AbstractArray{<:Number, N}},
+    ) where {N, T}
+
+    ntuple(Val(N)) do d
+        @inline
+        if all(I .≤ size(R[d]))
+            # if mask==1 => prescribed region, do not update this velocity DoF
+            if mask_vbox[d][I...] == 0
+                dVdτ[d][I...] = αV[d][I...] * dVdτ[d][I...] + R[d][I...]
+                V[d][I .+ 1...] += dVdτ[d][I...] * βV[d][I...] * dτV[d][I...]
+            end
+        end
+    end
+
+    return nothing
+end
 
 @parallel_indices (I...) function compute_dV!(
         dV::NTuple{N, AbstractArray{T, N}},
@@ -716,6 +739,70 @@ end
             dVy_new, ΔVy = damped_update_V(dVydτ[i, j], Ry_ij, αVy[i, j], βVy[i, j], dτVy[i, j])
             dVydτ[i, j] = dVy_new
             Vy[i + 1, j + 1] += ΔVy
+        end
+    end
+
+    return nothing
+end
+
+
+@parallel_indices (i, j) function compute_DR_residual_update_V!(
+        Rx::AbstractArray{T, 2},
+        Ry,
+        Vx,
+        Vy,
+        dVxdτ,
+        dVydτ,
+        P,
+        θc,
+        τxx,
+        τyy,
+        τxy,
+        ρgx,
+        ρgy,
+        Dx,
+        Dy,
+        αVx,
+        αVy,
+        βVx,
+        βVy,
+        dτVx,
+        dτVy,
+        _di_center,
+        _di_vertex,
+        mask_vbox,
+    ) where {T}
+    Base.@propagate_inbounds @inline av_xa(A) = _av_xa(A, i, j)
+    Base.@propagate_inbounds @inline av_ya(A) = _av_ya(A, i, j)
+
+    @inbounds begin
+        if i ≤ size(Rx, 1) && j ≤ size(Rx, 2)
+            _dx_c = @dx(_di_center, i)
+            _dy_v = @dy(_di_vertex, j)
+            Base.@propagate_inbounds @inline d_xa(A) = _d_xa(A, _dx_c, i, j)
+            Base.@propagate_inbounds @inline d_yi(A) = _d_yi(A, _dy_v, i, j)
+            Rx_ij = (d_xa(τxx) + d_yi(τxy) - d_xa(P) - d_xa(θc) - av_xa(ρgx)) / Dx[i, j]
+            Rx[i, j] = Rx_ij
+
+            dVx_new, ΔVx = damped_update_V(dVxdτ[i, j], Rx_ij, αVx[i, j], βVx[i, j], dτVx[i, j])
+            dVxdτ[i, j] = dVx_new
+            if mask_vbox[1][i, j] == 0
+                Vx[i + 1, j + 1] += ΔVx
+            end
+        end
+        if i ≤ size(Ry, 1) && j ≤ size(Ry, 2)
+            _dy_c = @dy(_di_center, j)
+            _dx_v = @dx(_di_vertex, i)
+            Base.@propagate_inbounds @inline d_ya(A) = _d_ya(A, _dy_c, i, j)
+            Base.@propagate_inbounds @inline d_xi(A) = _d_xi(A, _dx_v, i, j)
+            Ry_ij = (d_ya(τyy) + d_xi(τxy) - d_ya(P) - d_ya(θc) - av_ya(ρgy)) / Dy[i, j]
+            Ry[i, j] = Ry_ij
+
+            dVy_new, ΔVy = damped_update_V(dVydτ[i, j], Ry_ij, αVy[i, j], βVy[i, j], dτVy[i, j])
+            dVydτ[i, j] = dVy_new
+            if mask_vbox[2][i, j] == 0
+                Vy[i + 1, j + 1] += ΔVy
+            end
         end
     end
 
