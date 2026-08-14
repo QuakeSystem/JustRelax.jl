@@ -67,7 +67,8 @@ function _solve_DYREL!(
         verbose_DR = true,
         linear_viscosity = false,
         free_surface = false,
-        apply_velocity_box = nothing,  # optional f(stokes) to enforce internal velocity boxes after each V update
+        apply_velocity_box = nothing,
+        mask_vbox_center = nothing,
         kwargs...,
     ) where {N}
 
@@ -78,6 +79,7 @@ function _solve_DYREL!(
     _di = grid._di
     di_center = di.center
     ni = size(stokes.P)
+    mvc = mask_vbox_center === nothing ? (@zeros(ni...)) : mask_vbox_center
 
     residuals = @residuals(stokes.R)
     fields = dyrel_fields(dyrel, dim)
@@ -133,8 +135,7 @@ function _solve_DYREL!(
         update_ρg!(ρg, phase_ratios, rheology, args)
 
         # compute divergence, deviatoric strain rate and pressure residual in one pass
-        # isone(itPH) &&
-        compute_∇V_strain_rate_RP!(stokes, dyrel, rheology, phase_ratios, _di, ni, dt, args, true)
+        compute_∇V_strain_rate_RP!(stokes, dyrel, rheology, phase_ratios, _di, ni, dt, args, true, mvc)
 
         # compute deviatoric stress, refresh τII viscosity, and assemble θc = γ_eff·RP + ΔPψ in one pass
         compute_stress_viscosity_DRYEL!(stokes, θc, dyrel.γ_eff, rheology, phase_ratios, λ_relaxation_PH, dt, viscosity_relaxation, args, viscosity_cutoff, linear_viscosity)
@@ -158,7 +159,10 @@ function _solve_DYREL!(
         )
 
         # pressure residual stokes.R.RP already computed in compute_∇V_strain_rate_RP! above
-
+        if apply_velocity_box !== nothing
+            apply_mask!(stokes.R.Rx, 0.0, stokes.mask_vbox_x)
+            apply_mask!(stokes.R.Ry, 0.0, stokes.mask_vbox_y)
+        end
         # Residual check
         errV = ntuple(d -> norm_mpi(residuals[d]) / √(v_dofs[d]), dim)
         errPt = norm_mpi(stokes.R.RP) / √(p_dof)
@@ -203,7 +207,7 @@ function _solve_DYREL!(
             iszero(iter % nout) && foreach(copyto!, residuals0, residuals)
 
             # compute divergence, deviatoric strain rate and pressure residual in one pass
-            compute_∇V_strain_rate_RP!(stokes, dyrel, rheology, phase_ratios, _di, ni, dt, args, true)
+            compute_∇V_strain_rate_RP!(stokes, dyrel, rheology, phase_ratios, _di, ni, dt, args, true, mvc)
 
             # Deviatoric stress, τII viscosity refresh, and θc = γ_eff·RP + ΔPψ assembly in one pass
             compute_stress_viscosity_DRYEL!(stokes, θc, dyrel.γ_eff, rheology, phase_ratios, λ_relaxation_DR, dt, viscosity_relaxation, args, viscosity_cutoff, linear_viscosity)
@@ -235,6 +239,7 @@ function _solve_DYREL!(
                 _di.center,
                 _di.vertex,
                 dt * free_surface,
+                (stokes.mask_vbox_x.mask, stokes.mask_vbox_y.mask)
             )
             flow_bcs!(stokes, flow_bcs)
             free_surface_bcs!(
@@ -278,7 +283,10 @@ function _solve_DYREL!(
         end
 
         # update pressure
-        compute_∇V_strain_rate_RP!(stokes, dyrel, rheology, phase_ratios, _di, ni, dt, args, false)
+        # refresh RP only (strain rate already current from the last DR iteration) — masked RP
+        # keeps box cells at zero so the pressure update is a no-op there
+        compute_∇V_strain_rate_RP!(stokes, dyrel, rheology, phase_ratios, _di, ni, dt, args, false, mvc)
+
         @. stokes.P += dyrel.γ_eff .* stokes.R.RP
 
         iter > total_iterMax && break
