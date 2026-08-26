@@ -42,8 +42,7 @@ Base.eachindex(m::Mask) = eachindex(m.mask)
 Base.all(m::Mask) = all(isone, m.mask)
 Base.similar(m::Mask) = Mask(size(m)...)
 Base.copy(m::Mask) = Mask(m.mask)
-# need to implement copy on the datatype Mask, so that the unit tests pass!
-# or make AbstractMask a subtype of AbstractArray??
+
 @inline dims(::Mask{A}) where {A <: AbstractArray{T, N}} where {T, N} = N
 
 @inline apply_mask!(A::AbstractArray, B::Any, m::Mask) = (A .= inv(m) .* A .+ m.mask .* B)

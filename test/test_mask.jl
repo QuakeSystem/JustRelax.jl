@@ -20,6 +20,9 @@ import JustRelax.JustRelax3D as JR3
     m = JR2.Mask(ni..., 4:7, 4:7)
     @test all(isone, m[4:7, 4:7])
 
+    # test copy
+    @test all(copy(m)[1:ni[1],1:ni[2]].== m[1:ni[1],1:ni[2]])
+
     # test masking
     A = rand(ni...)
     B = zeros(ni...)
@@ -59,6 +62,9 @@ end
 
     m = JR3.Mask(ni..., 4:7, 4:7, 4:7)
     @test all(isone, m[4:7, 4:7, 4:7])
+
+    # test copy
+    @test all(copy(m)[1:ni[1],1:ni[2],1:ni[3]].== m[1:ni[1],1:ni[2],1:ni[3]])
 
     A = rand(ni...)
     B = zeros(ni...)
