@@ -43,6 +43,8 @@ const BackendArray = PTArray(backend)
     @test typeof(stokes.EII_pl) <: BackendArray
     @test stokes.viscosity isa JustRelax.Viscosity
     @test stokes.R isa JustRelax.Residual
+    @test stokes.mask_vbox_x isa JustRelax.Mask
+    @test stokes.mask_vbox_y isa JustRelax.Mask
 
     R = stokes.R
     @test R isa JustRelax.Residual
@@ -164,6 +166,8 @@ end
     @test typeof(stokes.EII_pl) <: BackendArray
     @test stokes.viscosity isa JustRelax.Viscosity
     @test stokes.R isa JustRelax.Residual
+    @test stokes.mask_vbox_x isa JustRelax.Mask
+    @test stokes.mask_vbox_y isa JustRelax.Mask
 
     R = stokes.R
     @test R isa JustRelax.Residual
