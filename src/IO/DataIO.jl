@@ -14,6 +14,7 @@ include("H5.jl")
 export save_hdf5,
     checkpointing_hdf5,
     load_checkpoint_hdf5,
+    save_marker_chain_hdf5,
     metadata,
     center_coordinates,
     vertex_coordinates,

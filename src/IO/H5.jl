@@ -143,6 +143,35 @@ function save_hdf5(fname, data::Vararg{Any, N}; precision = Float32) where {N}
     end
 end
 
+"""
+    save_marker_chain_hdf5(fname::String, chain::MarkerChain; conversion=1.0e3, t=0.0, precision=Float32)
+Save a marker chain to an HDF5 file.
+## Arguments
+- `fname::String`: The name of the HDF5 file to save. The extension `.h5` will be appended to the name.
+- `chain::MarkerChain`: Marker chain object from JustPIC.jl.
+- `conversion`: Conversion factor for coordinates (default: 1.0e3)
+- `t::Number`: Time value (default: 0.0)
+- `precision`: Floating point precision for output (default: Float32)
+"""
+save_marker_chain_hdf5(fname::String, chain; conversion = 1.0e3, t::Number = 0.0, precision = Float32) =
+    save_marker_chain_hdf5(fname, Array(chain.cell_vertices) ./ conversion, Array(chain.h_vertices) ./ conversion; t = t, precision = precision)
+function save_marker_chain_hdf5(
+        fname::String,
+        cell_vertices::Union{LinRange{Float64}, Vector{Float64}},
+        h_vertices,
+        ;
+        t::Number = 0.0,
+        precision = Float32,
+    )
+    cell_vertices_vec = precision.(Array(collect(cell_vertices)))
+    h_vertices_vec    = precision.(Array(h_vertices))
+    h5open("$(fname).h5", "w") do file
+        write(file, "cell_vertices", cell_vertices_vec)
+        write(file, "h_vertices", h_vertices_vec)
+        write(file, "time", precision(t))
+    end
+    return nothing
+end
 @inline save_data(file, data, precision) = write(file, @namevar(data, precision)...)
 
 function save_data(file, data::Geometry{N}) where {N}
