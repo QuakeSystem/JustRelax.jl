@@ -41,6 +41,7 @@ Base.axes(m::Mask) = axes(m.mask)
 Base.eachindex(m::Mask) = eachindex(m.mask)
 Base.all(m::Mask) = all(isone, m.mask)
 Base.similar(m::Mask) = Mask(size(m)...)
+Base.copy(m::Mask) = Mask(m.mask)
 
 @inline dims(::Mask{A}) where {A <: AbstractArray{T, N}} where {T, N} = N
 
