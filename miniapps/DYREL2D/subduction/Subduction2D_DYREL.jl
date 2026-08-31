@@ -59,6 +59,29 @@ end
     @all(P) = abs(@all(ρg) * @all_k(z)) * <(@all_k(z), 0.0)
     return nothing
 end
+
+# `inject_particles_phase!` (4-arg convenience method) reads any field whose size
+# does not match the (un-padded) cell count through its vertex-interpolation path,
+# indexing it with the same 1-node ghost-padded convention as `particles.xvi`
+# (physical vertex k stored at local index k + 1, with an unused ghost slot on
+# either side). Vertex-centered stokes/vorticity fields (`τ.xx_v`, `τ.yy_v`, `τ.xy`,
+# `ω.xy`, all `nx+1 × ny+1`) are plain, un-padded JustRelax arrays, so passing them
+# directly walks one node past their end at the domain's last cell (`BoundsError`).
+# Pad them into that ghost convention first; the ghost values themselves are never
+# read by the injection kernel, so a simple edge-replicate is enough.
+function pad_vertex_ghost!(dst, src)
+    nx, ny = size(src)
+    @views dst[2:(nx + 1), 2:(ny + 1)] .= src
+    @views dst[1, 2:(ny + 1)] .= src[1, :]
+    @views dst[nx + 2, 2:(ny + 1)] .= src[end, :]
+    @views dst[2:(nx + 1), 1] .= src[:, 1]
+    @views dst[2:(nx + 1), ny + 2] .= src[:, end]
+    dst[1, 1] = src[1, 1]
+    dst[1, ny + 2] = src[1, end]
+    dst[nx + 2, 1] = src[end, 1]
+    dst[nx + 2, ny + 2] = src[end, end]
+    return dst
+end
 ## END OF HELPER FUNCTION ------------------------------------------------------------
 
 ## BEGIN OF MAIN SCRIPT --------------------------------------------------------------
@@ -168,6 +191,14 @@ function main(li, origin, phases_GMG, igg; nx = 16, ny = 16, figdir = "figs2D", 
     τxx_v = @zeros(ni .+ 1...)
     τyy_v = @zeros(ni .+ 1...)
 
+    # ghost-padded scratch copies of the vertex-centered fields handed to
+    # `inject_particles_phase!` below — see `pad_vertex_ghost!`. The source
+    # fields are vertex-sized (ni .+ 1), so the padded copies are ni .+ 3.
+    τxx_v_pad = @zeros(ni .+ 3...)
+    τyy_v_pad = @zeros(ni .+ 3...)
+    τxy_pad = @zeros(ni .+ 3...)
+    ωxy_pad = @zeros(ni .+ 3...)
+
     dyrel = DYREL(backend, stokes, rheology, phase_ratios, grid.di, dt; ϵ = 1.0e-3)
 
     # Time loop
@@ -256,11 +287,15 @@ function main(li, origin, phases_GMG, igg; nx = 16, ny = 16, figdir = "figs2D", 
         # advect particles in memory
         move_particles!(particles, particle_args)
         # check if we need to inject particles
+        pad_vertex_ghost!(τxx_v_pad, stokes.τ.xx_v)
+        pad_vertex_ghost!(τyy_v_pad, stokes.τ.yy_v)
+        pad_vertex_ghost!(τxy_pad, stokes.τ.xy)
+        pad_vertex_ghost!(ωxy_pad, stokes.ω.xy)
         inject_particles_phase!(
             particles,
             pPhases,
             particle_args_reduced,
-            (T_buffer, stokes.τ.xx_v, stokes.τ.yy_v, stokes.τ.xy, stokes.ω.xy)
+            (T_buffer, τxx_v_pad, τyy_v_pad, τxy_pad, ωxy_pad)
         )
 
         # update phase ratios

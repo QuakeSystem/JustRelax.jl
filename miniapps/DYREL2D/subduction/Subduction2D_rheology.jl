@@ -90,8 +90,13 @@ end
 
 @parallel_indices (I...) function _init_phases!(phases, phase_grid, pcoords::NTuple{N, T}, index, xvi) where {N, T}
 
-    ni = size(phases)
-
+    # `phases`/`pcoords`/`index` share JustPIC's periodic-ghost-padded cell
+    # layout (size ni_cells .+ 2, real cells at local indices 2:end-1), while
+    # `xvi`/`phase_grid` are the plain, un-padded vertex grids (size ni_cells .+ 1).
+    # `I` walks the padded layout, so it must be shifted back by one to index
+    # into `xvi`/`phase_grid`. Ghost cells never hold particles, so the shifted
+    # code path below is only ever reached for real (non-ghost) cells, where the
+    # shifted indices are guaranteed in-bounds.
     for ip in cellaxes(phases)
         # quick escape
         @index(index[ip, I...]) == 0 && continue
@@ -100,14 +105,16 @@ end
             @index pcoords[i][ip, I...]
         end
 
+        Iv = I .- 1 # physical cell index into xvi / phase_grid
+
         d = Inf # distance to the nearest particle
         particle_phase = -1
         for offi in 0:1, offj in 0:1
-            ii = I[1] + offi
-            jj = I[2] + offj
+            ii = Iv[1] + offi
+            jj = Iv[2] + offj
 
-            !(ii ≤ ni[1]) && continue
-            !(jj ≤ ni[2]) && continue
+            !(1 ≤ ii ≤ size(phase_grid, 1)) && continue
+            !(1 ≤ jj ≤ size(phase_grid, 2)) && continue
 
             xvᵢ = (
                 xvi[1][ii],
