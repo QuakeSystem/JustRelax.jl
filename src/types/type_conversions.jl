@@ -11,6 +11,7 @@ const JR_T = Union{
     Vorticity,
     Residual,
     Viscosity,
+    Mask,
 }
 
 ## Conversion of structs to CPU

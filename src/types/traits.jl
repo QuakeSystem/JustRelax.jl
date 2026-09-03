@@ -22,6 +22,7 @@ for type in (
         JustRelax.Residual,
         JustRelax.Viscosity,
         JustRelax.ThermalArrays,
+        JustRelax.Mask,
     )
     @eval @inline backend(::$(type){T}) where {T} = backend(T)
 end

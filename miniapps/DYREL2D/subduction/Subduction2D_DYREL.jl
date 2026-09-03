@@ -30,7 +30,7 @@ else
 end
 
 # Load script dependencies
-using GeoParams, GLMakie
+using GeoParams, CairoMakie
 
 
 # Load file with all the rheology configurations
@@ -71,15 +71,17 @@ end
 # read by the injection kernel, so a simple edge-replicate is enough.
 function pad_vertex_ghost!(dst, src)
     nx, ny = size(src)
-    @views dst[2:(nx + 1), 2:(ny + 1)] .= src
-    @views dst[1, 2:(ny + 1)] .= src[1, :]
-    @views dst[nx + 2, 2:(ny + 1)] .= src[end, :]
-    @views dst[2:(nx + 1), 1] .= src[:, 1]
-    @views dst[2:(nx + 1), ny + 2] .= src[:, end]
-    dst[1, 1] = src[1, 1]
-    dst[1, ny + 2] = src[1, end]
-    dst[nx + 2, 1] = src[end, 1]
-    dst[nx + 2, ny + 2] = src[end, end]
+    @views begin
+        # interior: physical vertex (k, l) -> local index (k + 1, l + 1)
+        dst[2:(nx + 1), 2:(ny + 1)] .= src
+        # top / bottom ghost rows (interior columns only for now)
+        dst[1, 2:(ny + 1)] .= dst[2, 2:(ny + 1)]
+        dst[nx + 2, 2:(ny + 1)] .= dst[nx + 1, 2:(ny + 1)]
+        # left / right ghost columns across the full row range; because the
+        # ghost rows above are already filled, this also replicates the corners
+        dst[:, 1] .= dst[:, 2]
+        dst[:, ny + 2] .= dst[:, ny + 1]
+    end
     return dst
 end
 ## END OF HELPER FUNCTION ------------------------------------------------------------
