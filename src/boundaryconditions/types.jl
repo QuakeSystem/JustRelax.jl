@@ -109,21 +109,62 @@ struct DisplacementBoundaryConditions{T, nD} <: AbstractFlowBoundaryConditions
         return new{T, nD}(no_slip, free_slip, free_surface)
     end
 end
-struct VelocityBoundaryConditions{T, nD} <: AbstractFlowBoundaryConditions
+@inline _component_dirichlet(nt, key::Symbol) =
+    Dirichlet(hasproperty(nt, key) ? getproperty(nt, key) : NamedTuple())
+
+@inline function _velocity_dirichlet(nt, ::Val{2})
+    return (Vx = _component_dirichlet(nt, :Vx), Vy = _component_dirichlet(nt, :Vy))
+end
+@inline function _velocity_dirichlet(nt, ::Val{3})
+    return (
+        Vx = _component_dirichlet(nt, :Vx),
+        Vy = _component_dirichlet(nt, :Vy),
+        Vz = _component_dirichlet(nt, :Vz),
+    )
+end
+
+"""
+    VelocityBoundaryConditions(; no_slip, free_slip, free_surface=false, dirichlet=NamedTuple())
+
+Define 2D or 3D boundary conditions for the velocity field. Face names are
+`left`, `right`, `top`, and `bot` in 2D, with `front` and `back` added in 3D.
+
+`no_slip` and `free_slip` must differ on every face (this v0.6.1-based branch
+has no `periodic` support for velocity yet).
+
+`dirichlet` prescribes an interior, mask-selected Dirichlet region for the
+velocity field (for example an internal "velocity box"), independent of the
+four/six edge faces above. Pass a per-component named tuple, e.g.
+`dirichlet = (; Vx = (; constant = v, mask = mask_x))`; a component that is
+omitted, or the keyword itself, leaves that component unconstrained. Each
+component's `mask` must be sized like that component's velocity array (`Vx`,
+`Vy`, or `Vz`), not the interior-only residual array.
+
+For a spatially-varying prescribed value (e.g. several boxes with different
+velocities), build a `DirichletBoundaryCondition(value_array, Mask(mask_array))`
+directly and pass it as the component, e.g. `dirichlet = (; Vx = my_bc)`: the
+`(; constant, mask)` shorthand's array form infers its mask from the value
+array's non-zero entries, which cannot represent a prescribed value of exactly
+zero. See [`Dirichlet`](@ref).
+"""
+struct VelocityBoundaryConditions{T, D, nD} <: AbstractFlowBoundaryConditions
     no_slip::T
     free_slip::T
     free_surface::Bool
+    dirichlet::D
 
     function VelocityBoundaryConditions(;
             no_slip::T = (left = false, right = false, top = false, bot = false),
             free_slip::T = (left = true, right = true, top = true, bot = true),
             free_surface::Bool = false,
+            dirichlet::NamedTuple = NamedTuple(),
         ) where {T}
         @assert length(no_slip) === length(free_slip)
         check_flow_bcs(no_slip, free_slip)
 
         nD = length(no_slip) == 4 ? 2 : 3
-        return new{T, nD}(no_slip, free_slip, free_surface)
+        D_nt = _velocity_dirichlet(dirichlet, Val(nD))
+        return new{T, typeof(D_nt), nD}(no_slip, free_slip, free_surface, D_nt)
     end
 end
 
