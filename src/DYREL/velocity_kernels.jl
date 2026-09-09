@@ -232,11 +232,7 @@ end
             end
             # fused pressure residual (reuses `div_ij` in-register); the numerical pressure
             # P_num = γ_eff·RP is folded into θc (with ΔPψ) downstream by the stress kernel.
-            if mask_vbox_c !== nothing && mask_vbox_c[i, j] != 0
-                RP[i, j] = zero(T)
-            else
-                RP[i, j] = _RP_cell(P[i, j], P0[i, j], div_ij, Q[i, j], ηb[i, j], dt, rheology, phase_ratio, ΔT, melt_fraction, i, j)
-            end
+            RP[i, j] = _RP_cell(P[i, j], P0[i, j], div_ij, Q[i, j], ηb[i, j], dt, rheology, phase_ratio, ΔT, melt_fraction, i, j)
         end
     end
     return nothing
@@ -351,6 +347,44 @@ end
     return nothing
 end
 
+# For internal velocity Dirichlet regions -- v0.6.1's DYREL solver has no
+# free-surface stabilization yet, so this is the plain overload above plus
+# `dirichlet` masking only (contrast with the "with Vx,Vy,dt" overload below,
+# which folds in a free-surface density-gradient correction and is unused by
+# this branch's solver.jl).
+@parallel_indices (i, j) function compute_PH_residual_V!(
+        Rx::AbstractArray{T, 2}, Ry, P, ΔPψ, τxx, τyy, τxy, ρgx, ρgy, _di_center, _di_vertex,
+        dirichlet::NTuple{2, AbstractDirichletBoundaryCondition},
+    ) where {T}
+    Base.@propagate_inbounds @inline av_xa(A) = _av_xa(A, i, j)
+    Base.@propagate_inbounds @inline av_ya(A) = _av_ya(A, i, j)
+
+    if i ≤ size(Rx, 1) && j ≤ size(Rx, 2)
+        if !isdirichlet(dirichlet[1], i + 1, j + 1)
+            _dx_c = @dx(_di_center, i)
+            _dy_v = @dy(_di_vertex, j)
+            Base.@propagate_inbounds @inline d_xa(A) = _d_xa(A, _dx_c, i, j)
+            Base.@propagate_inbounds @inline d_yi(A) = _d_yi(A, _dy_v, i, j)
+            Rx[i, j] = d_xa(τxx) + d_yi(τxy) - d_xa(P) - d_xa(ΔPψ) - av_xa(ρgx)
+        else
+            Rx[i, j] = zero(T)
+        end
+    end
+    if i ≤ size(Ry, 1) && j ≤ size(Ry, 2)
+        if !isdirichlet(dirichlet[2], i + 1, j + 1)
+            _dy_c = @dy(_di_center, j)
+            _dx_v = @dx(_di_vertex, i)
+            Base.@propagate_inbounds @inline d_ya(A) = _d_ya(A, _dy_c, i, j)
+            Base.@propagate_inbounds @inline d_xi(A) = _d_xi(A, _dx_v, i, j)
+            Ry[i, j] = d_ya(τyy) + d_xi(τxy) - d_ya(P) - d_ya(ΔPψ) - av_ya(ρgy)
+        else
+            Ry[i, j] = zero(T)
+        end
+    end
+    # end
+    return nothing
+end
+
 @parallel_indices (i, j) function compute_PH_residual_V!(
         Rx::AbstractArray{T, 2},
         Ry,
@@ -366,37 +400,46 @@ end
         _di_center,
         _di_vertex,
         dt,
+        dirichlet::NTuple{2, AbstractDirichletBoundaryCondition},
     ) where {T}
     Base.@propagate_inbounds @inline av_xa(A) = _av_xa(A, i, j)
     Base.@propagate_inbounds @inline av_ya(A) = _av_ya(A, i, j)
 
     nx, ny = size(ρgy)
     if i ≤ size(Rx, 1) && j ≤ size(Rx, 2)
-        _dx_c = @dx(_di_center, i)
-        _dy_v = @dy(_di_vertex, j)
-        Base.@propagate_inbounds @inline d_xa(A) = _d_xa(A, _dx_c, i, j)
-        Base.@propagate_inbounds @inline d_yi(A) = _d_yi(A, _dy_v, i, j)
-        Rx[i, j] = d_xa(τxx) + d_yi(τxy) - d_xa(P) - d_xa(ΔPψ) - av_xa(ρgx)
+        if !isdirichlet(dirichlet[1], i + 1, j + 1)
+            _dx_c = @dx(_di_center, i)
+            _dy_v = @dy(_di_vertex, j)
+            Base.@propagate_inbounds @inline d_xa(A) = _d_xa(A, _dx_c, i, j)
+            Base.@propagate_inbounds @inline d_yi(A) = _d_yi(A, _dy_v, i, j)
+            Rx[i, j] = d_xa(τxx) + d_yi(τxy) - d_xa(P) - d_xa(ΔPψ) - av_xa(ρgx)
+        else
+            Rx[i, j] = zero(T)
+        end
     end
 
     if i ≤ size(Ry, 1) && j ≤ size(Ry, 2)
-        _dy_c = @dy(_di_center, j)
-        _dx_v = @dx(_di_vertex, i)
-        Base.@propagate_inbounds @inline d_ya(A) = _d_ya(A, _dy_c, i, j)
-        Base.@propagate_inbounds @inline d_xi(A) = _d_xi(A, _dx_v, i, j)
-        θ = 1.0
-        # Vertical velocity
-        Vyᵢⱼ = Vy[i + 1, j + 1]
-        # Get necessary buoyancy forces
-        j_N = min(j + 1, ny)
-        ρg_S = ρgy[i, j]
-        ρg_N = ρgy[i, j_N]
-        # Spatial derivatives
-        ∂ρg∂y = (ρg_N - ρg_S) * _dy_c
-        # correction term
-        ρg_correction = (Vyᵢⱼ * ∂ρg∂y) * θ * dt
+        if !isdirichlet(dirichlet[2], i + 1, j + 1)
+            _dy_c = @dy(_di_center, j)
+            _dx_v = @dx(_di_vertex, i)
+            Base.@propagate_inbounds @inline d_ya(A) = _d_ya(A, _dy_c, i, j)
+            Base.@propagate_inbounds @inline d_xi(A) = _d_xi(A, _dx_v, i, j)
+            θ = 1.0
+            # Vertical velocity
+            Vyᵢⱼ = Vy[i + 1, j + 1]
+            # Get necessary buoyancy forces
+            j_N = min(j + 1, ny)
+            ρg_S = ρgy[i, j]
+            ρg_N = ρgy[i, j_N]
+            # Spatial derivatives
+            ∂ρg∂y = (ρg_N - ρg_S) * _dy_c
+            # correction term
+            ρg_correction = (Vyᵢⱼ * ∂ρg∂y) * θ * dt
 
-        Ry[i, j] = d_ya(τyy) + d_xi(τxy) - d_ya(P) - d_ya(ΔPψ) - av_ya(ρgy) + ρg_correction
+            Ry[i, j] = d_ya(τyy) + d_xi(τxy) - d_ya(P) - d_ya(ΔPψ) - av_ya(ρgy) + ρg_correction
+        else
+            Ry[i, j] = zero(T)
+        end
     end
 
     return nothing
@@ -759,44 +802,122 @@ end
         dτVy,
         _di_center,
         _di_vertex,
-        mask_vbox,
+        dirichlet::NTuple{2, AbstractDirichletBoundaryCondition},
     ) where {T}
     Base.@propagate_inbounds @inline av_xa(A) = _av_xa(A, i, j)
     Base.@propagate_inbounds @inline av_ya(A) = _av_ya(A, i, j)
 
     @inbounds begin
         if i ≤ size(Rx, 1) && j ≤ size(Rx, 2)
-            _dx_c = @dx(_di_center, i)
-            _dy_v = @dy(_di_vertex, j)
-            Base.@propagate_inbounds @inline d_xa(A) = _d_xa(A, _dx_c, i, j)
-            Base.@propagate_inbounds @inline d_yi(A) = _d_yi(A, _dy_v, i, j)
-            Rx_ij = (d_xa(τxx) + d_yi(τxy) - d_xa(P) - d_xa(θc) - av_xa(ρgx)) / Dx[i, j]
+            if !isdirichlet(dirichlet[1], i + 1, j + 1)
+                _dx_c = @dx(_di_center, i)
+                _dy_v = @dy(_di_vertex, j)
+                Base.@propagate_inbounds @inline d_xa(A) = _d_xa(A, _dx_c, i, j)
+                Base.@propagate_inbounds @inline d_yi(A) = _d_yi(A, _dy_v, i, j)
+                Rx_ij = (d_xa(τxx) + d_yi(τxy) - d_xa(P) - d_xa(θc) - av_xa(ρgx)) / Dx[i, j]
+                Rx[i, j] = Rx_ij
 
-            masked_x = mask_vbox[1][i, j] != 0
-            Rx_ij = masked_x ? zero(T) : Rx_ij
-            Rx[i, j] = Rx_ij
-
-            dVx_new, ΔVx = damped_update_V(dVxdτ[i, j], Rx_ij, αVx[i, j], βVx[i, j], dτVx[i, j])
-            dVxdτ[i, j] = masked_x ? zero(T) : dVx_new
-            if !masked_x
+                dVx_new, ΔVx = damped_update_V(dVxdτ[i, j], Rx_ij, αVx[i, j], βVx[i, j], dτVx[i, j])
+                dVxdτ[i, j] = dVx_new
                 Vx[i + 1, j + 1] += ΔVx
+            else
+                apply_dirichlet!(Vx, dirichlet[1], i + 1, j + 1)
+                Rx[i, j] = zero(T)
+                dVxdτ[i, j] = zero(T)
             end
         end
         if i ≤ size(Ry, 1) && j ≤ size(Ry, 2)
-            _dy_c = @dy(_di_center, j)
-            _dx_v = @dx(_di_vertex, i)
-            Base.@propagate_inbounds @inline d_ya(A) = _d_ya(A, _dy_c, i, j)
-            Base.@propagate_inbounds @inline d_xi(A) = _d_xi(A, _dx_v, i, j)
-            Ry_ij = (d_ya(τyy) + d_xi(τxy) - d_ya(P) - d_ya(θc) - av_ya(ρgy)) / Dy[i, j]
+            if !isdirichlet(dirichlet[2], i + 1, j + 1)
+                _dy_c = @dy(_di_center, j)
+                _dx_v = @dx(_di_vertex, i)
+                Base.@propagate_inbounds @inline d_ya(A) = _d_ya(A, _dy_c, i, j)
+                Base.@propagate_inbounds @inline d_xi(A) = _d_xi(A, _dx_v, i, j)
+                Ry_ij = (d_ya(τyy) + d_xi(τxy) - d_ya(P) - d_ya(θc) - av_ya(ρgy)) / Dy[i, j]
+                Ry[i, j] = Ry_ij
 
-            masked_y = mask_vbox[2][i, j] != 0
-            Ry_ij = masked_y ? zero(T) : Ry_ij
-            Ry[i, j] = Ry_ij
-
-            dVy_new, ΔVy = damped_update_V(dVydτ[i, j], Ry_ij, αVy[i, j], βVy[i, j], dτVy[i, j])
-            dVydτ[i, j] = masked_y ? zero(T) : dVy_new
-            if !masked_y
+                dVy_new, ΔVy = damped_update_V(dVydτ[i, j], Ry_ij, αVy[i, j], βVy[i, j], dτVy[i, j])
+                dVydτ[i, j] = dVy_new
                 Vy[i + 1, j + 1] += ΔVy
+            else
+                apply_dirichlet!(Vy, dirichlet[2], i + 1, j + 1)
+                Ry[i, j] = zero(T)
+                dVydτ[i, j] = zero(T)
+            end
+        end
+    end
+
+    return nothing
+end
+
+# For internal velocity boundary conditions with free surface stabilisation
+@parallel_indices (i, j) function compute_DR_residual_update_V!(
+        Rx::AbstractArray{T, 2},
+        Ry,
+        Vx,
+        Vy,
+        dVxdτ,
+        dVydτ,
+        P,
+        θc,
+        τxx,
+        τyy,
+        τxy,
+        ρgx,
+        ρgy,
+        Dx,
+        Dy,
+        αVx,
+        αVy,
+        βVx,
+        βVy,
+        dτVx,
+        dτVy,
+        _di_center,
+        _di_vertex,
+        dt,
+        dirichlet::NTuple{2, AbstractDirichletBoundaryCondition},
+    ) where {T}
+    Base.@propagate_inbounds @inline av_xa(A) = _av_xa(A, i, j)
+    Base.@propagate_inbounds @inline av_ya(A) = _av_ya(A, i, j)
+
+    @inbounds begin
+        if i ≤ size(Rx, 1) && j ≤ size(Rx, 2)
+            if !isdirichlet(dirichlet[1], i + 1, j + 1)
+                _dx_c = @dx(_di_center, i)
+                _dy_v = @dy(_di_vertex, j)
+                Base.@propagate_inbounds @inline d_xa(A) = _d_xa(A, _dx_c, i, j)
+                Base.@propagate_inbounds @inline d_yi(A) = _d_yi(A, _dy_v, i, j)
+                Rx_ij = (d_xa(τxx) + d_yi(τxy) - d_xa(P) - d_xa(θc) - av_xa(ρgx)) / Dx[i, j]
+                Rx[i, j] = Rx_ij
+
+                dVx_new, ΔVx = damped_update_V(dVxdτ[i, j], Rx_ij, αVx[i, j], βVx[i, j], dτVx[i, j])
+                dVxdτ[i, j] = dVx_new
+                Vx[i + 1, j + 1] += ΔVx
+            else
+                apply_dirichlet!(Vx, dirichlet[1], i + 1, j + 1)
+                Rx[i, j] = zero(T)
+                dVxdτ[i, j] = zero(T)
+            end
+        end
+        if i ≤ size(Ry, 1) && j ≤ size(Ry, 2)
+            if !isdirichlet(dirichlet[2], i + 1, j + 1)
+                _dy_c = @dy(_di_center, j)
+                _dx_v = @dx(_di_vertex, i)
+                Base.@propagate_inbounds @inline d_ya(A) = _d_ya(A, _dy_c, i, j)
+                Base.@propagate_inbounds @inline d_xi(A) = _d_xi(A, _dx_v, i, j)
+                j_N = min(j + 1, size(ρgy, 2))
+                ∂ρg∂y = (ρgy[i, j_N] - ρgy[i, j]) * _dy_c
+                ρg_correction = Vy[i + 1, j + 1] * ∂ρg∂y * dt
+                Ry_ij = (d_ya(τyy) + d_xi(τxy) - d_ya(P) - d_ya(θc) - av_ya(ρgy) + ρg_correction) / Dy[i, j]
+                Ry[i, j] = Ry_ij
+
+                dVy_new, ΔVy = damped_update_V(dVydτ[i, j], Ry_ij, αVy[i, j], βVy[i, j], dτVy[i, j])
+                dVydτ[i, j] = dVy_new
+                Vy[i + 1, j + 1] += ΔVy
+            else
+                apply_dirichlet!(Vy, dirichlet[2], i + 1, j + 1)
+                Ry[i, j] = zero(T)
+                dVydτ[i, j] = zero(T)
             end
         end
     end

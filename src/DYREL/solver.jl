@@ -1,4 +1,3 @@
-import JustRelax: apply_mask!
 ## VISCO-ELASTIC STOKES SOLVER
 """
     solve_DYREL!(
@@ -77,7 +76,7 @@ function _solve_DYREL!(
     _di = grid._di
     di_center = di.center
     ni = size(stokes.P)
-    mvc = mask_vbox_center === nothing ? (@zeros(ni...)) : mask_vbox_center
+    dirichlet_v = (flow_bcs.dirichlet.Vx, flow_bcs.dirichlet.Vy)
 
     residuals = @residuals(stokes.R)
     fields = dyrel_fields(dyrel, dim)
@@ -155,13 +154,10 @@ function _solve_DYREL!(
             _di.center,
             _di.vertex,
             dt * free_surface,
+            dirichlet_v,
         )
 
         # pressure residual stokes.R.RP already computed in compute_∇V_strain_rate_RP! above
-        if apply_velocity_box !== nothing
-            apply_mask!(stokes.R.Rx, 0.0, stokes.mask_vbox_x)
-            apply_mask!(stokes.R.Ry, 0.0, stokes.mask_vbox_y)
-        end
         # Residual check
         errV = ntuple(d -> norm_mpi(residuals[d]) / √(v_dofs[d]), dim)
         errPt = norm_mpi(stokes.R.RP) / √(p_dof)
@@ -238,6 +234,7 @@ function _solve_DYREL!(
                 _di.center,
                 _di.vertex,
                 dt * free_surface,
+                dirichlet_v,
             )
             flow_bcs!(stokes, flow_bcs)
             free_surface_bcs!(

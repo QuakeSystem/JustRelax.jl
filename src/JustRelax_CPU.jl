@@ -19,6 +19,7 @@ module JustRelax2D
         AbstractFlowBoundaryConditions,
         DisplacementBoundaryConditions,
         VelocityBoundaryConditions,
+        AbstractDirichletBoundaryCondition,
         apply_dirichlet,
         apply_dirichlet!,
         isdirichlet
@@ -68,6 +69,7 @@ module JustRelax3D
         AbstractFlowBoundaryConditions,
         DisplacementBoundaryConditions,
         VelocityBoundaryConditions,
+        AbstractDirichletBoundaryCondition,
         apply_dirichlet,
         apply_dirichlet!,
         isdirichlet
