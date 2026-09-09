@@ -202,7 +202,7 @@ function _solve_DYREL!(
             iszero(iter % nout) && foreach(copyto!, residuals0, residuals)
 
             # compute divergence, deviatoric strain rate and pressure residual in one pass
-            compute_∇V_strain_rate_RP!(stokes, dyrel, rheology, phase_ratios, _di, ni, dt, args, true)
+            compute_∇V_strain_rate_RP!(stokes, dyrel, rheology, phase_ratios, _di, ni, dt, args)
 
             # Deviatoric stress, τII viscosity refresh, and θc = γ_eff·RP + ΔPψ assembly in one pass
             compute_stress_viscosity_DRYEL!(stokes, θc, dyrel.γ_eff, rheology, phase_ratios, λ_relaxation_DR, dt, viscosity_relaxation, args, viscosity_cutoff, linear_viscosity)
