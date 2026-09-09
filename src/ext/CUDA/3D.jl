@@ -20,6 +20,7 @@ import JustRelax:
     AbstractFlowBoundaryConditions,
     DisplacementBoundaryConditions,
     VelocityBoundaryConditions,
+    AbstractDirichletBoundaryCondition,
     apply_dirichlet,
     apply_dirichlet!,
     isdirichlet
