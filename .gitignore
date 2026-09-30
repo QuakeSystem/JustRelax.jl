@@ -30,6 +30,8 @@ node_modules
 *.vti
 *.vtm
 *.vtp
+*.vts
+*.pvd
 *.vtr
 *.h5
 *.jld2
