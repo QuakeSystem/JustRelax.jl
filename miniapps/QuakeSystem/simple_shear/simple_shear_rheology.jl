@@ -1,5 +1,5 @@
 function init_rheology_simple_shear()
-    # High η → near-elastic Maxwell buffer (η ≫ G*dt); viscosity_cutoff clamps to η_max
+    # High η → Maxwell buffer is quasi-elastic: η_ve ≈ G*dt when η ≫ G*dt
     η0 = LinearViscous(; η = 1.0e23)
     el = ConstantElasticity(; G = 3.0e10, ν = 0.25)
     media_rheology = CompositeRheology((η0, el))

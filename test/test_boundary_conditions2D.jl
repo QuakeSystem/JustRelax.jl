@@ -129,6 +129,43 @@ end
             end
         end
 
+        @testset "VelocityBoundaryConditions periodic + top_Vx" begin
+            if backend === CPUBackend
+                @test_throws ErrorException VelocityBoundaryConditions(;
+                    no_slip = (left = false, right = false, top = false, bot = true),
+                    free_slip = (left = false, right = false, top = true, bot = false),
+                    periodic = (left = true, right = false, top = false, bot = false),
+                )
+                @test_throws ErrorException VelocityBoundaryConditions(;
+                    no_slip = (left = true, right = false, top = false, bot = true),
+                    free_slip = (left = false, right = false, top = true, bot = false),
+                    periodic = (left = true, right = true, top = false, bot = false),
+                )
+
+                n = 5
+                stokes = StokesArrays(backend, (n, n))
+                stokes.V.Vx .= PTArray(backend)(rand(n + 1, n + 2))
+                stokes.V.Vy .= PTArray(backend)(rand(n + 2, n + 1))
+                Vtop = 1.25e-9
+                flow_bcs = VelocityBoundaryConditions(;
+                    no_slip = (left = false, right = false, top = false, bot = true),
+                    free_slip = (left = false, right = false, top = true, bot = false),
+                    periodic = (left = true, right = true, top = false, bot = false),
+                    prescribed = (; top_Vx = Vtop),
+                )
+                flow_bcs!(stokes, flow_bcs)
+
+                @test @views stokes.V.Vx[1, :] == stokes.V.Vx[end - 1, :]
+                @test @views stokes.V.Vx[end, :] == stokes.V.Vx[2, :]
+                @test @views stokes.V.Vy[1, :] == stokes.V.Vy[end - 1, :]
+                @test @views stokes.V.Vy[end, :] == stokes.V.Vy[2, :]
+                @test @views stokes.V.Vx[:, end] ≈ 2 .* Vtop .- stokes.V.Vx[:, end - 1]
+                @test all(iszero, stokes.V.Vy[:, end])
+            else
+                @test true === true
+            end
+        end
+
         @testset "DisplacementBoundaryConditions" begin
             if backend === CPUBackend
                 # test incompatible boundary conditions

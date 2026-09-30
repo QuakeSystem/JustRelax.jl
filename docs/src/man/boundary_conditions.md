@@ -16,6 +16,21 @@ We have two ways of defining the boundary condition formulations:
     - `DisplacementBoundaryConditions`.
 The first one is used for the velocity-pressure formulation, and the second one is used for the displacement-pressure formulation. The flow boundary conditions can be switched on and off by setting them as `true` or `false` at the appropriate boundaries. Valid boundary names are `left` and `right`, `top` and `bot`, and for the 3D case, `front` and `back`.
 
+For velocity, `periodic` faces are also supported (2D). Left/right periodicity must
+be enabled together; those faces must have both `no_slip` and `free_slip` set to
+`false`. Optional `prescribed = (; top_Vx = V)` sets a Couette-style top-wall speed
+after the face conditions (used by the simple-shear miniapp).
+
+For example, left/right periodic with a fixed bottom and driven top:
+```julia
+bcs = VelocityBoundaryConditions(;
+    no_slip = (left = false, right = false, top = false, bot = true),
+    free_slip = (left = false, right = false, top = true, bot = false),
+    periodic = (left = true, right = true, top = false, bot = false),
+    prescribed = (; top_Vx = 4.0e-9), # m/s
+)
+flow_bcs!(stokes, bcs)
+```
 
 For example, if we want to have free free-slip in every single boundary in a 2D simulation, we need to instantiate `VelocityBoundaryConditions` or `DisplacementBoundaryConditions` as:
 ```julia

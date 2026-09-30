@@ -35,6 +35,7 @@ else
 end
 
 # Load file with all the rheology configurations
+include("helper_functions.jl")
 include("simple_shear_setup.jl")
 include("simple_shear_rheology.jl")
 include("main.jl")
@@ -58,6 +59,9 @@ VTK = (;
     particle_vtk_every = 50,
     quiet_runtime = false,
 )
+periodic = true
+shear_rate_top = 4.0e-9  # m/s top-wall Vx
+dt = 500.0               # fixed physical timestep [s]
 # size of the domain
 nx   =  300
 ny   =  300
@@ -75,4 +79,7 @@ else
     igg
 end
 
-main(staggered_grid, phases_GMG, T_GMG, igg; nx = nx, ny = ny);
+main(
+    staggered_grid, phases_GMG, T_GMG, igg;
+    nx = nx, ny = ny, periodic = periodic, shear_rate_top = shear_rate_top, dt = dt,
+);

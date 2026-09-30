@@ -124,13 +124,21 @@ end
 end
 
 """
-    VelocityBoundaryConditions(; no_slip, free_slip, free_surface=false, dirichlet=NamedTuple())
+    VelocityBoundaryConditions(; no_slip, free_slip, free_surface=false, periodic, dirichlet=NamedTuple(), prescribed=NamedTuple())
 
 Define 2D or 3D boundary conditions for the velocity field. Face names are
 `left`, `right`, `top`, and `bot` in 2D, with `front` and `back` added in 3D.
 
-`no_slip` and `free_slip` must differ on every face (this v0.6.1-based branch
-has no `periodic` support for velocity yet).
+`no_slip` and `free_slip` must differ on every face that is not periodic.
+Periodic faces must set both `no_slip` and `free_slip` to `false`. Left/right
+periodicity must be enabled together (same for top/bot).
+
+`periodic` wraps staggered velocity ghosts across opposite faces (same pattern
+as temperature `periodic`, with staggered `Vx`/`Vy` indexing).
+
+`prescribed` optionally sets wall values after face BCs. Supported keys:
+- `top_Vx::Real`: Dirichlet top-wall tangential velocity via ghost fill
+  `Vx[:,end] = 2*top_Vx - Vx[:,end-1]` and `Vy[:,end] = 0` (simple-shear drive).
 
 `dirichlet` prescribes an interior, mask-selected Dirichlet region for the
 velocity field (for example an internal "velocity box"), independent of the
@@ -147,32 +155,65 @@ directly and pass it as the component, e.g. `dirichlet = (; Vx = my_bc)`: the
 array's non-zero entries, which cannot represent a prescribed value of exactly
 zero. See [`Dirichlet`](@ref).
 """
-struct VelocityBoundaryConditions{T, D, nD} <: AbstractFlowBoundaryConditions
+struct VelocityBoundaryConditions{T, P, D, Pr, nD} <: AbstractFlowBoundaryConditions
     no_slip::T
     free_slip::T
     free_surface::Bool
+    periodic::P
     dirichlet::D
+    prescribed::Pr
 
     function VelocityBoundaryConditions(;
             no_slip::T = (left = false, right = false, top = false, bot = false),
             free_slip::T = (left = true, right = true, top = true, bot = true),
             free_surface::Bool = false,
+            periodic::P = (left = false, right = false, top = false, bot = false),
             dirichlet::NamedTuple = NamedTuple(),
-        ) where {T}
+            prescribed::Pr = NamedTuple(),
+        ) where {T, P, Pr}
         @assert length(no_slip) === length(free_slip)
-        check_flow_bcs(no_slip, free_slip)
+        @assert length(no_slip) === length(periodic)
+        check_periodic_pairs(periodic)
+        check_flow_bcs(no_slip, free_slip, periodic)
 
         nD = length(no_slip) == 4 ? 2 : 3
+        # expand to 3D face names when needed (matches TemperatureBoundaryConditions)
+        dummy = (; front = false, back = false)
+        periodic_exp = merge(dummy, periodic)
         D_nt = _velocity_dirichlet(dirichlet, Val(nD))
-        return new{T, typeof(D_nt), nD}(no_slip, free_slip, free_surface, D_nt)
+        return new{T, typeof(periodic_exp), typeof(D_nt), Pr, nD}(
+            no_slip, free_slip, free_surface, periodic_exp, D_nt, prescribed
+        )
     end
 end
 
-function check_flow_bcs(no_slip::T, free_slip::T) where {T}
+function check_periodic_pairs(periodic)
+    if getproperty(periodic, :left) != getproperty(periodic, :right)
+        error("x-periodicity requires both `left` and `right` periodic=true")
+    end
+    if getproperty(periodic, :top) != getproperty(periodic, :bot)
+        error("y-periodicity requires both `top` and `bot` periodic=true")
+    end
+    if hasproperty(periodic, :front) && hasproperty(periodic, :back)
+        if getproperty(periodic, :front) != getproperty(periodic, :back)
+            error("z-periodicity requires both `front` and `back` periodic=true")
+        end
+    end
+    return nothing
+end
+
+function check_flow_bcs(no_slip::T, free_slip::T, periodic = nothing) where {T}
     v1 = values(no_slip)
     v2 = values(free_slip)
     k = keys(no_slip)
     for (v1, v2, k) in zip(v1, v2, k)
+        is_periodic = !isnothing(periodic) && getproperty(periodic, k)
+        if is_periodic
+            (v1 || v2) && error(
+                "Incompatible BCs: periodic `$k` cannot be combined with no_slip/free_slip on that face",
+            )
+            continue
+        end
         if v1 == v2
             error(
                 "Incompatible boundary conditions. The $k boundary condition can't be the same for no_slip and free_slip",

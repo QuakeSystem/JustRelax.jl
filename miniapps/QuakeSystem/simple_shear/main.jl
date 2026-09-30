@@ -1,6 +1,9 @@
 
 ## BEGIN OF MAIN SCRIPT --------------------------------------------------------------
-function main(staggered_grid, phases_GMG, T_GMG, igg; nx = 16, ny = 16)
+function main(
+        staggered_grid, phases_GMG, T_GMG, igg;
+        nx = 16, ny = 16, periodic = false, shear_rate_top = 0.0, dt = 500.0,
+    )
 
     # Physical domain ------------------------------------
     (; li, xvi, xci) = staggered_grid
@@ -14,7 +17,7 @@ function main(staggered_grid, phases_GMG, T_GMG, igg; nx = 16, ny = 16)
     # ----------------------------------------------------
     # Physical properties using GeoParams ----------------
     rheology = init_rheology_simple_shear()
-    dt = 10.0e3 * 3600 * 24 * 365 # diffusive CFL timestep limiter
+    # fixed physical timestep (s); do not overwrite with CFL below
     # ----------------------------------------------------
 
     # Initialize particles -------------------------------
@@ -52,10 +55,18 @@ function main(staggered_grid, phases_GMG, T_GMG, igg; nx = 16, ny = 16)
     Tbot = maximum(T_GMG)
     thermal = ThermalArrays(backend, ni)
     vertex2center!(thermal.T, PTArray(backend)(T_GMG); ghost_x = true, ghost_y = true)
-    thermal_bc = TemperatureBoundaryConditions(;
-        no_flux = (left = true, right = true, top = false, bot = false),
-        constant_value = (left = false, right = false, top = Ttop, bot = Tbot),
-    )
+    thermal_bc = if periodic
+        TemperatureBoundaryConditions(;
+            no_flux = (left = false, right = false, top = false, bot = false),
+            constant_value = (left = false, right = false, top = Ttop, bot = Tbot),
+            periodic = (left = true, right = true, top = false, bot = false),
+        )
+    else
+        TemperatureBoundaryConditions(;
+            no_flux = (left = true, right = true, top = false, bot = false),
+            constant_value = (left = false, right = false, top = Ttop, bot = Tbot),
+        )
+    end
     thermal_bcs!(thermal, thermal_bc)
     # ----------------------------------------------------
 
@@ -66,8 +77,10 @@ function main(staggered_grid, phases_GMG, T_GMG, igg; nx = 16, ny = 16)
     stokes.P .= PTArray(backend)(reverse(cumsum(reverse((ρg[2]) .* di_min[2], dims = 2), dims = 2), dims = 2))
 
     # Rheology
-    args0 = (T = thermal.T, P = stokes.P, dt = Inf)
-    viscosity_cutoff = (1.0e18, 1.0e23)
+    # Maxwell: η_ve ≈ G*dt when η ≫ G*dt (quasi-elastic). With G=3e10, dt=500 → η_ve≈1.5e13.
+    # Do NOT use η_min=1e18: that clamps η_ve UP and kills elastic loading / Couette propagation.
+    args0 = (T = thermal.T, P = stokes.P, dt = dt)
+    viscosity_cutoff = (1.0e10, 1.0e25)
     compute_viscosity!(stokes, phase_ratios, args0, rheology, viscosity_cutoff)
     # η_vep is filled in solve!; seed it so plotting / early stress update aren't all-NaN
     stokes.viscosity.η_vep .= stokes.viscosity.η
@@ -77,23 +90,50 @@ function main(staggered_grid, phases_GMG, T_GMG, igg; nx = 16, ny = 16)
         backend, rheology, phase_ratios, args0, dt, ni, di_min, li; ϵ = 1.0e-8, CFL = 0.95 / √2
     )
 
-    # Simple-shear drive: Vx = ε̇ y, Vy = 0 (kinematic field; free-slip faces)
-    # Without this, V≈0 → compute_dt → Inf → advection does x+0*Inf=NaN → inject [0,0]
-    εbg = 1.0e-14 # s⁻¹
-    grid_vx = grid.xi_vel[1]
-    stokes.V.Vx .= PTArray(backend)([εbg * y for _ in Array(grid_vx[1]), y in Array(grid_vx[2])])
+    # Couette-like BCs: left/right periodic, bot no-slip, top free-slip + prescribed Vx
+    # (matches JR_dev SShear2D_DYREL; top_Vx reapplied every PT iter inside flow_bcs!)
+    flow_bcs = if periodic
+        VelocityBoundaryConditions(;
+            no_slip = (left = false, right = false, top = false, bot = true),
+            free_slip = (left = false, right = false, top = true, bot = false),
+            free_surface = false,
+            periodic = (left = true, right = true, top = false, bot = false),
+            prescribed = (; top_Vx = shear_rate_top),
+        )
+    else
+        VelocityBoundaryConditions(;
+            free_slip = (left = true, right = true, top = true, bot = true),
+            free_surface = false,
+        )
+    end
+    stokes.V.Vx .= 0.0
     stokes.V.Vy .= 0.0
-    flow_bcs = VelocityBoundaryConditions(;
-        free_slip = (left = true, right = true, top = true, bot = true),
-        free_surface = false,
-    )
-    flow_bcs!(stokes, flow_bcs) # apply boundary conditions
+    # Linear Couette initial guess (helps PT propagate from top BC)
+    if periodic && shear_rate_top != 0
+        y_vx = Array(grid.xi_vel[1][2])
+        ybot, ytop = first(y_vx), last(y_vx)
+        Ly_v = ytop - ybot
+        stokes.V.Vx .= PTArray(backend)([
+                shear_rate_top * (y - ybot) / Ly_v for _ in Array(grid.xi_vel[1][1]), y in y_vx
+            ])
+    end
+    flow_bcs!(stokes, flow_bcs)
     update_halo!(@velocity(stokes)...)
 
     # IO -------------------------------------------------
     take(VTK.folder)
-    VTK.do_vtk && take(VTK.vtk_dir)
-    VTK.do_vtk && take(VTK.checkpoint_dir)
+    if VTK.do_vtk
+        take(VTK.vtk_dir)
+        take(VTK.checkpoint_dir)
+        # WriteVTK always opens PVD with append=true; wipe previous run so it starts fresh
+        pvd_path = joinpath(VTK.vtk_dir, VTK.pvd_name * ".pvd")
+        isfile(pvd_path) && rm(pvd_path)
+        for f in readdir(VTK.vtk_dir)
+            if startswith(f, "vtk_") || startswith(f, "particles_")
+                rm(joinpath(VTK.vtk_dir, f); force = true)
+            end
+        end
+    end
     VTK.pictures && take(VTK.fig_dir)
     # vertex velocity buffers for VTK export
     local Vx_v, Vy_v
@@ -124,7 +164,7 @@ function main(staggered_grid, phases_GMG, T_GMG, igg; nx = 16, ny = 16)
         stress2grid!(stokes, pτ, particles)
 
         # Stokes solver ----------------
-        args = (; T = thermal.T, P = stokes.P, dt = Inf)
+        args = (; T = thermal.T, P = stokes.P, dt = dt)
         t_stokes = @elapsed begin
             out = solve!(
                 stokes,
@@ -138,8 +178,8 @@ function main(staggered_grid, phases_GMG, T_GMG, igg; nx = 16, ny = 16)
                 dt,
                 igg;
                 kwargs = (
-                    iterMax = 1.0e3,
-                    nout = 2.0e3,
+                    iterMax = 20.0e3,
+                    nout = 1.0e3,
                     viscosity_cutoff = viscosity_cutoff,
                     free_surface = false,
                     viscosity_relaxation = 1.0e-2,
@@ -153,15 +193,12 @@ function main(staggered_grid, phases_GMG, T_GMG, igg; nx = 16, ny = 16)
         println("   Time/iteration:  $(t_stokes / out.iter) s")
         println("========================================")
         println("    Timestep $it")
-        println("    Time = $(t / (1.0e6 * 3600 * 24 * 365.25)) Myrs")
+        # println("    Time = $(t / (1.0e6 * 3600 * 24 * 365.25)) Myrs")
+        println("    Time = $t sec")
         println("=========================================")
         # rotate stresses
         rotate_stress!(pτ, stokes, particles, dt)
-        # CFL dt; never pass Inf/NaN to advection (0*Inf → NaN coords → inject [0,0])
-        dt_CFL = compute_dt(stokes, di_min) * 0.8
-        if isfinite(dt_CFL) && dt_CFL > 0
-            dt = dt_CFL
-        end
+        # keep prescribed dt (CFL would jump to ~1e10 s and break elastic VE scaling)
         # compute strain rate 2nd invartian - for plotting
         tensor_invariant!(stokes.ε)
         tensor_invariant!(stokes.ε_pl)
@@ -196,8 +233,10 @@ function main(staggered_grid, phases_GMG, T_GMG, igg; nx = 16, ny = 16)
         # Advection --------------------
         # advect particles in space
         advection_MQS!(particles, RungeKutta2(), @velocity(stokes), dt)
+        periodic && wrap_particles_x!(particles, xvi)
         # advect particles in memory
         move_particles!(particles, particle_args)
+        periodic && wrap_particles_x!(particles, xvi)
         # check if we need to inject particles
         # need stresses on the vertices for injection purposes
         center2vertex!(τxx_v, stokes.τ.xx)

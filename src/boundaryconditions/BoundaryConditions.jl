@@ -82,14 +82,21 @@ end
 function _flow_bcs!(bcs, V)
     n = bc_index(V)
     # no slip boundary conditions
-    # do_bc(bcs.no_slip) && (@parallel (@idx n) no_slip!(V..., bcs.no_slip))
     if do_bc(bcs.no_slip)
-        # @parallel (@idx n) no_slip1!(V..., bcs.no_slip)
-        # @parallel (@idx n) no_slip2!(V..., bcs.no_slip)
         no_slip!(V..., bcs.no_slip)
     end
     # free slip boundary conditions
     do_bc(bcs.free_slip) && (@parallel (@idx n) free_slip!(V..., bcs.free_slip))
+    # periodic faces (2D staggered wrap; applied after free/no-slip)
+    if hasproperty(bcs, :periodic) && do_bc(bcs.periodic)
+        length(V) == 2 || error("Velocity `periodic` BCs are currently implemented for 2D only")
+        @parallel (@idx n) periodic_boundary!(V[1], V[2], bcs.periodic)
+    end
+    # optional prescribed wall velocities (e.g. top_Vx for simple shear)
+    if hasproperty(bcs, :prescribed) && !isempty(bcs.prescribed)
+        length(V) == 2 || error("Velocity `prescribed` wall BCs are currently implemented for 2D only")
+        apply_prescribed_velocity!(V[1], V[2], bcs.prescribed)
+    end
 
     return nothing
 end
