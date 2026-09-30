@@ -64,6 +64,38 @@ export compute_ρg!
 include("rheology/Viscosity.jl")
 export compute_viscosity!, compute_viscosity_εII!, compute_viscosity_τII!
 
+include("rheology/RateStateFriction.jl")
+export RateStateFriction,
+    compute_strain_rate,
+    compute_stress,
+    compute_stress_frozen_Ω,
+    update_Ω,
+    compute_dt_ratestate,
+    dt_healing,
+    dt_weakening,
+    dt_courant,
+    max_state_change
+
+include("rheology/RateStateSetup.jl")
+export get_rsf_profile,
+    phase_has_rsf,
+    validate_rsf_phase!,
+    PhaseRSFParams,
+    RateStateController,
+    build_rate_state_controller,
+    evaluate_rsf_ab,
+    as_rate_state_friction
+
+include("rheology/RateStateArrays.jl")
+export RateStateArrays
+
+include("rheology/RateStateKernels.jl")
+export init_rate_state_fields!,
+    refresh_rsf_ab_mask!,
+    apply_rsf_viscosity!,
+    update_rate_state!,
+    compute_dt_ratestate_grid
+
 include("rheology/Melting.jl")
 export compute_melt_fraction!
 

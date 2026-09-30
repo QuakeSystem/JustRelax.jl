@@ -595,6 +595,7 @@ function _solve!(
         nout = 500,
         b_width = (4, 4, 0),
         verbose = true,
+        rsf = nothing,          # (; ctrl::RateStateController, fields::RateStateArrays) or nothing
         kwargs...,
     )
 
@@ -605,6 +606,7 @@ function _solve!(
     (; ϵ_rel, ϵ_abs, r, θ_dτ, ηdτ) = pt_stokes
     (; η, η_vep) = stokes.viscosity
     ni = size(stokes.P)
+    rsf_on = !isnothing(rsf) && rsf.ctrl.enabled
 
     # ~preconditioner
     @copy stokes.P0 stokes.P
@@ -701,6 +703,14 @@ function _solve!(
                 )
             end
 
+            # RSF before stress update so τ sees frictional η (Ω_old frozen during PT)
+            if rsf_on
+                shear2center!(stokes.ε)
+                apply_rsf_viscosity!(
+                    stokes, rsf.fields, rsf.ctrl, phase_ratios, dt;
+                    viscosity_cutoff = viscosity_cutoff,
+                )
+            end
 
             if strain_increment
                 @parallel (@idx ni .+ 1) update_stresses_center_vertex_ps!(
@@ -764,6 +774,14 @@ function _solve!(
                 viscosity_cutoff;
                 relaxation = viscosity_relaxation,
             )
+
+            # Re-fold RSF after GeoParams viscosity overwrite
+            if rsf_on
+                apply_rsf_viscosity!(
+                    stokes, rsf.fields, rsf.ctrl, phase_ratios, dt;
+                    viscosity_cutoff = viscosity_cutoff,
+                )
+            end
 
             @hide_communication b_width begin # communication/computation overlap
                 @parallel compute_V!(
@@ -855,6 +873,22 @@ function _solve!(
     @parallel (@idx ni .+ 1) multi_copy!(@tensor(stokes.τ_o), @tensor(stokes.τ))
     @parallel (@idx ni) multi_copy!(@tensor_center(stokes.τ_o), @tensor_center(stokes.τ))
 
+    # Post-converge RSF state update (Ω_old was frozen during PT)
+    dt_rsf = dt
+    Vp_max = 0.0
+    dt_h = Inf
+    dt_w = Inf
+    dt_c = Inf
+    if rsf_on
+        update_rate_state!(rsf.fields, stokes, rsf.ctrl, phase_ratios, dt)
+        dt_info = compute_dt_ratestate_grid(rsf.fields, stokes, rsf.ctrl, phase_ratios, dt)
+        dt_rsf = dt_info.dt_rsf
+        Vp_max = dt_info.Vp_max
+        dt_h = dt_info.dt_h
+        dt_w = dt_info.dt_w
+        dt_c = dt_info.dt_c
+    end
+
     return (
         iter = iter,
         err_evo1 = err_evo1,
@@ -862,6 +896,11 @@ function _solve!(
         norm_Rx = norm_Rx,
         norm_Ry = norm_Ry,
         norm_∇V = norm_∇V,
+        dt_rsf = dt_rsf,
+        Vp_max = Vp_max,
+        dt_h = dt_h,
+        dt_w = dt_w,
+        dt_c = dt_c,
     )
 end
 

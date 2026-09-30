@@ -60,8 +60,46 @@ VTK = (;
     quiet_runtime = false,
 )
 periodic = true
-shear_rate_top = 4.0e-9  # m/s top-wall Vx
-dt = 500.0               # fixed physical timestep [s]
+shear_rate_top = 4.0e-9  # m/s top-wall Vx (Herrendörfer V_top)
+dt = 500.0               # initial physical timestep [s]
+
+# Rate-and-State Friction (Herrendörfer / LaMEM Shear_test_PBC_herrendorfer)
+# Toggle with enabled=false to recover Maxwell-only path.
+RSF = (
+    enabled = true,
+    loc = :center,
+    V0 = 4.0e-9,
+    dt_min = 1.0e-2,
+    dt_max = 1.0e7,
+    # If suggested RSF dt is below this, take RSF dt; else fall back to CFL
+    dt_rsf_switch = 1.0e9,
+    G = 3.0e10,   # for Lapusta dt_w (LaMEM)
+    ν = 0.25,
+    Phase1 = (
+        a_rsf = 0.011,
+        b_rsf = 0.017,
+        mu0_rsf = 0.2,
+        D_rs = 0.01,
+        Wf = 500.0,                # LaMEM fault width; Vp = 2 Wf εII
+        state_rsf_init = 40.0,
+        λ = 0.0,
+        C = 0.0,
+    ),
+    Phase2 = (
+        a_rsf = 0.011,
+        b_rsf = 0.001,
+        # LaMEM-style side-zone b profile (active once geometry has side VS bands)
+        b_rsf_val = (0.001, 0.017, 0.017, 0.001),
+        b_rsf_x = (-47000.0, -43000.0, 33000.0, 37000.0),
+        mu0_rsf = 0.2,
+        D_rs = 0.01,
+        Wf = 500.0,
+        state_rsf_init = -1.0,
+        λ = 0.0,
+        C = 0.0,
+    ),
+)
+
 # size of the domain
 nx   =  300
 ny   =  300
@@ -81,5 +119,5 @@ end
 
 main(
     staggered_grid, phases_GMG, T_GMG, igg;
-    nx = nx, ny = ny, periodic = periodic, shear_rate_top = shear_rate_top, dt = dt,
+    nx = nx, ny = ny, periodic = periodic, shear_rate_top = shear_rate_top, dt = dt, rsf = RSF,
 );

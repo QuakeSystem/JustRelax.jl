@@ -1,9 +1,10 @@
-function init_rheology_simple_shear()
+function init_rheology_simple_shear(; η = 1.0e23)
     # High η → Maxwell buffer is quasi-elastic: η_ve ≈ G*dt when η ≫ G*dt
-    η0 = LinearViscous(; η = 1.0e23)
+    # Herrendörfer / LaMEM RSF shear test uses η = 5e26
+    η0 = LinearViscous(; η = η)
     el = ConstantElasticity(; G = 3.0e10, ν = 0.25)
     media_rheology = CompositeRheology((η0, el))
-    # Fault starts with the same high η; later replace with RS friction → η_eff
+    # Fault starts with the same high η; RSF supplies frictional η_eff via APT hook
     vel_weak_rheology = CompositeRheology((η0, el))
 
     rheologies = (; media_rheology, vel_weak_rheology)

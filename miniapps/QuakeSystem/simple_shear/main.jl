@@ -1,8 +1,10 @@
-
 ## BEGIN OF MAIN SCRIPT --------------------------------------------------------------
+using Printf
+
 function main(
         staggered_grid, phases_GMG, T_GMG, igg;
         nx = 16, ny = 16, periodic = false, shear_rate_top = 0.0, dt = 500.0,
+        rsf = nothing,
     )
 
     # Physical domain ------------------------------------
@@ -16,8 +18,9 @@ function main(
     di_min = minimum.(grid.di.vertex)
     # ----------------------------------------------------
     # Physical properties using GeoParams ----------------
-    rheology = init_rheology_simple_shear()
-    # fixed physical timestep (s); do not overwrite with CFL below
+    rsf_enabled = !isnothing(rsf) && Bool(get(rsf, :enabled, true))
+    # Herrendörfer η when RSF on; otherwise keep previous high-η Maxwell buffer
+    rheology = init_rheology_simple_shear(; η = rsf_enabled ? 5.0e26 : 1.0e23)
     # ----------------------------------------------------
 
     # Initialize particles -------------------------------
@@ -50,6 +53,17 @@ function main(
     pt_stokes = PTStokesCoeffs(li, di_min; ϵ_abs = 1.0e-4, ϵ_rel = 1.0e-4, Re = 20.0e0, r = 0.7, CFL = 0.9 / √2.1)
     # ----------------------------------------------------
 
+    # RSF controller + fields (optional)
+    rsf_bundle = nothing
+    if rsf_enabled
+        rsf_ctrl = build_rate_state_controller(
+            rsf; nphases = length(rheology), di = di_min
+        )
+        rsf_fields = RateStateArrays(ni; loc = rsf_ctrl.loc)
+        init_rate_state_fields!(rsf_fields, rsf_ctrl, phase_ratios, xci)
+        rsf_bundle = (; ctrl = rsf_ctrl, fields = rsf_fields)
+    end
+
     # TEMPERATURE PROFILE --------------------------------
     Ttop = 20 + 273
     Tbot = maximum(T_GMG)
@@ -73,14 +87,21 @@ function main(
     # Buoyancy forces
     ρg = ntuple(_ -> @zeros(ni...), Val(2))
     compute_ρg!(ρg[2], phase_ratios, rheology, (T = thermal.T, P = stokes.P))
-    # hydrostatic init: use min Δy (conservative); for strongly varying dy prefer cumsum with grid.di.center[2]
-    stokes.P .= PTArray(backend)(reverse(cumsum(reverse((ρg[2]) .* di_min[2], dims = 2), dims = 2), dims = 2))
+    # Pressure: with g=0 hydrostatic init is P≈0, but RSF needs τ = P(1-λ)μ_d.
+    # LaMEM Shear_test_PBC_herrendorfer uses p_shift = 5e6 Pa — match that when RSF is on.
+    if rsf_enabled
+        stokes.P .= 5.0e6
+    else
+        # hydrostatic init: use min Δy (conservative)
+        stokes.P .= PTArray(backend)(reverse(cumsum(reverse((ρg[2]) .* di_min[2], dims = 2), dims = 2), dims = 2))
+    end
 
     # Rheology
     # Maxwell: η_ve ≈ G*dt when η ≫ G*dt (quasi-elastic). With G=3e10, dt=500 → η_ve≈1.5e13.
     # Do NOT use η_min=1e18: that clamps η_ve UP and kills elastic loading / Couette propagation.
     args0 = (T = thermal.T, P = stokes.P, dt = dt)
-    viscosity_cutoff = (1.0e10, 1.0e25)
+    # LaMEM eta_min/eta_max for RSF shear test; keep a floor so series RSF cannot collapse η→0
+    viscosity_cutoff = rsf_enabled ? (1.0e10, 5.0e26) : (1.0e10, 1.0e28)
     compute_viscosity!(stokes, phase_ratios, args0, rheology, viscosity_cutoff)
     # η_vep is filled in solve!; seed it so plotting / early stress update aren't all-NaN
     stokes.viscosity.η_vep .= stokes.viscosity.η
@@ -163,8 +184,13 @@ function main(
         # interpolate stress back to the grid
         stress2grid!(stokes, pτ, particles)
 
+        if !isnothing(rsf_bundle)
+            refresh_rsf_ab_mask!(rsf_bundle.fields, rsf_bundle.ctrl, phase_ratios, xci)
+        end
+
         # Stokes solver ----------------
         args = (; T = thermal.T, P = stokes.P, dt = dt)
+        dt_used = dt  # physical step size used in this Stokes solve (do not overwrite before t+=)
         t_stokes = @elapsed begin
             out = solve!(
                 stokes,
@@ -175,7 +201,7 @@ function main(
                 phase_ratios,
                 rheology,
                 args,
-                dt,
+                dt_used,
                 igg;
                 kwargs = (
                     iterMax = 20.0e3,
@@ -183,56 +209,89 @@ function main(
                     viscosity_cutoff = viscosity_cutoff,
                     free_surface = false,
                     viscosity_relaxation = 1.0e-2,
+                    rsf = rsf_bundle,
                 )
             )
         end
 
-        # print some stuff
-        println("Stokes solver time             ")
-        println("   Total time:      $t_stokes s")
-        println("   Time/iteration:  $(t_stokes / out.iter) s")
-        println("========================================")
-        println("    Timestep $it")
-        # println("    Time = $(t / (1.0e6 * 3600 * 24 * 365.25)) Myrs")
-        println("    Time = $t sec")
-        println("=========================================")
-        # rotate stresses
-        rotate_stress!(pτ, stokes, particles, dt)
-        # keep prescribed dt (CFL would jump to ~1e10 s and break elastic VE scaling)
+        # ------------------------------------------------------------------
+        # Timestep for the *next* physical step
+        #   • this Stokes call used `dt_used` (initial prescribed default 500 s)
+        #   • RSF on: if dt_rsf < dt_rsf_switch → RSF dt (clamped); else CFL
+        #   • RSF off: keep the prescribed / previous dt (no CFL override)
+        # ------------------------------------------------------------------
+        dt_src = "prescribed"
+        if !isnothing(rsf_bundle) && hasproperty(out, :dt_rsf)
+            dt_cfl = compute_dt(stokes, di_min, rsf_bundle.ctrl.dt_max, igg)
+            dt_rsf = out.dt_rsf
+            dt_rsf_switch = if hasproperty(rsf_bundle.ctrl, :dt_rsf_switch)
+                rsf_bundle.ctrl.dt_rsf_switch
+            elseif !isnothing(rsf) && hasproperty(rsf, :dt_rsf_switch)
+                Float64(rsf.dt_rsf_switch)
+            else
+                1.0e9
+            end
+            # LaMEM: apply RSF dt constraint only after the first physical step (istep > 1)
+            if it ≥ 1 && dt_rsf < dt_rsf_switch
+                dt = clamp(dt_rsf, rsf_bundle.ctrl.dt_min, rsf_bundle.ctrl.dt_max)
+                dt_src = "RSF"
+            elseif it ≥ 1
+                dt = dt_cfl
+                dt_src = "CFL"
+            else
+                # keep prescribed initial dt for the second Stokes step too if desired;
+                # LaMEM keeps building CFL/dt_next on step 0–1 before RSF can shrink it
+                dt_src = "prescribed (RSF deferred, LaMEM istep>1)"
+            end
+            f4(x) = @sprintf("%.4e", x)
+            println("Stokes solver time             ")
+            println("   Total time:      $(f4(t_stokes)) s")
+            println("   Time/iteration:  $(f4(t_stokes / out.iter)) s")
+            println("========================================")
+            println("    Timestep $it")
+            println("    Time     = $(f4(t)) sec")
+            println("    dt_used  = $(f4(dt_used)) sec  (this Stokes step)")
+            println("    next dt  = $(f4(dt)) sec  [$dt_src]")
+            println("    dt_rsf   = $(f4(dt_rsf)) sec  (switch < $(f4(dt_rsf_switch)))")
+            println("    dt_cfl   = $(f4(dt_cfl)) sec")
+            Vp_max = hasproperty(out, :Vp_max) ? out.Vp_max : NaN
+            dt_h = hasproperty(out, :dt_h) ? out.dt_h : NaN
+            dt_w = hasproperty(out, :dt_w) ? out.dt_w : NaN
+            dt_c = hasproperty(out, :dt_c) ? out.dt_c : NaN
+            println("    Vp_max   = $(f4(Vp_max)) m/s")
+            println("    dt_h/w/c = $(f4(dt_h)) / $(f4(dt_w)) / $(f4(dt_c)) sec")
+            println("=========================================")
+        else
+            f4(x) = @sprintf("%.4e", x)
+            println("Stokes solver time             ")
+            println("   Total time:      $(f4(t_stokes)) s")
+            println("   Time/iteration:  $(f4(t_stokes / out.iter)) s")
+            println("========================================")
+            println("    Timestep $it")
+            println("    Time = $(f4(t)) sec")
+            println("    dt   = $(f4(dt_used)) sec  [$dt_src]")
+            println("=========================================")
+        end
+        # rotate stresses with the dt that was used for this physical step
+        rotate_stress!(pτ, stokes, particles, dt_used)
         # compute strain rate 2nd invartian - for plotting
         tensor_invariant!(stokes.ε)
         tensor_invariant!(stokes.ε_pl)
         # ------------------------------
 
         # Thermal solver ---------------
-        # heatdiffusion_PT!(
-        #     thermal,
-        #     pt_thermal,
-        #     thermal_bc,
-        #     rheology,
-        #     args,
-        #     dt,
-        #     grid;
-        #     kwargs = (
-        #         igg = igg,
-        #         phase = phase_ratios,
-        #         iterMax = 50.0e3,
-        #         nout = 1.0e2,
-        #         verbose = true,
-        #     )
-        # )
         subgrid_characteristic_time!(
             subgrid_arrays, particles, dt₀, phase_ratios, rheology, thermal, stokes
         )
         centroid2particle!(subgrid_arrays.dt₀, dt₀, particles)
         subgrid_diffusion_centroid!(
-            pT, T_buffer, thermal.ΔT, subgrid_arrays, particles, dt
+            pT, T_buffer, thermal.ΔT, subgrid_arrays, particles, dt_used
         )
         # ------------------------------
 
         # Advection --------------------
         # advect particles in space
-        advection_MQS!(particles, RungeKutta2(), @velocity(stokes), dt)
+        advection_MQS!(particles, RungeKutta2(), @velocity(stokes), dt_used)
         periodic && wrap_particles_x!(particles, xvi)
         # advect particles in memory
         move_particles!(particles, particle_args)
@@ -252,7 +311,7 @@ function main(
         update_phase_ratios!(phase_ratios, particles, pPhases)
 
         @show it += 1
-        t += dt
+        t += dt_used
 
         # Data I/O and plotting ---------------------
         if VTK.do_vtk && (it == 1 || rem(it, VTK.vtk_every) == 0)
@@ -274,6 +333,19 @@ function main(
                 εII = Array(stokes.ε.II),
                 RP = Array(stokes.R.RP),
             )
+            if !isnothing(rsf_bundle)
+                Vp_c = Array(rsf_bundle.fields.Vp)
+                data_c = merge(
+                    data_c,
+                    (;
+                        Ω = Array(rsf_bundle.fields.Ω),
+                        Vp = Vp_c,
+                        log10_Vp = log10.(max.(Vp_c, 1.0e-30)),
+                        a_eff = Array(rsf_bundle.fields.a_eff),
+                        b_eff = Array(rsf_bundle.fields.b_eff),
+                    ),
+                )
+            end
             velocity_v = (Array(Vx_v), Array(Vy_v))
             path_vtk = joinpath(VTK.vtk_dir, "vtk_" * lpad("$it", 6, "0"))
             save_vtk(
@@ -297,14 +369,14 @@ function main(
                     t = t,
                 )
             end
-            checkpointing_jld2(VTK.checkpoint_dir, stokes, thermal, t, dt; it = it)
+            checkpointing_jld2(VTK.checkpoint_dir, stokes, thermal, t, dt_used; it = it)
             checkpointing_particles(
                 VTK.checkpoint_dir, particles;
                 phases = pPhases,
                 phase_ratios = phase_ratios,
                 particle_args = particle_args,
                 particle_args_reduced = particle_args_reduced,
-                t = t, dt = dt, it = it,
+                t = t, dt = dt_used, it = it,
             )
         end
 

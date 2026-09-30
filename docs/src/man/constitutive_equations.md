@@ -164,6 +164,14 @@ compute_viscosity!(stokes, phase_ratios, args, rheology, viscosity_cutoff)
 
 where `T` and `P` are the temperature and pressure fields defined at the **cell centers**, `dt` is the time step, and `phase_ratios` is an object containing the phase ratios corresponding to each material phase, of each cell.
 
+### Rate-and-state friction (APT)
+
+JustRelax can fold a Rate-and-State Friction (RSF) law into the 2D APT Stokes solver as an effective nonlinear viscosity. Constitutive kernels follow the RheologyCalculator `RateStateFriction` API (`compute_stress_frozen_Ω` during PT iterations with frozen `Ω_old`, then `update_Ω` after convergence, plus adaptive `dt`).
+
+Pass an `RSF` NamedTuple into the miniapp / build a controller with `build_rate_state_controller`. A phase is RSF-enabled if and only if `a_rsf` is set; required companions are `b_rsf`, `mu0_rsf`, `D_rs`, and `state_rsf_init`. Optional LaMEM-style spatial profiles use `b_rsf_val` + `b_rsf_x` (or `a_rsf_*`, and `_y` for the vertical axis).
+
+Allocate `RateStateArrays`, initialize with `init_rate_state_fields!`, and pass `rsf = (; ctrl, fields)` into `solve!`. See `miniapps/QuakeSystem/simple_shear/` for a Herrendörfer PBC shear example.
+
 ### Elastic stress rotation
 
 The elastic stress rotation is done on the particles.
