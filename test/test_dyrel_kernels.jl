@@ -164,6 +164,13 @@ end
 
         dyrel = DYREL(backend_JR, stokes, rheology, phase_ratios, di, dt; ϵ = 1.0e-6)
 
+        # γfact is stored in the DYREL object and reused by DYREL! at every solve
+        dyrel_γ = DYREL(backend_JR, stokes, rheology, phase_ratios, di, dt; γfact = 37.0)
+        γ_eff_before = copy(dyrel_γ.γ_eff)
+        JR2K.DYREL!(dyrel_γ, stokes, rheology, phase_ratios, di, dt)
+        @test dyrel_γ.γfact === 37.0
+        @test Array(dyrel_γ.γ_eff) == Array(γ_eff_before)
+
         # --- fused divergence + strain rate + pressure residual ---
         # P0 = P and Q = 0 ⇒ RP = -∇V = -(a+b), independent of ηb
         stokes.P0 .= stokes.P

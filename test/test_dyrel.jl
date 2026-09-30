@@ -42,6 +42,7 @@ end
         @test size(dyrel.Ry0) == (nx, ny - 1)
         @test size(dyrel.Rz0) == (1, 1)
         @test dyrel.CFL === 0.5
+        @test dyrel.γfact === 20.0
         @test dyrel.ϵ === 1.0e-7
         @test dyrel.ϵ_vel === 2.0e-7
         @test dyrel.c_fact === 0.25
@@ -85,6 +86,9 @@ end
         dyrel2 = JR3.DYREL(backend_JR, nx, ny, nz; CFL = 0.7)
         @test size(dyrel2.Dz) == (nx, ny, nz - 1)
         @test dyrel2.CFL === 0.7
+
+        dyrel3 = JR3.DYREL(backend_JR, (nx, ny, nz); γfact = 37.0)
+        @test dyrel3.γfact === 37.0
     end
 
     @testset "update_α_β! 2D" begin
