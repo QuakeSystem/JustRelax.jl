@@ -1,15 +1,13 @@
 #=
-Herrendörfer-style viscoelastic simple shear (phase 1).
+Herrendörfer-style viscoelastic simple shear with Rate-and-State Friction (DYREL).
 
-- Left/right: periodic velocity BCs (seam residual; no IGG `periodx`)
-- Bottom: no-slip; top: prescribed plate velocity `V_top` [m/s]
-- Rheology: linear viscoelastic background + softer elastic sphere (no plasticity / RSF yet)
-- Output: ParaView VTK + PVD with RSF placeholder fields set to zero
-
-Single MPI rank only.
+- Left/right: periodic velocity BCs (no IGG `periodx`); single MPI rank
+- Bottom: no-slip; top: prescribed `V_top` [m/s]
+- Geometry: GMG fault band (Eulerian PhaseRatios; no particles)
+- RSF: frozen Ω during DYREL iterations; Ω → Ω_old after converged step
+- VTK: ParaView fields including Vp_rsf (LaMEM names)
 =#
 const isCUDA = false
-# const isCUDA = true
 
 @static if isCUDA
     using CUDA
@@ -19,9 +17,9 @@ using JustRelax, JustRelax.JustRelax2D, JustRelax.DataIO
 using Pkg; Pkg.activate("miniapps")
 
 const backend = @static if isCUDA
-    JustRelax.CUDABackend # Options: CPUBackend, CUDABackend, AMDGPUBackend
+    JustRelax.CUDABackend
 else
-    JustRelax.CPUBackend # Options: CPUBackend, CUDABackend, AMDGPUBackend
+    JustRelax.CPUBackend
 end
 
 using ParallelStencil, ParallelStencil.FiniteDifferences2D
@@ -34,43 +32,20 @@ end
 
 using JustPIC
 const backend_JP = @static if isCUDA
-    CUDA.CUDABackend # Options: JustPIC.CPU, CUDA.CUDABackend, AMDGPU.ROCBackend
+    CUDA.CUDABackend
 else
-    JustPIC.CPU # Options: JustPIC.CPU, CUDA.CUDABackend, AMDGPU.ROCBackend
+    JustPIC.CPU
 end
 
 using GeoParams
 
-import JustPIC.GridGeometryUtils as GGU
+include(joinpath(@__DIR__, "simple_shear_setup.jl"))
+include(joinpath(@__DIR__, "simple_shear_rheology.jl"))
 
-# Analytic Maxwell shear stress for Couette flow with engineering shear rate
-# ε̇ = (V_top - V_bot) / ly (= ∂Vx/∂y). With the tensor strain rate εxy = ε̇/2,
-# τxy = 2G εxy t = G ε̇ t at early (elastic) times.
+# Analytic Maxwell τxy for Couette: ε̇ = V_top / ly (engineering shear rate)
 solution(ε̇, t, G, η) = ε̇ * η * (1 - exp(-G * t / η))
 
-function init_phases!(phase_ratios, xci, xvi, circle)
-    ni = size(phase_ratios.center)
-
-    @parallel_indices (i, j) function init_phases!(phases, xc, yc, circle)
-        x, y = xc[i], yc[j]
-        p = GGU.Point(x, y)
-        if GGU.inside(p, circle)
-            @index phases[1, i, j] = 0.0
-            @index phases[2, i, j] = 1.0
-        else
-            @index phases[1, i, j] = 1.0
-            @index phases[2, i, j] = 0.0
-        end
-        return nothing
-    end
-
-    @parallel (@idx ni) init_phases!(phase_ratios.center, xci..., circle)
-    @parallel (@idx ni .+ 1) init_phases!(phase_ratios.vertex, xvi..., circle)
-    return nothing
-end
-
 function phase_map(phase_ratios_loc)
-    # CellArray → Array of SVector{nphases}; argmax → phase index 1..nphases
     return [argmax(p) for p in Array(phase_ratios_loc)]
 end
 
@@ -90,14 +65,14 @@ function prepare_vtk!(VTK)
 end
 
 function write_vtk_step!(
-        VTK, it, t, xvi, xci, stokes, phase_ratios, Vx_v, Vy_v, zeros_c, τ_analytic
+        VTK, it, t, xvi, xci, stokes, phase_ratios, Vx_v, Vy_v, zeros_c, τ_analytic, rsf_fields
     )
     VTK.do_vtk || return nothing
-    (it == 1 || rem(it, VTK.vtk_every) == 0) || return nothing
+    vtk_every = Int(get(VTK, :vtk_every, 1))
+    (it == 1 || rem(it, vtk_every) == 0) || return nothing
 
     velocity2vertex!(Vx_v, Vy_v, @velocity(stokes)...)
     phase_vertex = phase_map(phase_ratios.vertex)
-    # Homogeneous Phase-1 Maxwell τxy as a constant field for elastic-loading checks
     τxy_analytic = fill(τ_analytic, size(zeros_c))
 
     data_v = (;
@@ -113,105 +88,123 @@ function write_vtk_step!(
         εII = Array(stokes.ε.II),
         RP = Array(stokes.R.RP),
         τxy_analytic = τxy_analytic,
-        # RSF placeholders for the next phase
-        Ω = zeros_c,
-        Vp = zeros_c,
-        log10_Vp = zeros_c,
-        τ_rsf = zeros_c,
-        a_eff = zeros_c,
-        b_eff = zeros_c,
     )
+    if !isnothing(rsf_fields)
+        # Centers (normal stress nodes)
+        data_c = merge(
+            data_c,
+            (;
+                Ω = Array(rsf_fields.Ω),
+                Vp_rsf = Array(rsf_fields.Vp),
+                log10_Vp_rsf = log10.(max.(Array(rsf_fields.Vp), 1.0e-30)),
+                τ_rsf = Array(rsf_fields.τ_rsf),
+                a_eff = Array(rsf_fields.a_eff),
+                b_eff = Array(rsf_fields.b_eff),
+            ),
+        )
+        # Vertices (shear / LaMEM XY-edge nodes) — where τ.xy and ηv live
+        Vp_v = Array(rsf_fields.Vp_v)
+        data_v = merge(
+            data_v,
+            (;
+                ηv = Array(stokes.viscosity.ηv),
+                τxy = Array(stokes.τ.xy),
+                Ω_v = Array(rsf_fields.Ωv),
+                Vp_rsf_v = Vp_v,
+                log10_Vp_rsf_v = log10.(max.(Vp_v, 1.0e-30)),
+                τ_rsf_v = Array(rsf_fields.τ_rsf_v),
+            ),
+        )
+    else
+        data_c = merge(
+            data_c,
+            (;
+                Ω = zeros_c,
+                Vp_rsf = zeros_c,
+                log10_Vp_rsf = zeros_c,
+                τ_rsf = zeros_c,
+                a_eff = zeros_c,
+                b_eff = zeros_c,
+            ),
+        )
+    end
     velocity_v = (Array(Vx_v), Array(Vy_v))
     path_vtk = joinpath(VTK.vtk_dir, "vtk_" * lpad("$it", 6, "0"))
     save_vtk(
-        path_vtk,
-        xvi,
-        xci,
-        data_v,
-        data_c,
-        velocity_v;
-        t = t,
-        pvd = joinpath(VTK.vtk_dir, VTK.pvd_name),
+        path_vtk, xvi, xci, data_v, data_c, velocity_v;
+        t = t, pvd = joinpath(VTK.vtk_dir, VTK.pvd_name),
     )
-    println("Saved VTK → $(joinpath(VTK.vtk_dir, VTK.pvd_name)).pvd  (it=$it, t=$t)")
+    # println("Saved VTK → $(joinpath(VTK.vtk_dir, VTK.pvd_name)).pvd  (it=$it, t=$t)")
     return nothing
 end
 
-# MAIN SCRIPT --------------------------------------------------------------------
 function main(
         igg;
         nx = 64,
         ny = 64,
-        lx = 150.0e3,
-        ly = 150.0e3,
-        origin = (-75.0e3, -75.0e3),
+        coord_x = (-75.0e3, 75.0e3),
+        coord_y = (-150.0e3, 0.0),
+        fault = (; x = (-75.0e3, 75.0e3), y = (-75.5e3, -74.5e3)),
         V_top = 4.0e-9,
-        η0 = 1.0e23,
+        η0 = 5.0e26,
         G0 = 3.0e10,
         ν = 0.25,
+        P0 = 5.0e6,
         dt = 500.0,
-        nsteps = 10,
-        radius_frac = 0.1,
+        nsteps = 5,
+        rsf_nt = nothing,
         VTK = nothing,
     )
+    lx = abs(coord_x[2] - coord_x[1])
+    ly = abs(coord_y[2] - coord_y[1])
+    origin = (coord_x[1], coord_y[1])
+    ni = (nx, ny)
+    li = (lx, ly)
 
-    # Physical domain ------------------------------------
-    ni = nx, ny
-    li = lx, ly
+    isnothing(VTK) && (VTK = (;
+            do_vtk = true,
+            folder = joinpath(@__DIR__, "VTK"),
+            vtk_dir = joinpath(@__DIR__, "VTK", "vtk"),
+            name = "simple_shear_herrendorfer",
+            pvd_name = "simple_shear_herrendorfer",
+            vtk_every = 1,
+        ))
+    prepare_vtk!(VTK)
+
+    staggered_grid, ph_vertex, _T = simple_shear_2D(
+        nx + 1, ny + 1, coord_x, coord_y, 1250.0, fault, VTK
+    )
     grid = Geometry(ni, li; origin = origin)
     (; xci, xvi) = grid
-    # Engineering shear rate for fixed bottom + moving top
-    εbg = V_top / ly
+    @assert xvi[1][1] ≈ staggered_grid.xvi[1][1]
 
-    # Physical properties (Herrendörfer / LaMEM-style Maxwell buffer) -------------
-    Gi = G0 / 2
-    el_bg = ConstantElasticity(; G = G0, ν = ν)
-    el_inc = ConstantElasticity(; G = Gi, ν = ν)
-    visc = LinearViscous(; η = η0)
-
-    rheology = (
-        SetMaterialParams(;
-            Phase = 1,
-            Density = ConstantDensity(; ρ = 0.0),
-            Gravity = ConstantGravity(; g = 0.0),
-            CompositeRheology = CompositeRheology((visc, el_bg)),
-            Elasticity = el_bg,
-        ),
-        SetMaterialParams(;
-            Phase = 2,
-            Density = ConstantDensity(; ρ = 0.0),
-            Gravity = ConstantGravity(; g = 0.0),
-            CompositeRheology = CompositeRheology((visc, el_inc)),
-            Elasticity = el_inc,
-        ),
-    )
-
-    # Phases: viscoelastic background + softer sphere ---------------------------
+    rheology = init_rheology_simple_shear(; η = η0, G = G0, ν = ν)
     phase_ratios = PhaseRatios(backend_JP, length(rheology), ni)
-    cx = origin[1] + lx / 2
-    cy = origin[2] + ly / 2
-    radius = radius_frac * min(lx, ly)
-    circle = GGU.Circle((cx, cy), radius)
-    init_phases!(phase_ratios, xci, xvi, circle)
+    init_phase_ratios_from_grid!(phase_ratios, ph_vertex, length(rheology))
 
-    # Couette BCs (Herrendörfer): no-slip bottom, prescribed Vx on top, periodic in x.
-    # Top has no free_slip/no_slip/periodic flag so `flow_bcs!` leaves `V_top` untouched.
+    rsf_enabled = !isnothing(rsf_nt) && Bool(get(rsf_nt, :enabled, true))
+    rsf_bundle = nothing
+    if rsf_enabled
+        loc = get(rsf_nt, :loc, :both)
+        ctrl = build_rate_state_controller(rsf_nt; nphases = length(rheology), di = (lx / nx, ly / ny))
+        fields = RateStateArrays(backend, ni; loc = loc)
+        init_rate_state_fields!(fields, ctrl, phase_ratios, xci, xvi)
+        rsf_bundle = (; ctrl = ctrl, fields = fields)
+    end
+
     flow_bcs = VelocityBoundaryConditions(;
         free_slip = (left = false, right = false, top = false, bot = false),
         no_slip = (left = false, right = false, top = false, bot = true),
         periodic = (left = true, right = true, top = false, bot = false),
     )
-
     stokes = StokesArrays(backend, ni, flow_bcs)
+    fill!(stokes.P, P0)
     ρg = @zeros(ni...), @zeros(ni...)
     args = (; T = @zeros(ni .+ 2...), P = stokes.P, dt = dt)
 
-    # η ≫ G·dt keeps the Maxwell buffer quasi-elastic (η_ve ≈ G·dt)
-    viscosity_cutoff = (1.0e10, 1.0e28)
+    viscosity_cutoff = rsf_enabled ? (1.0e4, 5.0e26) : (1.0e4, 1.0e28)
     compute_viscosity!(stokes, phase_ratios, args, rheology, viscosity_cutoff)
 
-    # Linear Couette initial guess from fixed bottom (0) to V_top; bottom is then
-    # enforced by no-slip, top ghost row keeps V_top (solver does not overwrite it).
     yVx = grid.xi_vel[1][2]
     ybot, ytop = origin[2], origin[2] + ly
     stokes.V.Vx .= PTArray(backend)([
@@ -223,29 +216,19 @@ function main(
     flow_bcs!(stokes, flow_bcs)
     update_halo!(@velocity(stokes)...)
 
-    # IO -----------------------------------------------------------------------
-    isnothing(VTK) && (VTK = (;
-            do_vtk = true,
-            folder = joinpath(@__DIR__, "VTK"),
-            vtk_dir = joinpath(@__DIR__, "VTK", "vtk"),
-            pvd_name = "simple_shear_herrendorfer",
-            vtk_every = 1,
-        ))
-    prepare_vtk!(VTK)
-
     Vx_v = @zeros(ni .+ 1...)
     Vy_v = @zeros(ni .+ 1...)
     zeros_c = zeros(nx, ny)
 
     dyrel = DYREL(backend, stokes, rheology, phase_ratios, grid.di, dt; ϵ = 1.0e-6)
+    εbg = V_top / ly
+    dt_rsf_switch = rsf_enabled ? Float64(get(rsf_nt, :dt_rsf_switch, 1.0e9)) : Inf
+    dt_min = rsf_enabled ? Float64(get(rsf_nt, :dt_min, 1.0e-2)) : 0.0
+    dt_max = rsf_enabled ? Float64(get(rsf_nt, :dt_max, 1.0e7)) : Inf
 
     t, it = 0.0, 0
-    τII = [0.0]
-    sol = [0.0]
-    ttot = [0.0]
-
     for _ in 1:nsteps
-        solve_DYREL!(
+        out = solve_DYREL!(
             stokes,
             ρg,
             dyrel,
@@ -259,14 +242,12 @@ function main(
             kwargs = (;
                 verbose_PH = true,
                 verbose_DR = false,
-                iterMax = 50.0e3,
+                iterMax = 50.0e1,
                 nout = 10,
                 rel_drop = 1.0e-2,
-                λ_relaxation_PH = 1,
-                λ_relaxation_DR = 1,
-                viscosity_relaxation = 1,
                 linear_viscosity = true,
                 viscosity_cutoff = viscosity_cutoff,
+                rsf = rsf_bundle,
             )
         )
         tensor_invariant!(stokes.τ)
@@ -277,40 +258,79 @@ function main(
 
         τxy_max = maximum(abs, stokes.τ.xy)
         τ_analytic = solution(εbg, t, G0, η0)
-        push!(τII, τxy_max)
-        push!(sol, τ_analytic)
-        push!(ttot, t)
-
-        println("it = $it; t = $t; max|τxy| = $τxy_max; analytic = $τ_analytic\n")
+        println("it = $it; t = $t; max|τxy| = $τxy_max; analytic = $τ_analytic; dt = $dt; dt_rsf = $(out.dt_rsf)")
 
         write_vtk_step!(
-            VTK, it, t, xvi, xci, stokes, phase_ratios, Vx_v, Vy_v, zeros_c, τ_analytic
+            VTK, it, t, xvi, xci, stokes, phase_ratios, Vx_v, Vy_v, zeros_c, τ_analytic,
+            isnothing(rsf_bundle) ? nothing : rsf_bundle.fields,
         )
+
+        # LaMEM-style dt policy after the first step (floor at dt_min even if RSF asks lower)
+        if rsf_enabled && it ≥ 1 && isfinite(out.dt_rsf) && out.dt_rsf < dt_rsf_switch
+            dt = clamp(out.dt_rsf, dt_min, dt_max)
+            args = (; args..., dt = dt)
+        end
     end
 
-    return (; ttot, τII, sol, stokes)
+    return nothing
 end
 
 # -----------------------------------------------------------------------------
-nx = 32
-ny = 32
-lx = 150.0e3
-ly = 150.0e3
-origin = (-lx / 2, -ly / 2)
-V_top = 4.0e-9   # m/s (Herrendörfer V_top); bottom is no-slip (0)
-dt = 500.0       # s
-nsteps = 5
+# Smoke / default run (reduce nx, ny, nsteps for quick checks)
+nx = 300
+ny = 300
+coord_x = -75.0e3, 75.0e3
+coord_y = -150.0e3, 0.0
+fault = (; x = (-75.0e3, 75.0e3), y = (-75.2e3, -74.8e3))
+V_top = 4.0e-9
+dt = 500.0
+nsteps = 103000
+
+RSF = (
+    enabled = true,
+    affect_stokes = true,
+    # LaMEM: constitutive RSF on cells and XY edges (JR centers + vertices)
+    loc = :both,
+    V0 = 4.0e-9,
+    dt_min = 1.0e-1,
+    dt_max = 1.0e7,
+    dt_rsf_switch = 1.0e9,
+    G = 3.0e10,
+    ν = 0.25,
+    # Both phases carry a_rsf (LaMEM / Herrendörfer Shear_test_PBC)
+    Phase1 = (
+        a_rsf = 0.011,
+        b_rsf = 0.017,
+        mu0_rsf = 0.2,
+        D_rs = 0.01,
+        Wf = 500.0,
+        state_rsf_init = 40.0,
+        λ = 0.0,
+        C = 0.0,
+    ),
+    Phase2 = (
+        a_rsf = 0.011,
+        b_rsf = 0.001,
+        b_rsf_val = (0.001, 0.017, 0.017, 0.001),
+        b_rsf_x = (-47000.0, -43000.0, 33000.0, 37000.0),
+        mu0_rsf = 0.2,
+        D_rs = 0.01,
+        Wf = 500.0,
+        state_rsf_init = -1.0,
+        λ = 0.0,
+        C = 0.0,
+    ),
+)
 
 VTK = (;
     do_vtk = true,
     folder = joinpath(@__DIR__, "VTK"),
     vtk_dir = joinpath(@__DIR__, "VTK", "vtk"),
+    name = "simple_shear_herrendorfer",
     pvd_name = "simple_shear_herrendorfer",
-    vtk_every = 1,
+    vtk_every = 10,
 )
 
-# NOTE: do not pass `periodx` to `init_global_grid`. X-periodicity is carried by the
-# velocity BCs (seam momentum row). This miniapp runs on a single rank.
 igg = if !(JustRelax.MPI.Initialized())
     IGG(init_global_grid(nx, ny, 1; init_MPI = true)...)
 else
@@ -321,11 +341,12 @@ end
     igg;
     nx = nx,
     ny = ny,
-    lx = lx,
-    ly = ly,
-    origin = origin,
+    coord_x = coord_x,
+    coord_y = coord_y,
+    fault = fault,
     V_top = V_top,
     dt = dt,
     nsteps = nsteps,
+    rsf_nt = RSF,
     VTK = VTK,
 )

@@ -68,6 +68,43 @@ include("rheology/Viscosity.jl")
 include("rheology/Viscosity_VS.jl")
 export compute_viscosity!, compute_viscosity_εII!, compute_viscosity_τII!
 
+include("rheology/RateStateFriction.jl")
+export RateStateFriction,
+    compute_strain_rate,
+    compute_stress,
+    compute_stress_frozen_Ω,
+    compute_Vp_from_stress,
+    update_Ω,
+    compute_dt_ratestate,
+    compute_dt_ratestate_lamem,
+    dt_healing,
+    dt_weakening,
+    dt_courant,
+    max_state_change
+
+include("rheology/RateStateSetup.jl")
+export get_rsf_profile,
+    phase_has_rsf,
+    validate_rsf_phase!,
+    PhaseRSFParams,
+    RateStateController,
+    build_rate_state_controller,
+    evaluate_rsf_ab,
+    as_rate_state_friction
+
+include("rheology/RateStateArrays.jl")
+export RateStateArrays
+
+include("rheology/RateStateAdapter.jl")
+export rsf_viscosity_from_stress,
+    rsf_cons_eq_residual,
+    solve_bisect_eta_rsf,
+    rsf_effective_viscosity,
+    rsf_frozen_stress_viscosity,
+    rsf_from_phase_params,
+    to_rheology_calculator_kwargs
+
+
 include("rheology/Melting.jl")
 export compute_melt_fraction!, compute_melt_fraction_derivative!
 
@@ -97,6 +134,16 @@ export compute_yieldfunction_phase, compute_plastic_gradients_phase
 
 include("stokes/StressKernels.jl")
 export tensor_invariant!, accumulate_tensor!, accumulate_vol!
+
+# RSF kernels need clamped_indices / av_clamped from StressKernels and
+# center2vertex! / shear2center! from Interpolations (included above).
+include("rheology/RateStateKernels.jl")
+export init_rate_state_fields!,
+    refresh_rsf_ab_mask!,
+    apply_rsf_viscosity!,
+    enforce_rsf_stress!,
+    update_rate_state!,
+    compute_dt_ratestate_grid
 
 include("stokes/PrincipalStresses.jl")
 export compute_principal_stresses, compute_principal_stresses!, PrincipalStress
