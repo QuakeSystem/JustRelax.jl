@@ -1,4 +1,40 @@
 """
+    compute_ρ!(ρ, phase_ratios, rheology, args)
+
+Fill a cell-centred density field from phase-ratio-weighted `compute_density`
+(GeoParams) on each cell. Used e.g. for physical inertia ``ρ (V − V0)/dt``.
+"""
+function compute_ρ!(ρ, phase_ratios::JustPIC.PhaseRatios, rheology, args)
+    ni = size(ρ)
+    @parallel (@idx ni) compute_ρ_kernel!(ρ, phase_ratios.center, rheology, args)
+    return nothing
+end
+
+@parallel_indices (I...) function compute_ρ_kernel!(ρ, phase_ratios, rheology, args)
+    args_ijk = getindex_NamedTuple(args, I...)
+    ratio_ijk = @cell phase_ratios[I...]
+    @inbounds ρ[I...] = fn_ratio(compute_density, rheology, ratio_ijk, args_ijk)
+    return nothing
+end
+
+"""
+    compute_ρ!(ρ, rheology, args)
+
+Fill a cell-centred density field from a single-phase (or homogeneous) rheology.
+"""
+function compute_ρ!(ρ, rheology, args)
+    ni = size(ρ)
+    @parallel (@idx ni) compute_ρ_kernel!(ρ, rheology, args)
+    return nothing
+end
+
+@parallel_indices (I...) function compute_ρ_kernel!(ρ, rheology, args)
+    args_ijk = getindex_NamedTuple(args, I...)
+    @inbounds ρ[I...] = compute_density(rheology, args_ijk)
+    return nothing
+end
+
+"""
     compute_ρg!(ρg, rheology, args)
 
 Calculate the buoyance forces `ρg` for the given GeoParams.jl `rheology` object and correspondent arguments `args`.

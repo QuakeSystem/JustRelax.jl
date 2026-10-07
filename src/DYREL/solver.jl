@@ -47,8 +47,10 @@ Solve the Stokes system with the self-tuned dynamic relaxation (DYREL) method.
   Returns also `dt_rsf`, `Vp_max`.
 - `inertia`: Include physical inertia ``ρ (V − V0)/dt`` in the momentum residual (LaMEM-style).
   Uses `stokes.V0` from the previous converged step. Default: `false`.
-- `ρ_inertia`: Density for the inertia term when `inertia=true`: a scalar (uniform) or a
-  cell-centred array (phase-dependent). Face values are averaged in the residual. Default: `0.0`.
+- `ρ_inertia`: Density for the inertia term when `inertia=true`:
+  `nothing` (default) → cell-centred phase-averaged density from `phase_ratios` + `rheology`;
+  a scalar → uniform fill; a cell-centred array → copied as-is. Face values are averaged
+  in the residual and Gershgorin diagonal.
 
 Options may be passed either as plain keywords or bundled as a single
 `kwargs = (; ...)` NamedTuple.
@@ -147,7 +149,7 @@ function _solve_DYREL!(
         update_material = true,
         rsf = nothing,
         inertia = false,
-        ρ_inertia = 0.0,
+        ρ_inertia = nothing,
         kwargs...,
     ) where {N}
 
@@ -206,10 +208,12 @@ function _solve_DYREL!(
     # scratch — P_num is no longer materialized separately.
     θc = dyrel.P_num
 
-    # Cell-centred density for inertia (scalar → fill; array → copy)
+    # Cell-centred density for inertia: nothing → from phases; Number → uniform; array → copy
     ρ_inertia_c = @zeros(ni...)
     if !iszero(_inv_dt)
-        if ρ_inertia isa Number
+        if isnothing(ρ_inertia)
+            compute_ρ!(ρ_inertia_c, phase_ratios, rheology, args)
+        elseif ρ_inertia isa Number
             fill!(ρ_inertia_c, Float64(ρ_inertia))
         else
             copyto!(ρ_inertia_c, ρ_inertia)

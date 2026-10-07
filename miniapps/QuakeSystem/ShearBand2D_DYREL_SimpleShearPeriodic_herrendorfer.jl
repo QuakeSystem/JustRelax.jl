@@ -170,7 +170,7 @@ function main(
         nsteps = 5,
         rsf_nt = nothing,
         inertia = false,
-        ρ_inertia = nothing,   # nothing → use media density from rheology when inertia=true
+        ρ_inertia = nothing,   # nothing → phase-averaged Density field; Number or array override
         VTK = nothing,
     )
     mesh = segmented_grid_2D(;
@@ -256,16 +256,23 @@ function main(
             "Δy∈$(extrema(Array(grid.di.vertex[2]))); periodic_x OK (uniform Δx)"
     )
 
-    # Scalar ρ for inertia (uniform media/fault density in this setup)
+    # Density for inertia: nothing → phase-averaged field; Number → uniform; array → as-is
     ρ_for_inertia = if !inertia
-        0.0
+        nothing
     elseif isnothing(ρ_inertia)
-        Float64(compute_density(rheology[1], (; T = 0.0, P = P0)))
-    else
+        ρ_c = @zeros(ni...)
+        compute_ρ!(ρ_c, phase_ratios, rheology, args)
+        ρ_c
+    elseif ρ_inertia isa Number
         Float64(ρ_inertia)
+    else
+        ρ_inertia
     end
     if inertia
-        println("inertia ON: ρ_inertia = $ρ_for_inertia")
+        ρ_ext = ρ_for_inertia isa Number ?
+            (ρ_for_inertia, ρ_for_inertia) :
+            extrema(Array(ρ_for_inertia))
+        println("inertia ON: ρ ∈ $ρ_ext (phase-averaged field unless overridden)")
         # Start from rest old-velocity so the first step sees ρ V / dt
         fill!(stokes.V0.Vx, 0.0)
         fill!(stokes.V0.Vy, 0.0)
@@ -337,7 +344,7 @@ dt = 500.0
 nsteps = 103000
 # Physical inertia ρ(V−V0)/dt (LaMEM `inertia = 1`). Off by default — set true for inertial runs.
 inertia = true
-ρ_inertia = nothing  # nothing → 2700 from rheology Density
+ρ_inertia = nothing  # nothing → phase-averaged Density field (both phases 2700 here)
 nx, ny = sum(nel_x isa Integer ? (nel_x,) : Tuple(nel_x)), sum(nel_y isa Integer ? (nel_y,) : Tuple(nel_y))
 
 RSF = (
