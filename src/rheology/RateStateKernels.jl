@@ -236,7 +236,7 @@ end
                 ε_floor = ε_floor,
             )
             τ_rsf_arr[i, j] = compute_stress_frozen_Ω(r; ε = DII, Ω_old = Ω_old[i, j], P = Pij)
-            Vp[i, j] = Vp_ij
+            Vp[i, j] = _clamp_Vp(Vp_ij)
             η_new = min(max(η_creep_out, η_min), η_max)
             if isfinite(η_new) && η_new > ε_floor
                 η[i, j] = η_new
@@ -278,7 +278,7 @@ end
                 ε_floor = ε_floor,
             )
             τ_rsf_arr[i, j] = compute_stress_frozen_Ω(r; ε = DII, Ω_old = Ω_old[i, j], P = Pij)
-            Vp[i, j] = Vp_ij
+            Vp[i, j] = _clamp_Vp(Vp_ij)
             η_new = min(max(η_creep_out, η_min), η_max)
             if isfinite(η_new) && η_new > ε_floor
                 ηv[i, j] = η_new
@@ -289,32 +289,42 @@ end
 end
 
 """
+Hard-clamp slip rate to `[-Vp_max_abs, Vp_max_abs]` (default 100 m/s).
+Non-finite values map to `+Vp_max_abs`.
+"""
+@inline function _clamp_Vp(v, Vp_max_abs = 100.0)
+    if !(isfinite(v))
+        return oftype(v, Vp_max_abs)
+    elseif abs(v) > Vp_max_abs
+        return copysign(oftype(v, Vp_max_abs), v)
+    else
+        return v
+    end
+end
+
+"""
     check_Vp_rsf!(rsf_arr; Vp_max_abs=100.0)
 
-Error if any masked `Vp` / `Vp_v` is non-finite or `|Vp| > Vp_max_abs` (default 100 m/s).
+Hard-clamp masked `Vp` / `Vp_v` to `[-Vp_max_abs, Vp_max_abs]` (default 100 m/s).
+Non-finite values are replaced by `+Vp_max_abs`.
 """
 function check_Vp_rsf!(rsf_arr::RateStateArrays; Vp_max_abs = 100.0)
     if rsf_do_center(rsf_arr)
-        _check_Vp_rsf_field!(rsf_arr.Vp, rsf_arr.rsf_mask, "center"; Vp_max_abs = Vp_max_abs)
+        @parallel (@idx size(rsf_arr.Vp)) _clamp_Vp_rsf_field!(
+            rsf_arr.Vp, rsf_arr.rsf_mask, Vp_max_abs
+        )
     end
     if rsf_do_vertex(rsf_arr)
-        _check_Vp_rsf_field!(rsf_arr.Vp_v, rsf_arr.rsf_mask_v, "vertex"; Vp_max_abs = Vp_max_abs)
+        @parallel (@idx size(rsf_arr.Vp_v)) _clamp_Vp_rsf_field!(
+            rsf_arr.Vp_v, rsf_arr.rsf_mask_v, Vp_max_abs
+        )
     end
     return nothing
 end
 
-function _check_Vp_rsf_field!(Vp, mask, loc::AbstractString; Vp_max_abs = 100.0)
-    Vp_a = Array(Vp)
-    mask_a = Array(mask)
-    @inbounds for idx in eachindex(Vp_a)
-        mask_a[idx] ≤ 0.5 && continue
-        v = Vp_a[idx]
-        if !(isfinite(v)) || abs(v) > Vp_max_abs
-            error(
-                "Vp_rsf ($loc) invalid at linear index $idx: $v \
-                (must be finite and |Vp| ≤ $Vp_max_abs)"
-            )
-        end
+@parallel_indices (I...) function _clamp_Vp_rsf_field!(Vp, mask, Vp_max_abs)
+    @inbounds if mask[I...] > 0.5
+        Vp[I...] = _clamp_Vp(Vp[I...], Vp_max_abs)
     end
     return nothing
 end
@@ -417,7 +427,7 @@ end
         if p.enabled
             r = rsf_from_phase_params(p, a_eff[i, j], b_eff[i, j])
             Pij = max(abs(P[i, j]), 1.0e3)
-            Vp_ij = compute_Vp_from_stress(r; τ = τII[i, j], Ω = Ω_old[i, j], P = Pij)
+            Vp_ij = _clamp_Vp(compute_Vp_from_stress(r; τ = τII[i, j], Ω = Ω_old[i, j], P = Pij))
             Ωnew = update_Ω(r; Ω_old = Ω_old[i, j], dt = dt, Vp = Vp_ij)
             Ω[i, j] = Ωnew
             Ω_old[i, j] = Ωnew
@@ -439,7 +449,7 @@ end
             Ic = clamped_indices(ni, periodic, i, j)
             Pij = max(abs(av_clamped(P, Ic...)), 1.0e3)
             τII = sqrt(0.5 * (τxx_v[i, j]^2 + τyy_v[i, j]^2) + τxy[i, j]^2)
-            Vp_ij = compute_Vp_from_stress(r; τ = τII, Ω = Ω_old[i, j], P = Pij)
+            Vp_ij = _clamp_Vp(compute_Vp_from_stress(r; τ = τII, Ω = Ω_old[i, j], P = Pij))
             Ωnew = update_Ω(r; Ω_old = Ω_old[i, j], dt = dt, Vp = Vp_ij)
             Ω[i, j] = Ωnew
             Ω_old[i, j] = Ωnew

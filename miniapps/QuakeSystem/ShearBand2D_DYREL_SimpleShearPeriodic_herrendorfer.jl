@@ -50,6 +50,16 @@ function phase_map(phase_ratios_loc)
     return [argmax(p) for p in Array(phase_ratios_loc)]
 end
 
+"""Pad face residuals onto the cell grid for VTK (trailing faces filled with 0)."""
+function residuals_to_centers(stokes)
+    nx, ny = size(stokes.P)
+    Rx, Ry = Array(stokes.R.Rx), Array(stokes.R.Ry)
+    Rx_c, Ry_c = zeros(nx, ny), zeros(nx, ny)
+    Rx_c[axes(Rx, 1), axes(Rx, 2)] .= Rx
+    Ry_c[axes(Ry, 1), axes(Ry, 2)] .= Ry
+    return Rx_c, Ry_c
+end
+
 function prepare_vtk!(VTK)
     take(VTK.folder)
     if VTK.do_vtk
@@ -75,6 +85,7 @@ function write_vtk_step!(
     velocity2vertex!(Vx_v, Vy_v, @velocity(stokes)...)
     phase_vertex = phase_map(phase_ratios.vertex)
     τxy_analytic = fill(τ_analytic, size(zeros_c))
+    Rx_c, Ry_c = residuals_to_centers(stokes)
 
     data_v = (;
         Vx = Array(Vx_v),
@@ -87,7 +98,8 @@ function write_vtk_step!(
         η = Array(stokes.viscosity.η),
         τII = Array(stokes.τ.II),
         εII = Array(stokes.ε.II),
-        RP = Array(stokes.R.RP),
+        Rx = Rx_c,
+        Ry = Ry_c,
         τxy_analytic = τxy_analytic,
     )
     if !isnothing(rsf_fields)
@@ -213,7 +225,8 @@ function main(
     ρg = @zeros(ni...), @zeros(ni...)
     args = (; T = @zeros(ni .+ 2...), P = stokes.P, dt = dt)
 
-    viscosity_cutoff = rsf_enabled ? (1.0e4, 5.0e26) : (1.0e4, 1.0e28)
+    # Floor η high enough that rupture localisation cannot collapse η → runaway Vp
+    viscosity_cutoff = rsf_enabled ? (1.0e6, 5.0e26) : (1.0e6, 1.0e28)
     compute_viscosity!(stokes, phase_ratios, args, rheology, viscosity_cutoff)
 
     yVx = grid.xi_vel[1][2]
@@ -232,7 +245,7 @@ function main(
     zeros_c = zeros(nx, ny)
 
     # grid.di is a NamedTuple of (possibly vector) spacings — DYREL / Gershgorin use @dx/@dy
-    dyrel = DYREL(backend, stokes, rheology, phase_ratios, grid.di, dt; ϵ = 1.0e-6)
+    dyrel = DYREL(backend, stokes, rheology, phase_ratios, grid.di, dt; ϵ = 1.0e-8)
     εbg = V_top / ly
     dt_rsf_switch = rsf_enabled ? Float64(get(rsf_nt, :dt_rsf_switch, 1.0e9)) : Inf
     dt_min = rsf_enabled ? Float64(get(rsf_nt, :dt_min, 1.0e-2)) : 0.0
@@ -276,7 +289,7 @@ function main(
                 verbose_DR = false,
                 iterMax = 50.0e3,
                 nout = 10,
-                rel_drop = 1.0e-2,
+                rel_drop = 1.0e-4,
                 linear_viscosity = true,
                 viscosity_cutoff = viscosity_cutoff,
                 rsf = rsf_bundle,
