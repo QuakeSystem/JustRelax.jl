@@ -1,24 +1,7 @@
 #=
-Minimum reproducible product: a non-uniform (asymmetric) z-grid interacting
-with JustPIC's `add_periodic_ghost_nodes` ghost-node placement.
-
-This is the original miniapps/DYREL2D/subduction/Subduction2D_DYREL.jl, modified
-in two places:
-
-  1. The grid is built with a non-uniform z-axis (coarse at the bottom, fine
-     at the top -- `geometric_stretch_1d` below) instead of the original
-     uniform `Geometry(ni, li; origin)`. The x-axis is left uniform, matching
-     the single-axis-refinement pattern JustRelax's own Plume2D miniapp uses.
-
-  2. A short diagnostic block is added right after `init_particles` and at the
-     top of the time loop: it prints (a) the ghost-node spacing JustPIC's
-     `particles.xci`/`particles.xvi` actually used at each end of the z-axis
-     versus the correct, locally-appropriate spacing, and (b) `thermal.T`'s
-     extrema every iteration, so the escalation (if/when it happens) is
-     visible directly in stdout.
-
-Nothing else changed: same rheology, same thermal/flow boundary conditions,
-same subgrid-diffusion calls, same resolution target as the original.
+MVP: asymmetric non-uniform z-grid + JustPIC's add_periodic_ghost_nodes.
+Diff vs original: non-uniform z-axis (geometric_stretch_1d), x stays uniform;
+ghost-node check after init_particles; thermal.T extrema printed per iteration.
 =#
 
 const isCUDA = false
@@ -30,7 +13,11 @@ end
 
 using JustRelax, JustRelax.JustRelax2D, JustRelax.DataIO
 using Pkg; Pkg.activate("miniapps")
-
+# const backend = @static if isCUDA
+#     JustRelax.CUDABackend # Options: CPUBackend, CUDABackend, AMDGPUBackend
+# else
+#     JustRelax.CPUBackend # Options: CPUBackend, CUDABackend, AMDGPUBackend
+# end
 const backend = @static if isCUDA
     CUDABackend # Options: CPUBackend, CUDABackend, AMDGPUBackend
     const backend_JR = CUDABackend
@@ -47,6 +34,11 @@ else
 end
 
 using JustPIC
+# const backend_JP = @static if isCUDA
+#     CUDA.CUDABackend # Options: JustPIC.CPU, CUDA.CUDABackend, AMDGPU.ROCBackend
+# else
+#     JustPIC.CPU # Options: JustPIC.CPU, CUDA.CUDABackend, AMDGPU.ROCBackend
+# end
 const backend_JP = @static if isCUDA
     CUDABackend # Options: JustPIC.CPU, CUDA.CUDABackend, AMDGPU.ROCBackend
 else
@@ -85,39 +77,46 @@ end
 end
 
 """
-    geometric_stretch_1d(n_vertices, x0, x1; ratio)
+    geometric_stretch_1d(x0, x1, dz_bottom, dz_top)
 
-Asymmetric non-uniform vertices on `[x0, x1]` whose cell widths shrink geometrically from
-`x0` to `x1` by a total factor of `ratio` (i.e. the cell at `x0` is `ratio`
-times wider than the cell at `x1`).
+Vertices on `[x0, x1]`, cell width shrinking geometrically from `dz_bottom`
+(at `x0`) to `dz_top` (at `x1`), both hit exactly, with `x0`/`x1` also hit
+exactly. The cell count is searched for the geometric sum closest to `x1-x0`;
+the small leftover is absorbed into one interior cell near the middle, far
+from either end, so it doesn't affect the end widths or the domain extent.
 """
-function geometric_stretch_1d(n_vertices::Int, x0::Float64, x1::Float64; ratio::Float64)
-    n_cells = n_vertices - 1
-    r = ratio^(-1 / (n_cells - 1))        # per-cell shrink factor, r < 1
-    w1 = (x1 - x0) * (1 - r) / (1 - r^n_cells)
-    vertices = zeros(n_cells + 1)
+function geometric_stretch_1d(x0::Float64, x1::Float64, dz_bottom::Float64, dz_top::Float64)
+    span = x1 - x0
+    ratio = dz_bottom / dz_top
+    best_n, best_leftover = 2, Inf
+    for n in 2:4000
+        r = ratio^(-1 / (n - 1))
+        leftover = span - dz_bottom * (1 - r^n) / (1 - r)
+        if abs(leftover) < abs(best_leftover)
+            best_n, best_leftover = n, leftover
+        end
+    end
+    n = best_n
+    r = ratio^(-1 / (n - 1))
+    widths = [dz_bottom * r^i for i in 0:(n - 1)]
+    widths[(n + 1) ÷ 2] += best_leftover
+    vertices = zeros(n + 1)
     vertices[1] = x0
-    w = w1
-    for i in 1:n_cells
-        vertices[i + 1] = vertices[i] + w
-        w *= r
+    for i in 1:n
+        vertices[i + 1] = vertices[i] + widths[i]
     end
     return vertices
 end
 ## END OF HELPER FUNCTION ------------------------------------------------------------
 
 ## BEGIN OF MAIN SCRIPT --------------------------------------------------------------
-function main(li, origin, phases_GMG, igg; nx = 16, ny = 16, z_ratio = 20.0, figdir = "figs2D", do_vtk = false)
+function main(li, origin, phases_GMG, igg, zv; nx = 16, ny = 16, figdir = "figs2D", do_vtk = false)
 
     # Physical domain ------------------------------------
     ni = nx, ny           # number of cells
 
-    # Non-uniform z-axis: coarse at the bottom (origin[2]), fine at the top
-    # (origin[2]+li[2]) -- same coarse-bottom/fine-top asymmetry as the full
-    # subduction model's refined grid, which is what exposes the ghost-node
-    # bug. x stays uniform.
+    # z: coarse at bottom, fine at top (zv precomputed, see bottom of file). x: uniform.
     xv = collect(range(origin[1], origin[1] + li[1], nx + 1))
-    zv = geometric_stretch_1d(ny + 1, origin[2], origin[2] + li[2]; ratio = z_ratio)
     grid = Geometry(PTArray(backend), xv, zv)
     di_min = min(
         min(minimum.(grid.di.center)...),
@@ -141,54 +140,37 @@ function main(li, origin, phases_GMG, igg; nx = 16, ny = 16, z_ratio = 20.0, fig
         backend_JP, nxcell, max_xcell, min_xcell, grid.xi_vel...
     )
 
-    # --- DIAGNOSTIC: ghost-node placement check -----------------------------
-    # The true cell width at each end of the z-axis vs. what JustPIC's
-    # particles.xvi[2] (built via add_periodic_ghost_nodes, unconditionally,
-    # even though this domain is not periodic) actually placed its ghost node
-    # at.
+    # DIAGNOSTIC: ghost-node placement check (z-axis)
     let
-        zvi_true = Array(grid.xvi[2])
-        dz_bottom_true = zvi_true[2] - zvi_true[1]
-        dz_top_true = zvi_true[end] - zvi_true[end - 1]
+        zvi_physical = Array(grid.xvi[2])
+        dz_bottom_physical = zvi_physical[2] - zvi_physical[1]
+        dz_top_physical = zvi_physical[end] - zvi_physical[end - 1]
         zvi_particles = Array(particles.xvi[2])
         dz_bottom_ghost = zvi_particles[2] - zvi_particles[1]
         dz_top_ghost = zvi_particles[end] - zvi_particles[end - 1]
+        z_bottom_vertex_correct = zvi_physical[1] - dz_bottom_physical
+        z_top_vertex_correct = zvi_physical[end] + dz_top_physical
 
-        # Correct ghost *coordinates* (vertex array): mirror each end by its
-        # own true cell width, i.e. what add_periodic_ghost_nodes should have
-        # produced for a non-periodic domain.
-        z_bottom_vertex_correct = zvi_true[1] - dz_bottom_true
-        z_top_vertex_correct = zvi_true[end] + dz_top_true
-
-        # Same comparison for the ghosted *centroid* array -- this is the one
-        # centroid2particle!/particle2centroid! actually interpolate against.
-        xci_true = Array(grid.xci[2])
-        dz_bottom_true_c = xci_true[2] - xci_true[1]
-        dz_top_true_c = xci_true[end] - xci_true[end - 1]
+        xci_physical = Array(grid.xci[2])
+        dz_bottom_physical_c = xci_physical[2] - xci_physical[1]
+        dz_top_physical_c = xci_physical[end] - xci_physical[end - 1]
         xci_particles = Array(particles.xci[2])
-        z_bottom_centroid_correct = xci_true[1] - dz_bottom_true_c
-        z_top_centroid_correct = xci_true[end] + dz_top_true_c
+        z_bottom_centroid_correct = xci_physical[1] - dz_bottom_physical_c
+        z_top_centroid_correct = xci_physical[end] + dz_top_physical_c
 
         println("="^70)
-        println("GHOST-NODE PLACEMENT CHECK (z-axis)")
-        println("  true bottom cell width = $(dz_bottom_true/1e3) km   true top cell width = $(dz_top_true/1e3) km")
-        println()
-        println("  -- vertex array (particles.xvi[2]) --")
-        println("  bottom ghost z: actual = $(zvi_particles[1]/1e3) km   correct = $(z_bottom_vertex_correct/1e3) km   true edge = $(zvi_true[1]/1e3) km")
-        println("  top ghost z:    actual = $(zvi_particles[end]/1e3) km   correct = $(z_top_vertex_correct/1e3) km   true edge = $(zvi_true[end]/1e3) km")
-        println("  bottom ghost gap used   = $(dz_bottom_ghost/1e3) km  (should be $(dz_bottom_true/1e3) km)")
-        println("  top ghost gap used      = $(dz_top_ghost/1e3) km  (should be $(dz_top_true/1e3) km)")
-        println()
-        println("  -- centroid array (particles.xci[2]) -- this is what centroid2particle!/particle2centroid! actually use --")
-        println("  bottom ghost z: actual = $(xci_particles[1]/1e3) km   correct = $(z_bottom_centroid_correct/1e3) km   first real centroid = $(xci_true[1]/1e3) km")
-        println("  top ghost z:    actual = $(xci_particles[end]/1e3) km   correct = $(z_top_centroid_correct/1e3) km   last real centroid  = $(xci_true[end]/1e3) km")
-        println()
-        println("  => bottom ghost is $(round((dz_bottom_true - dz_bottom_ghost)/1e3, digits=2)) km too close to the Tbot boundary")
-        println("  => real particles between z=$(zvi_true[1]/1e3) km and z=$(xci_particles[1]/1e3) km sit BELOW the lowest centroid JustPIC knows about,")
-        println("     so centroid2particle! must extrapolate rather than interpolate for them")
+        println("Asymmetrically refined grid. Top is refined, bottom is coarse.")
+        println("GHOST-NODE CHECK (z): dz bottom=$(dz_bottom_physical/1e3)km top=$(dz_top_physical/1e3)km")
+        println("")
+        println("vertex zcoord top:    ghost_used=$(zvi_particles[end]/1e3)km - ghost_expected=$(z_top_vertex_correct/1e3)km - domain_edge=$(zvi_physical[end]/1e3)km")
+        println("vertex zcoord bottom: ghost_used=$(zvi_particles[1]/1e3)km - ghost_expected=$(z_bottom_vertex_correct/1e3)km - domain_edge=$(zvi_physical[1]/1e3)km")
+        println("")
+        println("centroid zcoord top:    ghost_used=$(xci_particles[end]/1e3)km - ghost_expected=$(z_top_centroid_correct/1e3)km - last_real_centroid=$(xci_physical[end]/1e3)km")
+        println("centroid bottom: ghost_used=$(xci_particles[1]/1e3)km - ghost_expected=$(z_bottom_centroid_correct/1e3)km - first_real_centroid=$(xci_physical[1]/1e3)km")
+        println("")
+        println("=> bottom ghost dz: $(round((dz_bottom_physical - dz_bottom_ghost)/1e3, digits=2))km too close; particles with z<$(xci_particles[1]/1e3)km get extrapolated, not interpolated")
         println("="^70)
     end
-    # -------------------------------------------------------------------------
 
     subgrid_arrays = SubgridDiffusionCellArrays(particles; loc = :center)
     grid_vxi = velocity_grids(xci, xvi, grid.di.vertex)
@@ -237,9 +219,7 @@ function main(li, origin, phases_GMG, igg; nx = 16, ny = 16, z_ratio = 20.0, fig
     # ----------------------------------------------------
 
     # PT coefficients for thermal diffusion
-    # PTThermalCoeffs wants `di` as a per-axis tuple (like `ni`/`li`), not the
-    # reduced scalar `di_min` -- (di_min, di_min) is a conservative stand-in
-    # since there's no single uniform spacing on a non-uniform grid.
+    # di arg needs a per-axis tuple; (di_min,di_min) stands in for non-uniform di.
     pt_thermal = PTThermalCoeffs(
         backend, rheology, phase_ratios, args0, dt, ni, (di_min, di_min), li; ϵ = 1.0e-8, CFL = 0.95 / √2
     )
@@ -279,10 +259,8 @@ function main(li, origin, phases_GMG, igg; nx = 16, ny = 16, z_ratio = 20.0, fig
     # Time loop
     t, it = 0.0, 0
     while it < 300
-        # --- DIAGNOSTIC: watch for escalation --------------------------------
         Tex = extrema(Array(thermal.T))
         println("it=$it  thermal.T extrema = $Tex  finite = $(all(isfinite, Tex))")
-        # ----------------------------------------------------------------------
 
         # interpolate fields from particles to centroids
         particle2centroid!(T_buffer, pT, particles; ghost_1 = false, ghost_2 = false, ghost_3 = false)
@@ -463,10 +441,18 @@ function main(li, origin, phases_GMG, igg; nx = 16, ny = 16, z_ratio = 20.0, fig
 end
 
 ## END OF MAIN SCRIPT ----------------------------------------------------------------
-do_vtk = false # set to true to generate VTK files for ParaView
+do_vtk = false # set to physical to generate VTK files for ParaView
 figdir = "Subduction2D_DYREL_nonuniform_mvp"
 n = 32
-nx, ny = n * 2, n
+nx = n * 2
+
+# z0, z1 must match Subduction2D_setup.jl's model_depth/air_thickness.
+# dz_bottom/dz_top are round, easy-to-read numbers; ny is derived from them.
+z0, z1 = -260.0e3, 0.0
+dz_bottom, dz_top = 30.0e3, 0.5e3
+zv = geometric_stretch_1d(z0, z1, dz_bottom, dz_top)
+ny = length(zv) - 1
+println("z-grid: ny=$ny cells, dz_bottom=$(dz_bottom/1e3)km, dz_top=$(dz_top/1e3)km, realized span=$((zv[end]-zv[1])/1e3)km")
 
 li, origin, phases_GMG, T_GMG = GMG_subduction_2D(nx + 1, ny + 1)
 igg = if !(JustRelax.MPI.Initialized()) # initialize (or not) MPI grid
@@ -475,4 +461,4 @@ else
     igg
 end
 
-main(li, origin, phases_GMG, igg; figdir = figdir, nx = nx, ny = ny, z_ratio = 20.0, do_vtk = do_vtk);
+main(li, origin, phases_GMG, igg, zv; figdir = figdir, nx = nx, ny = ny, do_vtk = do_vtk);

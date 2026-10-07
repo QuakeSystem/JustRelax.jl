@@ -1,5 +1,5 @@
 # Pkg
-Manifest.toml
+#Manifest.toml
 Manifest-v*.toml
 docs/Manifest-v*.toml
 LocalPreferences.toml
