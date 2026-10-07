@@ -46,9 +46,11 @@ using Test, Suppressor, JustRelax, JustRelax.JustRelax2D
         @test length(grid_nu.xci[1]) == 4 && length(grid_nu.xvi[1]) == 5
         # cell-centered coords are midpoints of supplied vertices
         @test grid_nu.xci[2] == (xv2[1:(end - 1)] .+ xv2[2:end]) ./ 2
-        # vector-spacing arrays
+        # vector-spacing arrays (center is padded to `ni` for face / periodic indexing)
         @test grid_nu.di.vertex[2] == diff(xv2)
         @test grid_nu.di.center isa NTuple{2, <:AbstractArray}
+        @test length.(grid_nu.di.vertex) == grid_nu.ni
+        @test length.(grid_nu.di.center) == grid_nu.ni
         # the staggered velocity grid in the nonuniform direction has one ghost cell
         # on each side, so length = length(xci) + 2
         @test length(grid_nu.xi_vel[1][2]) == length(grid_nu.xci[2]) + 2

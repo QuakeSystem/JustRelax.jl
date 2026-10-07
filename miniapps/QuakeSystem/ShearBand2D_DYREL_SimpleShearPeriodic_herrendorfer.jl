@@ -3,7 +3,7 @@ Herrendörfer-style viscoelastic simple shear with Rate-and-State Friction (DYRE
 
 - Left/right: periodic velocity BCs (no IGG `periodx`); single MPI rank
 - Bottom: no-slip; top: prescribed `V_top` [m/s]
-- Geometry: GMG fault band (Eulerian PhaseRatios; no particles)
+- Geometry: LaMEM-style segmented mesh (uniform x for periodicity; refined y) + GMG fault
 - RSF: frozen Ω during DYREL iterations; Ω → Ω_old after converged step
 - VTK: ParaView fields including Vp_rsf (LaMEM names)
 =#
@@ -140,10 +140,13 @@ end
 
 function main(
         igg;
-        nx = 64,
-        ny = 64,
+        # LaMEM-style segments (preferred). Periodic x must stay uniform (one segment).
+        nel_x = 64,
         coord_x = (-75.0e3, 75.0e3),
-        coord_y = (-150.0e3, 0.0),
+        nel_y = (20, 8, 20),
+        coord_y = (-150.0e3, -76.0e3, -74.0e3, 0.0),
+        bias_x = nothing,
+        bias_y = nothing,
         fault = (; x = (-75.0e3, 75.0e3), y = (-75.5e3, -74.5e3)),
         V_top = 4.0e-9,
         η0 = 5.0e26,
@@ -155,11 +158,14 @@ function main(
         rsf_nt = nothing,
         VTK = nothing,
     )
-    lx = abs(coord_x[2] - coord_x[1])
-    ly = abs(coord_y[2] - coord_y[1])
-    origin = (coord_x[1], coord_y[1])
-    ni = (nx, ny)
-    li = (lx, ly)
+    mesh = segmented_grid_2D(;
+        nel_x = nel_x, coord_x = coord_x,
+        nel_y = nel_y, coord_y = coord_y,
+        bias_x = bias_x, bias_y = bias_y,
+    )
+    (; xvi, ni, li, origin) = mesh
+    nx, ny = ni
+    lx, ly = li
 
     isnothing(VTK) && (VTK = (;
             do_vtk = true,
@@ -171,12 +177,12 @@ function main(
         ))
     prepare_vtk!(VTK)
 
-    staggered_grid, ph_vertex, _T = simple_shear_2D(
-        nx + 1, ny + 1, coord_x, coord_y, 1250.0, fault, VTK
-    )
-    grid = Geometry(ni, li; origin = origin)
+    staggered_grid, ph_vertex, _T = simple_shear_2D(xvi, 1250.0, fault, VTK)
+    # Nonuniform Geometry: di/center/vertex are vectors; DYREL kernels use @dxi/@dx/@dy
+    grid = Geometry(xvi)
     (; xci, xvi) = grid
     @assert xvi[1][1] ≈ staggered_grid.xvi[1][1]
+    @assert grid.ni == ni
 
     rheology = init_rheology_simple_shear(; η = η0, G = G0, ν = ν)
     phase_ratios = PhaseRatios(backend_JP, length(rheology), ni)
@@ -186,7 +192,9 @@ function main(
     rsf_bundle = nothing
     if rsf_enabled
         loc = get(rsf_nt, :loc, :both)
-        ctrl = build_rate_state_controller(rsf_nt; nphases = length(rheology), di = (lx / nx, ly / ny))
+        # Wf default uses min cell size (fault width floor)
+        di_min = ntuple(d -> minimum(Array(grid.di.vertex[d])), 2)
+        ctrl = build_rate_state_controller(rsf_nt; nphases = length(rheology), di = di_min)
         fields = RateStateArrays(backend, ni; loc = loc)
         init_rate_state_fields!(fields, ctrl, phase_ratios, xci, xvi)
         rsf_bundle = (; ctrl = ctrl, fields = fields)
@@ -220,11 +228,17 @@ function main(
     Vy_v = @zeros(ni .+ 1...)
     zeros_c = zeros(nx, ny)
 
+    # grid.di is a NamedTuple of (possibly vector) spacings — DYREL / Gershgorin use @dx/@dy
     dyrel = DYREL(backend, stokes, rheology, phase_ratios, grid.di, dt; ϵ = 1.0e-6)
     εbg = V_top / ly
     dt_rsf_switch = rsf_enabled ? Float64(get(rsf_nt, :dt_rsf_switch, 1.0e9)) : Inf
     dt_min = rsf_enabled ? Float64(get(rsf_nt, :dt_min, 1.0e-2)) : 0.0
     dt_max = rsf_enabled ? Float64(get(rsf_nt, :dt_max, 1.0e7)) : Inf
+
+    println(
+        "grid: ni=$ni; Δx∈$(extrema(Array(grid.di.vertex[1]))); " *
+            "Δy∈$(extrema(Array(grid.di.vertex[2]))); periodic_x OK (uniform Δx)"
+    )
 
     t, it = 0.0, 0
     for _ in 1:nsteps
@@ -242,7 +256,7 @@ function main(
             kwargs = (;
                 verbose_PH = true,
                 verbose_DR = false,
-                iterMax = 50.0e1,
+                iterMax = 50.0e3,
                 nout = 10,
                 rel_drop = 1.0e-2,
                 linear_viscosity = true,
@@ -276,21 +290,23 @@ function main(
 end
 
 # -----------------------------------------------------------------------------
-# Smoke / default run (reduce nx, ny, nsteps for quick checks)
-nx = 300
-ny = 300
-coord_x = -75.0e3, 75.0e3
-coord_y = -150.0e3, 0.0
+# Default run — LaMEM-style segments (Herrendörfer / Shear_test_PBC)
+# Periodic x: single uniform segment. Refined y around the fault band.
+nel_x = 300
+coord_x = (-75.0e3, 75.0e3)
+nel_y = (10, 4, 10)                          # cells per y-segment (LaMEM nel_z)
+coord_y = (-150.0e3, -76.0e3, -74.0e3, 0.0)  # segment boundaries (LaMEM coord_z)
 fault = (; x = (-75.0e3, 75.0e3), y = (-75.2e3, -74.8e3))
 V_top = 4.0e-9
 dt = 500.0
 nsteps = 103000
+nx, ny = sum(nel_x isa Integer ? (nel_x,) : Tuple(nel_x)), sum(nel_y isa Integer ? (nel_y,) : Tuple(nel_y))
 
 RSF = (
     enabled = true,
     affect_stokes = true,
     # LaMEM: constitutive RSF on cells and XY edges (JR centers + vertices)
-    loc = :both,
+    loc = :vertex,
     V0 = 4.0e-9,
     dt_min = 1.0e-1,
     dt_max = 1.0e7,
@@ -339,9 +355,9 @@ end
 
 @time main(
     igg;
-    nx = nx,
-    ny = ny,
+    nel_x = nel_x,
     coord_x = coord_x,
+    nel_y = nel_y,
     coord_y = coord_y,
     fault = fault,
     V_top = V_top,

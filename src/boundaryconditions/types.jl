@@ -269,6 +269,10 @@ The momentum row of a periodic seam only exists if `stokes` was allocated for it
 `StokesArrays(backend, ni, bcs)` does; a `stokes` built without the boundary conditions leaves that
 row out and the seam velocity is then frozen at its initial value. The other two conditions mark
 combinations that are not implemented rather than ones that are wrong in principle.
+
+Periodic directions must have **uniform** cell-center spacing (scalar, or a vector whose
+entries are equal). Nonuniform spacing is allowed on non-periodic axes
+(e.g. refined `y` with periodic `x`).
 """
 function check_periodic_bcs(stokes, bcs::AbstractFlowBoundaryConditions, igg, di_center)
     bc_periodic = periodic_dims(bcs)
@@ -288,13 +292,23 @@ function check_periodic_bcs(stokes, bcs::AbstractFlowBoundaryConditions, igg, di
     )
 
     for (d, isperiodic) in enumerate(bc_periodic)
-        isperiodic && di_center[d] isa AbstractVector && error(
+        isperiodic && !_spacing_is_uniform(di_center[d]) && error(
             "Periodic boundary conditions require uniform grid spacing in the periodic \
             direction; direction $d has a variable cell-center spacing. The seam face spans the \
             wrap, so a single spacing value has to describe it."
         )
     end
     return nothing
+end
+
+"""True if spacing is a scalar or a vector of (numerically) equal entries."""
+@inline function _spacing_is_uniform(d; rtol = 1.0e-12)
+    d isa Number && return true
+    d isa AbstractVector || return false
+    isempty(d) && return true
+    d0 = float(first(d))
+    tol = rtol * max(abs(d0), floatmin(typeof(d0)))
+    return all(x -> abs(float(x) - d0) ≤ tol, d)
 end
 
 # The flow boundary conditions sit at a different position in each `solve!` signature, so the

@@ -289,6 +289,37 @@ end
 end
 
 """
+    check_Vp_rsf!(rsf_arr; Vp_max_abs=100.0)
+
+Error if any masked `Vp` / `Vp_v` is non-finite or `|Vp| > Vp_max_abs` (default 100 m/s).
+"""
+function check_Vp_rsf!(rsf_arr::RateStateArrays; Vp_max_abs = 100.0)
+    if rsf_do_center(rsf_arr)
+        _check_Vp_rsf_field!(rsf_arr.Vp, rsf_arr.rsf_mask, "center"; Vp_max_abs = Vp_max_abs)
+    end
+    if rsf_do_vertex(rsf_arr)
+        _check_Vp_rsf_field!(rsf_arr.Vp_v, rsf_arr.rsf_mask_v, "vertex"; Vp_max_abs = Vp_max_abs)
+    end
+    return nothing
+end
+
+function _check_Vp_rsf_field!(Vp, mask, loc::AbstractString; Vp_max_abs = 100.0)
+    Vp_a = Array(Vp)
+    mask_a = Array(mask)
+    @inbounds for idx in eachindex(Vp_a)
+        mask_a[idx] ≤ 0.5 && continue
+        v = Vp_a[idx]
+        if !(isfinite(v)) || abs(v) > Vp_max_abs
+            error(
+                "Vp_rsf ($loc) invalid at linear index $idx: $v \
+                (must be finite and |Vp| ≤ $Vp_max_abs)"
+            )
+        end
+    end
+    return nothing
+end
+
+"""
     enforce_rsf_stress!(stokes, rsf_arr, ctrl)
 
 Scale center stress so ``τII = τ_rsf`` on RSF cells (diagnostic / optional closure).
@@ -332,7 +363,8 @@ After APT convergence: LaMEM-style state update on centers and/or vertices.
 `Vp` from stress with frozen `Ω_old`, then `Ω` advanced and copied to `Ω_old`.
 """
 function update_rate_state!(
-        rsf_arr::RateStateArrays, stokes, ctrl::RateStateController, phase_ratios, dt
+        rsf_arr::RateStateArrays, stokes, ctrl::RateStateController, phase_ratios, dt;
+        Vp_max_abs = 100.0,
     )
     ctrl.enabled || return nothing
     if rsf_do_center(rsf_arr)
@@ -372,6 +404,7 @@ function update_rate_state!(
             periodic,
         )
     end
+    check_Vp_rsf!(rsf_arr; Vp_max_abs = Vp_max_abs)
     return nothing
 end
 

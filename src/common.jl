@@ -141,6 +141,7 @@ include("rheology/RateStateKernels.jl")
 export init_rate_state_fields!,
     refresh_rsf_ab_mask!,
     apply_rsf_viscosity!,
+    check_Vp_rsf!,
     enforce_rsf_stress!,
     update_rate_state!,
     compute_dt_ratestate_grid

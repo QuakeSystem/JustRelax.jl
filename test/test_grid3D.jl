@@ -45,6 +45,8 @@ using Test, Suppressor, JustRelax, JustRelax.JustRelax3D
         @test grid_nu.max_li == 2.0
         @test grid_nu.xci[2] == (xv2[1:(end - 1)] .+ xv2[2:end]) ./ 2
         @test grid_nu.di.vertex[2] == diff(xv2)
+        @test length.(grid_nu.di.vertex) == grid_nu.ni
+        @test length.(grid_nu.di.center) == grid_nu.ni
         @test length(grid_nu.xi_vel) == 3
         # ghost cells extend the transverse directions by 2 in 3D as well
         @test length(grid_nu.xi_vel[1][2]) == length(grid_nu.xci[2]) + 2

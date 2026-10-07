@@ -81,9 +81,15 @@ function Geometry(TA::Type{A}, xvi::Vararg{T, nDim}) where {nDim, A <: AbstractA
     li = ntuple(i -> lims[i][2] - lims[i][1], Val(nDim))
     max_li = reduce(max, li)
     origin = ntuple(i -> lims[i][1], Val(nDim))
-    di_vertex = diff.(xvi)
-    di_center = diff.(xci)
-    xi_vel_cpu = velocity_grids(xci, xvi, di_center)
+    di_vertex = diff.(xvi)                 # length ni: cell width at cell i
+    di_center_raw = diff.(xci)             # length ni-1: spacing between centers i and i+1
+    # Pad to length `ni` so kernels that index faces/cells `1:ni` (periodic seam) stay in bounds.
+    # Last entry ≈ wrap spacing between the last and first cell centers.
+    di_center = ntuple(Val(nDim)) do d
+        vcat(di_center_raw[d], 0.5 * (di_vertex[d][1] + di_vertex[d][end]))
+    end
+    # Ghost velocity nodes use the unpadded center diffs (physical interior spacing).
+    xi_vel_cpu = velocity_grids(xci, xvi, di_center_raw)
     xi_vel = ntuple(i -> TA.(xi_vel_cpu[i]), Val(nDim))
     di_vel = ntuple(i -> diff.(xi_vel[i]), Val(nDim))
     di = (; center = TA.(di_center), vertex = TA.(di_vertex), velocity = di_vel)

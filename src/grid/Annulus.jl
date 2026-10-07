@@ -86,8 +86,11 @@ function GeometryAnnulus(TA::Type{A}, xvi::Vararg{T, nDim}) where {nDim, A <: Ab
     max_li = max(li...)
     origin = ntuple(i -> lims[i][1], Val(nDim))
     di_vertex = diff.(xvi)
-    di_center = diff.(xci)
-    xi_vel_cpu = velocity_grids(xci, xvi, di_center)
+    di_center_raw = diff.(xci)
+    di_center = ntuple(Val(nDim)) do d
+        vcat(di_center_raw[d], 0.5 * (di_vertex[d][1] + di_vertex[d][end]))
+    end
+    xi_vel_cpu = velocity_grids(xci, xvi, di_center_raw)
     xi_vel = ntuple(i -> TA.(xi_vel_cpu[i]), Val(nDim))
     di_vel = ntuple(i -> diff.(xi_vel[i]), Val(nDim))
     di = (; center = TA.(di_center), vertex = TA.(di_vertex), velocity = di_vel)
