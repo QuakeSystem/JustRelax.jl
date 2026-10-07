@@ -203,11 +203,13 @@ end
         )
         @test all(A -> all(isfinite, Array(A)), (stokes.R.Rx, stokes.R.Ry, stokes.R.Rz))
 
+        ρ_inertia = @zeros(local_ni...)
         @parallel (@idx local_ni) JR3K.compute_PH_residual_V!(
             stokes.R.Rx, stokes.R.Ry, stokes.R.Rz,
             stokes.V.Vx, stokes.V.Vy, stokes.V.Vz,
+            stokes.V0.Vx, stokes.V0.Vy, stokes.V0.Vz,
             stokes.P, stokes.ΔPψ, @stress(stokes)..., ρg...,
-            grid._di.center, grid._di.vertex, 0.0,
+            ρ_inertia, grid._di.center, grid._di.vertex, 0.0, 0.0,
         )
         @test all(A -> all(isfinite, Array(A)), (stokes.R.Rx, stokes.R.Ry, stokes.R.Rz))
 
@@ -234,13 +236,15 @@ end
         @parallel (@idx local_ni) JR3K.compute_DR_residual_update_V!(
             stokes.R.Rx, stokes.R.Ry, stokes.R.Rz,
             stokes.V.Vx, stokes.V.Vy, stokes.V.Vz,
+            stokes.V0.Vx, stokes.V0.Vy, stokes.V0.Vz,
             dyrel.dVxdτ, dyrel.dVydτ, dyrel.dVzdτ,
             stokes.P, θc, @stress(stokes)..., ρg...,
+            ρ_inertia,
             dyrel.Dx, dyrel.Dy, dyrel.Dz,
             dyrel.αVx, dyrel.αVy, dyrel.αVz,
             dyrel.βVx, dyrel.βVy, dyrel.βVz,
             dyrel.dτVx, dyrel.dτVy, dyrel.dτVz,
-            grid._di.center, grid._di.vertex, 0.0,
+            grid._di.center, grid._di.vertex, 0.0, 0.0,
         )
         @test all(A -> all(Array(A) .≈ -1.0), residuals)
         @test all(A -> all(Array(A) .≈ -1.0), dVdτ)
@@ -262,8 +266,9 @@ end
         @parallel (@idx local_ni) JR3K.compute_PH_residual_V!(
             stokes.R.Rx, stokes.R.Ry, stokes.R.Rz,
             stokes.V.Vx, stokes.V.Vy, stokes.V.Vz,
+            stokes.V0.Vx, stokes.V0.Vy, stokes.V0.Vz,
             stokes.P, stokes.ΔPψ, @stress(stokes)..., ρg...,
-            grid._di.center, grid._di.vertex, 0.5,
+            ρ_inertia, grid._di.center, grid._di.vertex, 0.5, 0.0,
         )
         expected_correction = 2.0 * grid._di.center[3] * 0.5
         @test Array(stokes.R.Rx) ≈ Array(PH_unstabilized[1])
@@ -275,25 +280,29 @@ end
         @parallel (@idx local_ni) JR3K.compute_DR_residual_update_V!(
             stokes.R.Rx, stokes.R.Ry, stokes.R.Rz,
             stokes.V.Vx, stokes.V.Vy, stokes.V.Vz,
+            stokes.V0.Vx, stokes.V0.Vy, stokes.V0.Vz,
             dyrel.dVxdτ, dyrel.dVydτ, dyrel.dVzdτ,
             stokes.P, θc, @stress(stokes)..., ρg...,
+            ρ_inertia,
             dyrel.Dx, dyrel.Dy, dyrel.Dz,
             dyrel.αVx, dyrel.αVy, dyrel.αVz,
             dyrel.βVx, dyrel.βVy, dyrel.βVz,
             dyrel.dτVx, dyrel.dτVy, dyrel.dτVz,
-            grid._di.center, grid._di.vertex, 0.0,
+            grid._di.center, grid._di.vertex, 0.0, 0.0,
         )
         DR_unstabilized = map(copy, residuals)
         @parallel (@idx local_ni) JR3K.compute_DR_residual_update_V!(
             stokes.R.Rx, stokes.R.Ry, stokes.R.Rz,
             stokes.V.Vx, stokes.V.Vy, stokes.V.Vz,
+            stokes.V0.Vx, stokes.V0.Vy, stokes.V0.Vz,
             dyrel.dVxdτ, dyrel.dVydτ, dyrel.dVzdτ,
             stokes.P, θc, @stress(stokes)..., ρg...,
+            ρ_inertia,
             dyrel.Dx, dyrel.Dy, dyrel.Dz,
             dyrel.αVx, dyrel.αVy, dyrel.αVz,
             dyrel.βVx, dyrel.βVy, dyrel.βVz,
             dyrel.dτVx, dyrel.dτVy, dyrel.dτVz,
-            grid._di.center, grid._di.vertex, 0.5,
+            grid._di.center, grid._di.vertex, 0.5, 0.0,
         )
         @test Array(stokes.R.Rx) ≈ Array(DR_unstabilized[1])
         @test Array(stokes.R.Ry) ≈ Array(DR_unstabilized[2])

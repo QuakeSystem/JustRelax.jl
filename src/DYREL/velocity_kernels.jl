@@ -359,6 +359,8 @@ end
         Ry,
         Vx,
         Vy,
+        Vx0,
+        Vy0,
         P,
         ΔPψ,
         τxx,
@@ -366,11 +368,14 @@ end
         τxy,
         ρgx,
         ρgy,
+        ρ_inertia,
         _di_center,
         _di_vertex,
         dt,
+        _inv_dt,
     ) where {T}
     # See the overload above: cell-centred fields wrap, the vertex field `τxy` does not.
+    # Physical inertia: face-averaged ρ (V − V0)/dt (`_inv_dt = 1/dt`, or 0 when off).
     Base.@propagate_inbounds @inline av_xa(A) = _av_xa_wrap(A, i, j)
     Base.@propagate_inbounds @inline av_ya(A) = _av_ya_wrap(A, i, j)
 
@@ -380,7 +385,9 @@ end
         _dy_v = @dy(_di_vertex, j)
         Base.@propagate_inbounds @inline d_xa(A) = _d_xa_wrap(A, _dx_c, i, j)
         Base.@propagate_inbounds @inline d_yi(A) = _d_yi(A, _dy_v, i, j)
-        Rx[i, j] = d_xa(τxx) + d_yi(τxy) - d_xa(P) - d_xa(ΔPψ) - av_xa(ρgx)
+        Vxᵢⱼ = Vx[i + 1, j + 1]
+        Rx[i, j] = d_xa(τxx) + d_yi(τxy) - d_xa(P) - d_xa(ΔPψ) - av_xa(ρgx) -
+            av_xa(ρ_inertia) * _inv_dt * (Vxᵢⱼ - Vx0[i + 1, j + 1])
     end
 
     if i ≤ size(Ry, 1) && j ≤ size(Ry, 2)
@@ -400,7 +407,8 @@ end
         # correction term
         ρg_correction = (Vyᵢⱼ * ∂ρg∂y) * θ * dt
 
-        Ry[i, j] = d_ya(τyy) + d_xi(τxy) - d_ya(P) - d_ya(ΔPψ) - av_ya(ρgy) + ρg_correction
+        Ry[i, j] = d_ya(τyy) + d_xi(τxy) - d_ya(P) - d_ya(ΔPψ) - av_ya(ρgy) + ρg_correction -
+            av_ya(ρ_inertia) * _inv_dt * (Vyᵢⱼ - Vy0[i + 1, j + 1])
     end
 
     return nothing
@@ -458,13 +466,14 @@ end
 end
 
 @parallel_indices (i, j, k) function compute_PH_residual_V!(
-        Rx::AbstractArray{T, 3}, Ry, Rz, Vx, Vy, Vz, P, ΔPψ, τxx, τyy, τzz, τyz, τxz, τxy, ρgx, ρgy, ρgz, _di_center, _di_vertex, dt
+        Rx::AbstractArray{T, 3}, Ry, Rz, Vx, Vy, Vz, Vx0, Vy0, Vz0, P, ΔPψ, τxx, τyy, τzz, τyz, τxz, τxy, ρgx, ρgy, ρgz, ρ_inertia, _di_center, _di_vertex, dt, _inv_dt
     ) where {T}
 
     # Cell-centred fields are differenced with the wrapping stencil: a momentum row reaches the
     # last cell index only when its direction is periodic, and that row is the seam face, whose
     # forward neighbour is cell 1. The vertex reads (`τxy`, `τxz`, `τyz`) and the velocity writes
     # land on the seam plane of their own arrays and need no wrap.
+    # Physical inertia: face-averaged ρ (V − V0)/dt (`_inv_dt = 1/dt` or 0).
     Base.@propagate_inbounds @inline d_xa(A, _dx) = _d_xa_wrap(A, _dx, i, j, k)
     Base.@propagate_inbounds @inline d_ya(A, _dy) = _d_ya_wrap(A, _dy, i, j, k)
     Base.@propagate_inbounds @inline d_za(A, _dz) = _d_za_wrap(A, _dz, i, j, k)
@@ -476,37 +485,43 @@ end
         _dx = @dx(_di_center, i)
         _dy = @dy(_di_vertex, j)
         _dz = @dz(_di_vertex, k)
+        Vxᵢⱼₖ = Vx[i + 1, j + 1, k + 1]
 
         Rx[i, j, k] =
             d_xa(τxx, _dx) +
             _dy * (τxy[i + 1, j + 1, k] - τxy[i + 1, j, k]) +
             _dz * (τxz[i + 1, j, k + 1] - τxz[i + 1, j, k]) -
-            d_xa(P, _dx) - d_xa(ΔPψ, _dx) - av_x(ρgx)
+            d_xa(P, _dx) - d_xa(ΔPψ, _dx) - av_x(ρgx) -
+            av_x(ρ_inertia) * _inv_dt * (Vxᵢⱼₖ - Vx0[i + 1, j + 1, k + 1])
     end
     if i ≤ size(Ry, 1) && j ≤ size(Ry, 2) && k ≤ size(Ry, 3)
         _dx = @dx(_di_vertex, i)
         _dy = @dy(_di_center, j)
         _dz = @dz(_di_vertex, k)
+        Vyᵢⱼₖ = Vy[i + 1, j + 1, k + 1]
 
         Ry[i, j, k] =
             d_ya(τyy, _dy) +
             _dx * (τxy[i + 1, j + 1, k] - τxy[i, j + 1, k]) +
             _dz * (τyz[i, j + 1, k + 1] - τyz[i, j + 1, k]) -
-            d_ya(P, _dy) - d_ya(ΔPψ, _dy) - av_y(ρgy)
+            d_ya(P, _dy) - d_ya(ΔPψ, _dy) - av_y(ρgy) -
+            av_y(ρ_inertia) * _inv_dt * (Vyᵢⱼₖ - Vy0[i + 1, j + 1, k + 1])
     end
     if i ≤ size(Rz, 1) && j ≤ size(Rz, 2) && k ≤ size(Rz, 3)
         _dx = @dx(_di_vertex, i)
         _dy = @dy(_di_vertex, j)
         _dz = @dz(_di_center, k)
 
+        Vzᵢⱼₖ = Vz[i + 1, j + 1, k + 1]
         k_T = wrap_next(k, size(ρgz, 3))
         ∂ρg∂z = (ρgz[i, j, k_T] - ρgz[i, j, k]) * _dz
-        ρg_correction = Vz[i + 1, j + 1, k + 1] * ∂ρg∂z * dt
+        ρg_correction = Vzᵢⱼₖ * ∂ρg∂z * dt
         Rz[i, j, k] =
             d_za(τzz, _dz) +
             _dx * (τxz[i + 1, j, k + 1] - τxz[i, j, k + 1]) +
             _dy * (τyz[i, j + 1, k + 1] - τyz[i, j, k + 1]) -
-            d_za(P, _dz) - d_za(ΔPψ, _dz) - av_z(ρgz) + ρg_correction
+            d_za(P, _dz) - d_za(ΔPψ, _dz) - av_z(ρgz) + ρg_correction -
+            av_z(ρ_inertia) * _inv_dt * (Vzᵢⱼₖ - Vz0[i + 1, j + 1, k + 1])
     end
     return nothing
 end
@@ -663,6 +678,8 @@ end
         Ry,
         Vx,
         Vy,
+        Vx0,
+        Vy0,
         dVxdτ,
         dVydτ,
         P,
@@ -672,6 +689,7 @@ end
         τxy,
         ρgx,
         ρgy,
+        ρ_inertia,
         Dx,
         Dy,
         αVx,
@@ -683,11 +701,13 @@ end
         _di_center,
         _di_vertex,
         dt,
+        _inv_dt,
     ) where {T}
     # Cell-centred fields are differenced with the wrapping stencil: a momentum row reaches the
     # last cell index only when its direction is periodic, and that row is the seam face, whose
     # forward neighbour is cell 1. Vertex reads (`τxy`) and the velocity write land on the seam
     # plane of their own arrays and need no wrap.
+    # Physical inertia: face-averaged ρ (V − V0)/dt (`_inv_dt = 1/dt` or 0).
     Base.@propagate_inbounds @inline av_xa(A) = _av_xa_wrap(A, i, j)
     Base.@propagate_inbounds @inline av_ya(A) = _av_ya_wrap(A, i, j)
 
@@ -697,7 +717,11 @@ end
             _dy_v = @dy(_di_vertex, j)
             Base.@propagate_inbounds @inline d_xa(A) = _d_xa_wrap(A, _dx_c, i, j)
             Base.@propagate_inbounds @inline d_yi(A) = _d_yi(A, _dy_v, i, j)
-            Rx_ij = (d_xa(τxx) + d_yi(τxy) - d_xa(P) - d_xa(θc) - av_xa(ρgx)) / Dx[i, j]
+            Vxᵢⱼ = Vx[i + 1, j + 1]
+            Rx_ij = (
+                d_xa(τxx) + d_yi(τxy) - d_xa(P) - d_xa(θc) - av_xa(ρgx) -
+                    av_xa(ρ_inertia) * _inv_dt * (Vxᵢⱼ - Vx0[i + 1, j + 1])
+            ) / Dx[i, j]
             Rx[i, j] = Rx_ij
 
             dVx_new, ΔVx = damped_update_V(dVxdτ[i, j], Rx_ij, αVx[i, j], βVx[i, j], dτVx[i, j])
@@ -710,9 +734,13 @@ end
             Base.@propagate_inbounds @inline d_ya(A) = _d_ya_wrap(A, _dy_c, i, j)
             Base.@propagate_inbounds @inline d_xi(A) = _d_xi(A, _dx_v, i, j)
             j_N = wrap_next(j, size(ρgy, 2))
+            Vyᵢⱼ = Vy[i + 1, j + 1]
             ∂ρg∂y = (ρgy[i, j_N] - ρgy[i, j]) * _dy_c
-            ρg_correction = Vy[i + 1, j + 1] * ∂ρg∂y * dt
-            Ry_ij = (d_ya(τyy) + d_xi(τxy) - d_ya(P) - d_ya(θc) - av_ya(ρgy) + ρg_correction) / Dy[i, j]
+            ρg_correction = Vyᵢⱼ * ∂ρg∂y * dt
+            Ry_ij = (
+                d_ya(τyy) + d_xi(τxy) - d_ya(P) - d_ya(θc) - av_ya(ρgy) + ρg_correction -
+                    av_ya(ρ_inertia) * _inv_dt * (Vyᵢⱼ - Vy0[i + 1, j + 1])
+            ) / Dy[i, j]
             Ry[i, j] = Ry_ij
 
             dVy_new, ΔVy = damped_update_V(dVydτ[i, j], Ry_ij, αVy[i, j], βVy[i, j], dτVy[i, j])
@@ -724,6 +752,36 @@ end
     return nothing
 end
 
+"""Add face-averaged mass ``ρ/dt`` to the Gershgorin diagonal / λmax (2D). No-op when `_inv_dt == 0`."""
+@parallel_indices (i, j) function _add_inertia_diagonal_2D!(Dx, Dy, λmaxVx, λmaxVy, ρ_inertia, _inv_dt)
+    Base.@propagate_inbounds @inline av_xa(A) = _av_xa_wrap(A, i, j)
+    Base.@propagate_inbounds @inline av_ya(A) = _av_ya_wrap(A, i, j)
+    @inbounds begin
+        if i ≤ size(Dx, 1) && j ≤ size(Dx, 2)
+            m = av_xa(ρ_inertia) * _inv_dt
+            D_old = Dx[i, j]
+            D_new = D_old + m
+            λmaxVx[i, j] = (λmaxVx[i, j] * D_old + m) / D_new
+            Dx[i, j] = D_new
+        end
+        if i ≤ size(Dy, 1) && j ≤ size(Dy, 2)
+            m = av_ya(ρ_inertia) * _inv_dt
+            D_old = Dy[i, j]
+            D_new = D_old + m
+            λmaxVy[i, j] = (λmaxVy[i, j] * D_old + m) / D_new
+            Dy[i, j] = D_new
+        end
+    end
+    return nothing
+end
+
+function add_inertia_diagonal!(Dx, Dy, λmaxVx, λmaxVy, ρ_inertia, _inv_dt)
+    iszero(_inv_dt) && return nothing
+    ni = size(Dx)
+    @parallel (@idx ni) _add_inertia_diagonal_2D!(Dx, Dy, λmaxVx, λmaxVy, ρ_inertia, _inv_dt)
+    return nothing
+end
+
 @parallel_indices (i, j, k) function compute_DR_residual_update_V!(
         Rx::AbstractArray{T, 3},
         Ry,
@@ -731,6 +789,9 @@ end
         Vx,
         Vy,
         Vz,
+        Vx0,
+        Vy0,
+        Vz0,
         dVxdτ,
         dVydτ,
         dVzdτ,
@@ -745,6 +806,7 @@ end
         ρgx,
         ρgy,
         ρgz,
+        ρ_inertia,
         Dx,
         Dy,
         Dz,
@@ -760,12 +822,14 @@ end
         _di_center,
         _di_vertex,
         dt,
+        _inv_dt,
     ) where {T}
 
     # Cell-centred fields are differenced with the wrapping stencil: a momentum row reaches the
     # last cell index only when its direction is periodic, and that row is the seam face, whose
     # forward neighbour is cell 1. The vertex reads (`τxy`, `τxz`, `τyz`) and the velocity writes
     # land on the seam plane of their own arrays and need no wrap.
+    # Physical inertia: face-averaged ρ (V − V0)/dt (`_inv_dt = 1/dt` or 0).
     Base.@propagate_inbounds @inline d_xa(A, _dx) = _d_xa_wrap(A, _dx, i, j, k)
     Base.@propagate_inbounds @inline d_ya(A, _dy) = _d_ya_wrap(A, _dy, i, j, k)
     Base.@propagate_inbounds @inline d_za(A, _dz) = _d_za_wrap(A, _dz, i, j, k)
@@ -778,13 +842,15 @@ end
             _dx = @dx(_di_center, i)
             _dy = @dy(_di_vertex, j)
             _dz = @dz(_di_vertex, k)
+            Vxᵢⱼₖ = Vx[i + 1, j + 1, k + 1]
 
             Rx_ijk =
                 (
                 d_xa(τxx, _dx) +
                     _dy * (τxy[i + 1, j + 1, k] - τxy[i + 1, j, k]) +
                     _dz * (τxz[i + 1, j, k + 1] - τxz[i + 1, j, k]) -
-                    d_xa(P, _dx) - d_xa(θc, _dx) - av_x(ρgx)
+                    d_xa(P, _dx) - d_xa(θc, _dx) - av_x(ρgx) -
+                    av_x(ρ_inertia) * _inv_dt * (Vxᵢⱼₖ - Vx0[i + 1, j + 1, k + 1])
             ) / Dx[i, j, k]
             Rx[i, j, k] = Rx_ijk
 
@@ -796,13 +862,15 @@ end
             _dx = @dx(_di_vertex, i)
             _dy = @dy(_di_center, j)
             _dz = @dz(_di_vertex, k)
+            Vyᵢⱼₖ = Vy[i + 1, j + 1, k + 1]
 
             Ry_ijk =
                 (
                 d_ya(τyy, _dy) +
                     _dx * (τxy[i + 1, j + 1, k] - τxy[i, j + 1, k]) +
                     _dz * (τyz[i, j + 1, k + 1] - τyz[i, j + 1, k]) -
-                    d_ya(P, _dy) - d_ya(θc, _dy) - av_y(ρgy)
+                    d_ya(P, _dy) - d_ya(θc, _dy) - av_y(ρgy) -
+                    av_y(ρ_inertia) * _inv_dt * (Vyᵢⱼₖ - Vy0[i + 1, j + 1, k + 1])
             ) / Dy[i, j, k]
             Ry[i, j, k] = Ry_ijk
 
@@ -814,15 +882,17 @@ end
             _dx = @dx(_di_vertex, i)
             _dy = @dy(_di_vertex, j)
             _dz = @dz(_di_center, k)
+            Vzᵢⱼₖ = Vz[i + 1, j + 1, k + 1]
             k_T = wrap_next(k, size(ρgz, 3))
             ∂ρg∂z = (ρgz[i, j, k_T] - ρgz[i, j, k]) * _dz
-            ρg_correction = Vz[i + 1, j + 1, k + 1] * ∂ρg∂z * dt
+            ρg_correction = Vzᵢⱼₖ * ∂ρg∂z * dt
             Rz_ijk =
                 (
                 d_za(τzz, _dz) +
                     _dx * (τxz[i + 1, j, k + 1] - τxz[i, j, k + 1]) +
                     _dy * (τyz[i, j + 1, k + 1] - τyz[i, j, k + 1]) -
-                    d_za(P, _dz) - d_za(θc, _dz) - av_z(ρgz) + ρg_correction
+                    d_za(P, _dz) - d_za(θc, _dz) - av_z(ρgz) + ρg_correction -
+                    av_z(ρ_inertia) * _inv_dt * (Vzᵢⱼₖ - Vz0[i + 1, j + 1, k + 1])
             ) / Dz[i, j, k]
             Rz[i, j, k] = Rz_ijk
 
@@ -832,5 +902,42 @@ end
         end
     end
 
+    return nothing
+end
+
+@parallel_indices (i, j, k) function _add_inertia_diagonal_3D!(Dx, Dy, Dz, λmaxVx, λmaxVy, λmaxVz, ρ_inertia, _inv_dt)
+    Base.@propagate_inbounds @inline av_x(A) = _av_xa_wrap(A, i, j, k)
+    Base.@propagate_inbounds @inline av_y(A) = _av_ya_wrap(A, i, j, k)
+    Base.@propagate_inbounds @inline av_z(A) = _av_za_wrap(A, i, j, k)
+    @inbounds begin
+        if i ≤ size(Dx, 1) && j ≤ size(Dx, 2) && k ≤ size(Dx, 3)
+            m = av_x(ρ_inertia) * _inv_dt
+            D_old = Dx[i, j, k]
+            D_new = D_old + m
+            λmaxVx[i, j, k] = (λmaxVx[i, j, k] * D_old + m) / D_new
+            Dx[i, j, k] = D_new
+        end
+        if i ≤ size(Dy, 1) && j ≤ size(Dy, 2) && k ≤ size(Dy, 3)
+            m = av_y(ρ_inertia) * _inv_dt
+            D_old = Dy[i, j, k]
+            D_new = D_old + m
+            λmaxVy[i, j, k] = (λmaxVy[i, j, k] * D_old + m) / D_new
+            Dy[i, j, k] = D_new
+        end
+        if i ≤ size(Dz, 1) && j ≤ size(Dz, 2) && k ≤ size(Dz, 3)
+            m = av_z(ρ_inertia) * _inv_dt
+            D_old = Dz[i, j, k]
+            D_new = D_old + m
+            λmaxVz[i, j, k] = (λmaxVz[i, j, k] * D_old + m) / D_new
+            Dz[i, j, k] = D_new
+        end
+    end
+    return nothing
+end
+
+function add_inertia_diagonal!(Dx, Dy, Dz, λmaxVx, λmaxVy, λmaxVz, ρ_inertia, _inv_dt)
+    iszero(_inv_dt) && return nothing
+    ni = size(Dx)
+    @parallel (@idx ni) _add_inertia_diagonal_3D!(Dx, Dy, Dz, λmaxVx, λmaxVy, λmaxVz, ρ_inertia, _inv_dt)
     return nothing
 end

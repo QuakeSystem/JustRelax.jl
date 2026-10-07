@@ -34,6 +34,9 @@ const BackendArray = PTArray(backend)
     @test typeof(stokes.P0) <: BackendArray
     @test typeof(stokes.∇V) <: BackendArray
     @test stokes.V isa JustRelax.Velocity
+    @test stokes.V0 isa JustRelax.Velocity
+    @test size(stokes.V0.Vx) == size(stokes.V.Vx)
+    @test size(stokes.V0.Vy) == size(stokes.V.Vy)
     @test stokes.U isa JustRelax.Displacement
     @test stokes.ω isa JustRelax.Vorticity
     @test stokes.τ isa JustRelax.SymmetricTensor
@@ -155,6 +158,10 @@ end
     @test typeof(stokes.P0) <: BackendArray
     @test typeof(stokes.∇V) <: BackendArray
     @test stokes.V isa JustRelax.Velocity
+    @test stokes.V0 isa JustRelax.Velocity
+    @test size(stokes.V0.Vx) == size(stokes.V.Vx)
+    @test size(stokes.V0.Vy) == size(stokes.V.Vy)
+    @test size(stokes.V0.Vz) == size(stokes.V.Vz)
     @test stokes.U isa JustRelax.Displacement
     @test stokes.ω isa JustRelax.Vorticity
     @test stokes.τ isa JustRelax.SymmetricTensor

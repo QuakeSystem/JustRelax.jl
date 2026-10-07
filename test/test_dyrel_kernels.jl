@@ -195,11 +195,13 @@ end
         @test all(isfinite, Array(stokes.R.Rx))
         @test all(isfinite, Array(stokes.R.Ry))
 
+        ρ_inertia = @zeros(ni...)
         @parallel (@idx ni) JR2K.compute_PH_residual_V!(
             stokes.R.Rx, stokes.R.Ry, stokes.V.Vx, stokes.V.Vy,
+            stokes.V0.Vx, stokes.V0.Vy,
             stokes.P, stokes.ΔPψ,
             stokes.τ.xx, stokes.τ.yy, stokes.τ.xy, ρg...,
-            _di.center, _di.vertex, 0.0,
+            ρ_inertia, _di.center, _di.vertex, 0.0, 0.0,
         )
         @test all(isfinite, Array(stokes.R.Rx))
         @test all(isfinite, Array(stokes.R.Ry))
@@ -215,16 +217,18 @@ end
         @parallel (@idx ni) JR2K.compute_DR_residual_update_V!(
             stokes.R.Rx, stokes.R.Ry,
             stokes.V.Vx, stokes.V.Vy,
+            stokes.V0.Vx, stokes.V0.Vy,
             dyrel.dVxdτ, dyrel.dVydτ,
             stokes.P, θc,
             stokes.τ.xx, stokes.τ.yy, stokes.τ.xy,
             ρg...,
+            ρ_inertia,
             dyrel.Dx, dyrel.Dy,
             dyrel.αVx, dyrel.αVy,
             dyrel.βVx, dyrel.βVy,
             dyrel.dτVx, dyrel.dτVy,
             _di.center, _di.vertex,
-            0.0,
+            0.0, 0.0,
         )
         @test all(isfinite, Array(stokes.R.Rx))
         @test Array(stokes.V.Vx) == Array(Vx_before)
@@ -236,31 +240,35 @@ end
         @parallel (@idx ni) JR2K.compute_DR_residual_update_V!(
             stokes.R.Rx, stokes.R.Ry,
             stokes.V.Vx, stokes.V.Vy,
+            stokes.V0.Vx, stokes.V0.Vy,
             dyrel.dVxdτ, dyrel.dVydτ,
             stokes.P, θc,
             stokes.τ.xx, stokes.τ.yy, stokes.τ.xy,
             ρg...,
+            ρ_inertia,
             dyrel.Dx, dyrel.Dy,
             dyrel.αVx, dyrel.αVy,
             dyrel.βVx, dyrel.βVy,
             dyrel.dτVx, dyrel.dτVy,
             _di.center, _di.vertex,
-            0.0,
+            0.0, 0.0,
         )
         Ry_without_fs = copy(stokes.R.Ry)
         @parallel (@idx ni) JR2K.compute_DR_residual_update_V!(
             stokes.R.Rx, stokes.R.Ry,
             stokes.V.Vx, stokes.V.Vy,
+            stokes.V0.Vx, stokes.V0.Vy,
             dyrel.dVxdτ, dyrel.dVydτ,
             stokes.P, θc,
             stokes.τ.xx, stokes.τ.yy, stokes.τ.xy,
             ρg...,
+            ρ_inertia,
             dyrel.Dx, dyrel.Dy,
             dyrel.αVx, dyrel.αVy,
             dyrel.βVx, dyrel.βVy,
             dyrel.dτVx, dyrel.dτVy,
             _di.center, _di.vertex,
-            0.5,
+            0.5, 0.0,
         )
         ∂ρg∂y = -inv(grid.di.center[2])
         expected_correction = Array(stokes.V.Vy[2:(end - 1), 2:(end - 1)]) .* (0.5 * ∂ρg∂y)

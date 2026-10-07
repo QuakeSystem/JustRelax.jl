@@ -5,6 +5,7 @@ Herrendörfer-style viscoelastic simple shear with Rate-and-State Friction (DYRE
 - Bottom: no-slip; top: prescribed `V_top` [m/s]
 - Geometry: LaMEM-style segmented mesh (uniform x for periodicity; refined y) + GMG fault
 - RSF: frozen Ω during DYREL iterations; Ω → Ω_old after converged step
+- Inertia: optional LaMEM-style ``ρ (V − V0)/dt`` via `inertia` / `ρ_inertia` toggles
 - VTK: ParaView fields including Vp_rsf (LaMEM names)
 =#
 const isCUDA = false
@@ -156,6 +157,8 @@ function main(
         dt = 500.0,
         nsteps = 5,
         rsf_nt = nothing,
+        inertia = false,
+        ρ_inertia = nothing,   # nothing → use media density from rheology when inertia=true
         VTK = nothing,
     )
     mesh = segmented_grid_2D(;
@@ -240,6 +243,21 @@ function main(
             "Δy∈$(extrema(Array(grid.di.vertex[2]))); periodic_x OK (uniform Δx)"
     )
 
+    # Scalar ρ for inertia (uniform media/fault density in this setup)
+    ρ_for_inertia = if !inertia
+        0.0
+    elseif isnothing(ρ_inertia)
+        Float64(compute_density(rheology[1], (; T = 0.0, P = P0)))
+    else
+        Float64(ρ_inertia)
+    end
+    if inertia
+        println("inertia ON: ρ_inertia = $ρ_for_inertia")
+        # Start from rest old-velocity so the first step sees ρ V / dt
+        fill!(stokes.V0.Vx, 0.0)
+        fill!(stokes.V0.Vy, 0.0)
+    end
+
     t, it = 0.0, 0
     for _ in 1:nsteps
         out = solve_DYREL!(
@@ -262,8 +280,12 @@ function main(
                 linear_viscosity = true,
                 viscosity_cutoff = viscosity_cutoff,
                 rsf = rsf_bundle,
+                inertia = inertia,
+                ρ_inertia = ρ_for_inertia,
             )
         )
+        # Keep Dirichlet top wall under inertia updates
+        @views stokes.V.Vx[:, end] .= V_top
         tensor_invariant!(stokes.τ)
         tensor_invariant!(stokes.ε)
 
@@ -300,6 +322,9 @@ fault = (; x = (-75.0e3, 75.0e3), y = (-75.2e3, -74.8e3))
 V_top = 4.0e-9
 dt = 500.0
 nsteps = 103000
+# Physical inertia ρ(V−V0)/dt (LaMEM `inertia = 1`). Off by default — set true for inertial runs.
+inertia = true
+ρ_inertia = nothing  # nothing → 2700 from rheology Density
 nx, ny = sum(nel_x isa Integer ? (nel_x,) : Tuple(nel_x)), sum(nel_y isa Integer ? (nel_y,) : Tuple(nel_y))
 
 RSF = (
@@ -344,7 +369,7 @@ VTK = (;
     vtk_dir = joinpath(@__DIR__, "VTK", "vtk"),
     name = "simple_shear_herrendorfer",
     pvd_name = "simple_shear_herrendorfer",
-    vtk_every = 10,
+    vtk_every = 1,
 )
 
 igg = if !(JustRelax.MPI.Initialized())
@@ -364,5 +389,7 @@ end
     dt = dt,
     nsteps = nsteps,
     rsf_nt = RSF,
+    inertia = inertia,
+    ρ_inertia = ρ_inertia,
     VTK = VTK,
 )

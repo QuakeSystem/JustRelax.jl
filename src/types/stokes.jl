@@ -176,6 +176,7 @@ struct StokesArrays{A, B, C, D, E, F, T}
     P::T
     P0::T
     V::A
+    V0::A         # previous-step velocity (physical inertia: ρ(V − V0)/dt)
     ∇V::T
     Q::T # volumetric source/sink term
     τ::B

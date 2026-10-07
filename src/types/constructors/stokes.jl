@@ -298,6 +298,7 @@ to be built first.
 - `P0`: Previous pressure field
 - `∇V`: Velocity gradient
 - `V`: Velocity fields
+- `V0`: Previous-step velocity (physical inertia ``ρ(V − V0)/dt``)
 - `Q`: Volumetric source/sink term e.g. `ΔV/V_tot [m³/m³]`
 - `U`: Displacement fields
 - `ω`: Vorticity field
@@ -328,6 +329,7 @@ function StokesArrays(ni::NTuple{N, Integer}, periodic::NTuple{N, Bool}) where {
     P0 = @zeros(ni...)
     ∇V = @zeros(ni...)
     V = Velocity(ni...)
+    V0 = Velocity(ni...)
     Q = @zeros(ni...) # volumetric source/sink term
     U = Displacement(ni...)
     ω = Vorticity(ni...)
@@ -347,5 +349,7 @@ function StokesArrays(ni::NTuple{N, Integer}, periodic::NTuple{N, Bool}) where {
     λv_yz, λv_xz, λv_xy = stokes_vertex_λ_shear(ni)
     ΔPψ = @zeros(ni...)
 
-    return JustRelax.StokesArrays(P, P0, V, ∇V, Q, τ, ε, ε_pl, EII_pl, EVol_pl, ε_vol_pl, viscosity, τ_o, R, U, ω, Δε, ∇U, λ, λv, λv_yz, λv_xz, λv_xy, ΔPψ)
+    return JustRelax.StokesArrays(
+        P, P0, V, V0, ∇V, Q, τ, ε, ε_pl, EII_pl, EVol_pl, ε_vol_pl, viscosity, τ_o, R, U, ω, Δε, ∇U, λ, λv, λv_yz, λv_xz, λv_xy, ΔPψ
+    )
 end

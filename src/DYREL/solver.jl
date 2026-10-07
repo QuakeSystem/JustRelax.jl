@@ -45,6 +45,10 @@ Solve the Stokes system with the self-tuned dynamic relaxation (DYREL) method.
   equivalent creep buffer onto `η` / `ηv`. With `affect_stokes=false`, Stokes stays Maxwell-only
   and only `Vp`/`Ω` update after convergence. No ``τ → τ_rsf`` projection.
   Returns also `dt_rsf`, `Vp_max`.
+- `inertia`: Include physical inertia ``ρ (V − V0)/dt`` in the momentum residual (LaMEM-style).
+  Uses `stokes.V0` from the previous converged step. Default: `false`.
+- `ρ_inertia`: Density for the inertia term when `inertia=true`: a scalar (uniform) or a
+  cell-centred array (phase-dependent). Face values are averaged in the residual. Default: `0.0`.
 
 Options may be passed either as plain keywords or bundled as a single
 `kwargs = (; ...)` NamedTuple.
@@ -142,6 +146,8 @@ function _solve_DYREL!(
         free_surface = false,
         update_material = true,
         rsf = nothing,
+        inertia = false,
+        ρ_inertia = 0.0,
         kwargs...,
     ) where {N}
 
@@ -159,6 +165,9 @@ function _solve_DYREL!(
     rsf_on = !isnothing(rsf) && rsf.ctrl.enabled
     # Debug / diagnostics: compute Vp & Ω after the step, but do not fold η into Stokes
     rsf_stokes = rsf_on && rsf.ctrl.affect_stokes
+    # Physical inertia ρ(V − V0)/dt (V0 = previous converged velocity)
+    dt_fs = dt * free_surface
+    _inv_dt = (inertia && !isinf(dt) && dt > 0) ? inv(Float64(dt)) : 0.0
 
     residuals = @residuals(stokes.R)
     fields = dyrel_fields(dyrel, dim)
@@ -197,6 +206,16 @@ function _solve_DYREL!(
     # scratch — P_num is no longer materialized separately.
     θc = dyrel.P_num
 
+    # Cell-centred density for inertia (scalar → fill; array → copy)
+    ρ_inertia_c = @zeros(ni...)
+    if !iszero(_inv_dt)
+        if ρ_inertia isa Number
+            fill!(ρ_inertia_c, Float64(ρ_inertia))
+        else
+            copyto!(ρ_inertia_c, ρ_inertia)
+        end
+    end
+
     # recompute all the DYREL variables
     if update_material
         compute_viscosity!(stokes, phase_ratios, args, rheology, viscosity_cutoff)
@@ -218,6 +237,9 @@ function _solve_DYREL!(
     DYREL!(dyrel, stokes, rheology, phase_ratios, grid.di, dt; CFL = dyrel.CFL)
     if free_surface
         apply_free_surface_diagonal!(fields.D[N], fields.λmaxV[N], ρg[end], grid.di.center, dt)
+    end
+    add_inertia_diagonal!(fields.D..., fields.λmaxV..., ρ_inertia_c, _inv_dt)
+    if free_surface || !iszero(_inv_dt)
         update_dτV_α_β!(dyrel)
     end
 
@@ -252,13 +274,16 @@ function _solve_DYREL!(
         @parallel (@idx ni) compute_PH_residual_V!(
             residuals...,
             @velocity(stokes)...,
+            @velocity_old(stokes)...,
             stokes.P,
             stokes.ΔPψ,
             @stress(stokes)...,
             ρg...,
+            ρ_inertia_c,
             _di.center,
             _di.vertex,
-            dt * free_surface,
+            dt_fs,
+            _inv_dt,
         )
 
         # pressure residual stokes.R.RP already computed in compute_∇V_strain_rate_RP! above
@@ -325,18 +350,21 @@ function _solve_DYREL!(
             @parallel (@idx ni) compute_DR_residual_update_V!(
                 residuals...,
                 @velocity(stokes)...,
+                @velocity_old(stokes)...,
                 fields.dVdτ...,
                 stokes.P,
                 θc,
                 @stress(stokes)...,
                 ρg...,
+                ρ_inertia_c,
                 fields.D...,
                 fields.αV...,
                 fields.βV...,
                 fields.dτV...,
                 _di.center,
                 _di.vertex,
-                dt * free_surface,
+                dt_fs,
+                _inv_dt,
             )
             flow_bcs!(stokes, flow_bcs)
             free_surface_bcs!(
@@ -373,6 +401,7 @@ function _solve_DYREL!(
                 # Optimal pseudo-time steps - can be replaced by AD
                 Gershgorin_Stokes_SchurComplement!(dim, fields.D..., fields.λmaxV..., stokes.viscosity.η, stokes.viscosity.ηv, dyrel.γ_eff, phase_ratios, rheology, grid.di, dt)
                 free_surface && apply_free_surface_diagonal!(fields.D[N], fields.λmaxV[N], ρg[end], grid.di.center, dt)
+                add_inertia_diagonal!(fields.D..., fields.λmaxV..., ρ_inertia_c, _inv_dt)
 
                 # Select dτ
                 update_dτV_α_β!(dyrel)
@@ -408,6 +437,13 @@ function _solve_DYREL!(
     @parallel (@idx ni .+ 1) multi_copy!(@tensor(stokes.τ_o), @tensor(stokes.τ))
     @parallel (@idx ni) multi_copy!(@tensor_center(stokes.τ_o), @tensor_center(stokes.τ))
     copy_stress_vertices!(stokes, dim)
+
+    # Snapshot V → V0 for the next physical time step (inertia)
+    if inertia
+        for (V, V0) in zip(unpack_velocity(stokes.V), unpack_velocity(stokes.V0))
+            copyto!(V0, V)
+        end
+    end
 
     # Advance RSF state only after a converged time step (Ω_old was frozen during iterations)
     dt_rsf = Inf

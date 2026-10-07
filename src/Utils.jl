@@ -128,6 +128,17 @@ macro velocity(A)
     end
 end
 
+"""
+    @velocity_old(A)
+
+Unpacks the previous-step velocity arrays `V0` from the StokesArrays `A`.
+"""
+macro velocity_old(A)
+    return quote
+        unpack_velocity(($(esc(A))).V0)
+    end
+end
+
 @inline unpack_velocity(V::JustRelax.Velocity{<:AbstractArray{T, 2}}) where {T} = V.Vx, V.Vy
 @inline unpack_velocity(V::JustRelax.Velocity{<:AbstractArray{T, 3}}) where {T} =
     V.Vx, V.Vy, V.Vz
