@@ -301,14 +301,18 @@ function check_periodic_bcs(stokes, bcs::AbstractFlowBoundaryConditions, igg, di
     return nothing
 end
 
-"""True if spacing is a scalar or a vector of (numerically) equal entries."""
+"""True if spacing is a scalar or a vector of (numerically) equal entries.
+
+Spacing vectors may live on device; compare a host copy so `first`/`all` do not scalar-index.
+"""
 @inline function _spacing_is_uniform(d; rtol = 1.0e-12)
     d isa Number && return true
     d isa AbstractVector || return false
     isempty(d) && return true
-    d0 = float(first(d))
+    dh = Adapt.adapt(Array, d)
+    d0 = float(first(dh))
     tol = rtol * max(abs(d0), floatmin(typeof(d0)))
-    return all(x -> abs(float(x) - d0) ≤ tol, d)
+    return all(x -> abs(float(x) - d0) ≤ tol, dh)
 end
 
 # The flow boundary conditions sit at a different position in each `solve!` signature, so the

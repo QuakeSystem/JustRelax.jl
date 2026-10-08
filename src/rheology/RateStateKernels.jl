@@ -1,6 +1,9 @@
 # ParallelStencil kernels for Rate-and-State Friction (2D centers + vertices).
 # Vertices correspond to LaMEM XY edges / JR shear nodes (τ.xy, ηv, ε.xy).
 
+# Host materialization: `Array(CellArray)` scalar-indexes on CUDA; Adapt bulk-copies `.data`.
+@inline _host(A) = Adapt.adapt(Array, A)
+
 """
     init_rate_state_fields!(rsf_arr, ctrl, phase_ratios, xci, xvi=xci)
 
@@ -9,7 +12,7 @@ phase, fill `a_eff`/`b_eff` (constant or spatial profile), and masks.
 Host-side fill so spatial profile NamedTuples stay off-device.
 """
 function init_rate_state_fields!(
-        rsf_arr::RateStateArrays, ctrl::RateStateController, phase_ratios, xci, xvi = xci
+        rsf_arr::JustRelax.RateStateArrays, ctrl::RateStateController, phase_ratios, xci, xvi = xci
     )
     ctrl.enabled || return nothing
     if rsf_do_center(rsf_arr)
@@ -28,11 +31,11 @@ function init_rate_state_fields!(
 end
 
 function _init_rsf_location_host!(Ω_d, Ω_old_d, a_eff_d, b_eff_d, mask_d, ctrl, phase_loc, xi)
-    phase = Array(phase_loc)
+    phase = _host(phase_loc)
     ni = size(Ω_d)
-    x = Array(xi[1])
-    y = Array(xi[2])
-    Ω = zeros(eltype(Array(Ω_d)), ni...)
+    x = _host(xi[1])
+    y = _host(xi[2])
+    Ω = zeros(eltype(Ω_d), ni...)
     Ω_old = similar(Ω)
     a_eff = similar(Ω)
     b_eff = similar(Ω)
@@ -70,7 +73,7 @@ Recompute `a_eff`/`b_eff`/`rsf_mask` (and vertex counterparts) from current phas
 Does not reset `Ω`.
 """
 function refresh_rsf_ab_mask!(
-        rsf_arr::RateStateArrays, ctrl::RateStateController, phase_ratios, xci, xvi = xci
+        rsf_arr::JustRelax.RateStateArrays, ctrl::RateStateController, phase_ratios, xci, xvi = xci
     )
     ctrl.enabled || return nothing
     if rsf_do_center(rsf_arr)
@@ -89,13 +92,13 @@ function refresh_rsf_ab_mask!(
 end
 
 function _refresh_rsf_ab_mask_host!(a_eff_d, b_eff_d, mask_d, ctrl, phase_loc, xi)
-    phase = Array(phase_loc)
+    phase = _host(phase_loc)
     ni = size(a_eff_d)
-    x = Array(xi[1])
-    y = Array(xi[2])
-    a_eff = Array(a_eff_d)
-    b_eff = Array(b_eff_d)
-    mask = Array(mask_d)
+    x = _host(xi[1])
+    y = _host(xi[2])
+    a_eff = _host(a_eff_d)
+    b_eff = _host(b_eff_d)
+    mask = _host(mask_d)
     @inbounds for j in 1:ni[2], i in 1:ni[1]
         ip = Int(argmax(phase[i, j]))
         p = ctrl.phases[ip]
@@ -132,7 +135,7 @@ when stacking must be avoided).
 """
 function apply_rsf_viscosity!(
         stokes,
-        rsf_arr::RateStateArrays,
+        rsf_arr::JustRelax.RateStateArrays,
         ctrl::RateStateController,
         phase_ratios,
         dt;
@@ -308,7 +311,7 @@ end
 Hard-clamp masked `Vp` / `Vp_v` to `[-Vp_max_abs, Vp_max_abs]` (default 100 m/s).
 Non-finite values are replaced by `+Vp_max_abs`.
 """
-function check_Vp_rsf!(rsf_arr::RateStateArrays; Vp_max_abs = 100.0)
+function check_Vp_rsf!(rsf_arr::JustRelax.RateStateArrays; Vp_max_abs = 100.0)
     if rsf_do_center(rsf_arr)
         @parallel (@idx size(rsf_arr.Vp)) _clamp_Vp_rsf_field!(
             rsf_arr.Vp, rsf_arr.rsf_mask, Vp_max_abs
@@ -335,7 +338,7 @@ end
 Scale center stress so ``τII = τ_rsf`` on RSF cells (diagnostic / optional closure).
 Call after the APT stress update; then refresh vertex ``τ.xy`` via `center2vertex!`.
 """
-function enforce_rsf_stress!(stokes, rsf_arr::RateStateArrays, ctrl::RateStateController)
+function enforce_rsf_stress!(stokes, rsf_arr::JustRelax.RateStateArrays, ctrl::RateStateController)
     ctrl.enabled || return nothing
     rsf_do_center(rsf_arr) || return nothing
     ni = size(stokes.P)
@@ -373,7 +376,7 @@ After APT convergence: LaMEM-style state update on centers and/or vertices.
 `Vp` from stress with frozen `Ω_old`, then `Ω` advanced and copied to `Ω_old`.
 """
 function update_rate_state!(
-        rsf_arr::RateStateArrays, stokes, ctrl::RateStateController, phase_ratios, dt;
+        rsf_arr::JustRelax.RateStateArrays, stokes, ctrl::RateStateController, phase_ratios, dt;
         Vp_max_abs = 100.0,
     )
     ctrl.enabled || return nothing
@@ -466,7 +469,7 @@ Returns `(dt_rsf, Vp_max, dt_h, dt_w, dt_c)`.
 Uses stress-based `Vp` already stored on the grid after `update_rate_state!`.
 """
 function compute_dt_ratestate_grid(
-        rsf_arr::RateStateArrays,
+        rsf_arr::JustRelax.RateStateArrays,
         stokes,
         ctrl::RateStateController,
         phase_ratios,
@@ -486,14 +489,14 @@ function compute_dt_ratestate_grid(
     if rsf_do_center(rsf_arr)
         dt_rsf, dt_h_min, dt_w_min, dt_c_min, Vp_max, any_cell = _accumulate_dt_rsf_host!(
             dt_rsf, dt_h_min, dt_w_min, dt_c_min, Vp_max, any_cell,
-            Array(rsf_arr.Ω), Array(rsf_arr.a_eff), Array(rsf_arr.b_eff),
-            Array(rsf_arr.rsf_mask), Array(rsf_arr.Vp), Array(phase_ratios.center),
-            Array(stokes.P), ctrl, G, ν,
+            _host(rsf_arr.Ω), _host(rsf_arr.a_eff), _host(rsf_arr.b_eff),
+            _host(rsf_arr.rsf_mask), _host(rsf_arr.Vp), _host(phase_ratios.center),
+            _host(stokes.P), ctrl, G, ν,
         )
     end
     if rsf_do_vertex(rsf_arr)
         # Pressure at vertices: simple cell-neighbor average on host
-        P_c = Array(stokes.P)
+        P_c = _host(stokes.P)
         nv = size(rsf_arr.rsf_mask_v)
         P_v = zeros(eltype(P_c), nv...)
         nx, ny = size(P_c)
@@ -506,8 +509,8 @@ function compute_dt_ratestate_grid(
         end
         dt_rsf, dt_h_min, dt_w_min, dt_c_min, Vp_max, any_cell = _accumulate_dt_rsf_host!(
             dt_rsf, dt_h_min, dt_w_min, dt_c_min, Vp_max, any_cell,
-            Array(rsf_arr.Ωv), Array(rsf_arr.a_eff_v), Array(rsf_arr.b_eff_v),
-            Array(rsf_arr.rsf_mask_v), Array(rsf_arr.Vp_v), Array(phase_ratios.vertex),
+            _host(rsf_arr.Ωv), _host(rsf_arr.a_eff_v), _host(rsf_arr.b_eff_v),
+            _host(rsf_arr.rsf_mask_v), _host(rsf_arr.Vp_v), _host(phase_ratios.vertex),
             P_v, ctrl, G, ν,
         )
     end

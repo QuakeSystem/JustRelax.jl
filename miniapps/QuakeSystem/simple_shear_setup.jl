@@ -169,18 +169,23 @@ end
 
 """
 Fill Eulerian `PhaseRatios` from a vertex phase map (`ph[ivx, ivy]`).
+
+Phase maps are built on the host, then copied to the ParallelStencil backend
+(`Data.Array`) so the fill kernel is valid on CUDA.
 """
 function init_phase_ratios_from_grid!(phase_ratios, ph_vertex, nphases::Integer)
     nx, ny = size(phase_ratios.center)
-    ph_c = Matrix{Int}(undef, nx, ny)
-    ph_v = Matrix{Int}(undef, nx + 1, ny + 1)
+    ph_c_h = Matrix{Int}(undef, nx, ny)
+    ph_v_h = Matrix{Int}(undef, nx + 1, ny + 1)
     nvx, nvy = size(ph_vertex)
     @inbounds for j in 1:ny, i in 1:nx
-        ph_c[i, j] = Int(ph_vertex[min(i, nvx), min(j, nvy)])
+        ph_c_h[i, j] = Int(ph_vertex[min(i, nvx), min(j, nvy)])
     end
     @inbounds for j in 1:(ny + 1), i in 1:(nx + 1)
-        ph_v[i, j] = Int(ph_vertex[min(i, nvx), min(j, nvy)])
+        ph_v_h[i, j] = Int(ph_vertex[min(i, nvx), min(j, nvy)])
     end
+    ph_c = Data.Array(ph_c_h)
+    ph_v = Data.Array(ph_v_h)
     @parallel (@idx (nx, ny)) _set_phases_from_map!(phase_ratios.center, ph_c, nphases)
     @parallel (@idx (nx + 1, ny + 1)) _set_phases_from_map!(phase_ratios.vertex, ph_v, nphases)
     return nothing

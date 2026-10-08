@@ -69,7 +69,31 @@ include("rheology/Viscosity.jl")
 include("rheology/Viscosity_VS.jl")
 export compute_viscosity!, compute_viscosity_εII!, compute_viscosity_τII!
 
-include("rheology/RateStateFriction.jl")
+import JustRelax:
+    RateStateFriction,
+    compute_strain_rate,
+    compute_stress,
+    compute_stress_frozen_Ω,
+    compute_Vp_from_stress,
+    update_Ω,
+    compute_dt_ratestate,
+    compute_dt_ratestate_lamem,
+    dteta_max_lamem,
+    dt_healing,
+    dt_weakening,
+    dt_courant,
+    max_state_change,
+    get_rsf_profile,
+    phase_has_rsf,
+    validate_rsf_phase!,
+    PhaseRSFParams,
+    RateStateController,
+    build_rate_state_controller,
+    evaluate_rsf_ab,
+    as_rate_state_friction,
+    rsf_do_center,
+    rsf_do_vertex
+
 export RateStateFriction,
     compute_strain_rate,
     compute_stress,
@@ -78,23 +102,57 @@ export RateStateFriction,
     update_Ω,
     compute_dt_ratestate,
     compute_dt_ratestate_lamem,
+    dteta_max_lamem,
     dt_healing,
     dt_weakening,
     dt_courant,
-    max_state_change
-
-include("rheology/RateStateSetup.jl")
-export get_rsf_profile,
+    max_state_change,
+    get_rsf_profile,
     phase_has_rsf,
     validate_rsf_phase!,
     PhaseRSFParams,
     RateStateController,
     build_rate_state_controller,
     evaluate_rsf_ab,
-    as_rate_state_friction
+    as_rate_state_friction,
+    RateStateArrays,
+    rsf_do_center,
+    rsf_do_vertex
 
-include("rheology/RateStateArrays.jl")
-export RateStateArrays
+"""
+    RateStateArrays(ni; loc=:both)
+    RateStateArrays(backend, ni; loc=:both)
+
+Allocate RSF center/vertex fields with this module's `@zeros` (Array or device).
+GPU extensions override `RateStateArrays(::Type{CUDABackend}, ni)`.
+"""
+function RateStateArrays(ni::NTuple{N, Integer}; loc::Symbol = :both) where {N}
+    loc in (:center, :vertex, :both) ||
+        error("RateStateArrays loc must be :center, :vertex, or :both, got $loc")
+    Ω = @zeros(ni...)
+    Ω_old = @zeros(ni...)
+    Vp = @zeros(ni...)
+    τ_rsf = @zeros(ni...)
+    a_eff = @zeros(ni...)
+    b_eff = @zeros(ni...)
+    rsf_mask = @zeros(ni...)
+    nv = ni .+ 1
+    Ωv = @zeros(nv...)
+    Ω_old_v = @zeros(nv...)
+    Vp_v = @zeros(nv...)
+    τ_rsf_v = @zeros(nv...)
+    a_eff_v = @zeros(nv...)
+    b_eff_v = @zeros(nv...)
+    rsf_mask_v = @zeros(nv...)
+    return JustRelax.RateStateArrays{typeof(Ω), typeof(Ωv), eltype(Ω)}(
+        Ω, Ω_old, Vp, τ_rsf, a_eff, b_eff, rsf_mask,
+        Ωv, Ω_old_v, Vp_v, τ_rsf_v, a_eff_v, b_eff_v, rsf_mask_v,
+        loc,
+    )
+end
+
+RateStateArrays(backend, ni::NTuple{N, Integer}; kwargs...) where {N} =
+    RateStateArrays(ni; kwargs...)
 
 include("rheology/RateStateAdapter.jl")
 export rsf_viscosity_from_stress,

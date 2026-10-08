@@ -15,7 +15,7 @@ const isCUDA = false
 end
 
 using JustRelax, JustRelax.JustRelax2D, JustRelax.DataIO
-using Pkg; Pkg.activate("miniapps")
+# using Pkg; Pkg.activate("miniapps")
 
 const backend = @static if isCUDA
     JustRelax.CUDABackend
@@ -39,6 +39,7 @@ else
 end
 
 using GeoParams
+using Adapt
 
 include(joinpath(@__DIR__, "simple_shear_setup.jl"))
 include(joinpath(@__DIR__, "simple_shear_rheology.jl"))
@@ -47,7 +48,8 @@ include(joinpath(@__DIR__, "simple_shear_rheology.jl"))
 solution(ε̇, t, G, η) = ε̇ * η * (1 - exp(-G * t / η))
 
 function phase_map(phase_ratios_loc)
-    return [argmax(p) for p in Array(phase_ratios_loc)]
+    # Adapt bulk-copies CellArray.data; Array(CellArray) scalar-indexes on CUDA
+    return [argmax(p) for p in Adapt.adapt(Array, phase_ratios_loc)]
 end
 
 """Pad face residuals onto the cell grid for VTK (trailing faces filled with 0)."""
@@ -193,10 +195,10 @@ function main(
     prepare_vtk!(VTK)
 
     staggered_grid, ph_vertex, _T = simple_shear_2D(xvi, 1250.0, fault, VTK)
-    # Nonuniform Geometry: di/center/vertex are vectors; DYREL kernels use @dxi/@dx/@dy
-    grid = Geometry(xvi)
+    # Nonuniform Geometry on the ParallelStencil backend (CuArray spacings for CUDA kernels)
+    grid = Geometry(PTArray(backend), xvi...)
     (; xci, xvi) = grid
-    @assert xvi[1][1] ≈ staggered_grid.xvi[1][1]
+    @assert Array(xvi[1])[1] ≈ staggered_grid.xvi[1][1]
     @assert grid.ni == ni
 
     rheology = init_rheology_simple_shear(; η = η0, G = G0, ν = ν)
@@ -229,10 +231,13 @@ function main(
     viscosity_cutoff = rsf_enabled ? (1.0e6, 5.0e26) : (1.0e6, 1.0e28)
     compute_viscosity!(stokes, phase_ratios, args, rheology, viscosity_cutoff)
 
-    yVx = grid.xi_vel[1][2]
+    # Host coords for comprehensions / VTK (device xvi would scalar-index on CUDA)
+    xvi_h = Array.(xvi)
+    xci_h = Array.(xci)
+    yVx = Array(grid.xi_vel[1][2])
     ybot, ytop = origin[2], origin[2] + ly
     stokes.V.Vx .= PTArray(backend)([
-            V_top * (y - ybot) / (ytop - ybot) for _ in xvi[1], y in yVx
+            V_top * (y - ybot) / (ytop - ybot) for _ in xvi_h[1], y in yVx
         ])
     fill!(stokes.V.Vy, 0.0)
     @views stokes.V.Vx[:, 2:(end - 1)] .= 0.0
@@ -317,7 +322,7 @@ function main(
         println("it = $it; t = $t; max|τxy| = $τxy_max; analytic = $τ_analytic; dt = $dt; dt_rsf = $(out.dt_rsf)")
 
         write_vtk_step!(
-            VTK, it, t, xvi, xci, stokes, phase_ratios, Vx_v, Vy_v, zeros_c, τ_analytic,
+            VTK, it, t, xvi_h, xci_h, stokes, phase_ratios, Vx_v, Vy_v, zeros_c, τ_analytic,
             isnothing(rsf_bundle) ? nothing : rsf_bundle.fields,
         )
 

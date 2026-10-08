@@ -91,6 +91,10 @@ function JR2D.StokesArrays(
     return StokesArrays(ni, bcs)
 end
 
+function JR2D.RateStateArrays(::Type{CUDABackend}, ni::NTuple{N, Integer}; loc::Symbol = :both) where {N}
+    return RateStateArrays(ni; loc = loc)
+end
+
 function JR2D.DYREL(::Type{CUDABackend}, ni::NTuple{N, Integer}, periodic::NTuple{N, Bool} = ntuple(_ -> false, Val(N)); ϵ = 1.0e-6, ϵ_vel = 1.0e-6, CFL = 0.99, c_fact = 0.5, γfact = 20.0) where {N}
     return DYREL(ni, periodic; ϵ = ϵ, ϵ_vel = ϵ_vel, CFL = CFL, c_fact = c_fact, γfact = γfact)
 end
@@ -368,7 +372,17 @@ function accumulate_vol!(::CUDABackendTrait, EVol_pl, ε_vol_pl, dt)
     return _accumulate_vol!(EVol_pl, ε_vol_pl, dt)
 end
 
-## Buoyancy forces
+## Buoyancy forces / density
+function JR2D.compute_ρ!(ρ::CuArray, rheology, args)
+    return compute_ρ!(ρ, rheology, args)
+end
+
+function JR2D.compute_ρ!(
+        ρ::CuArray, phase_ratios::JustPIC.PhaseRatios, rheology, args
+    )
+    return compute_ρ!(ρ, phase_ratios, rheology, args)
+end
+
 function JR2D.compute_ρg!(ρg::Union{CuArray, NTuple{N, CuArray}}, rheology, args) where {N}
     return compute_ρg!(ρg, rheology, args)
 end
