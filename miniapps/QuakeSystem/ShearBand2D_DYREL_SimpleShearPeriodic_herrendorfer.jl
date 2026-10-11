@@ -6,7 +6,8 @@ Herrendörfer-style viscoelastic simple shear with Rate-and-State Friction (DYRE
 - Geometry: LaMEM-style segmented mesh (uniform x for periodicity; refined y) + GMG fault
 - RSF: frozen Ω during DYREL iterations; Ω → Ω_old after converged step
 - Inertia: optional LaMEM-style ``ρ (V − V0)/dt`` via `inertia` / `ρ_inertia` toggles
-- VTK: ParaView fields including Vp_rsf (LaMEM names)
+- `retry_on_blowup`: on a DYREL residual above 1e10, restore the step and retry at `dt/2`
+- VTK: ParaView fields including Vp_rsf, visc_creep and visc_total (LaMEM names)
 =#
 const isCUDA = false
 
@@ -47,6 +48,47 @@ include(joinpath(@__DIR__, "simple_shear_rheology.jl"))
 # Analytic Maxwell τxy for Couette: ε̇ = V_top / ly (engineering shear rate)
 solution(ε̇, t, G, η) = ε̇ * η * (1 - exp(-G * t / η))
 
+"""LaMEM `visc_total`: ``1 / (1/η + 1/(G dt))``. `η = Inf` returns `G dt`."""
+maxwell_viscosity(η, Gdt) = @. inv(inv(η) + inv(Gdt))
+
+kaboom_error(e::ErrorException) = occursin("Kaboom!", e.msg)
+kaboom_error(_) = false
+
+"""Fields a failed DYREL step mutates and the next attempt would otherwise inherit."""
+function step_checkpoint(stokes)
+    chk = (;
+        Vx = similar(stokes.V.Vx),
+        Vy = similar(stokes.V.Vy),
+        P = similar(stokes.P),
+        η = similar(stokes.viscosity.η),
+        ηv = similar(stokes.viscosity.ηv),
+    )
+    return save_step!(chk, stokes)
+end
+
+function save_step!(chk, stokes)
+    copyto!(chk.Vx, stokes.V.Vx)
+    copyto!(chk.Vy, stokes.V.Vy)
+    copyto!(chk.P, stokes.P)
+    copyto!(chk.η, stokes.viscosity.η)
+    copyto!(chk.ηv, stokes.viscosity.ηv)
+    return chk
+end
+
+function restore_step!(stokes, dyrel, chk)
+    copyto!(stokes.V.Vx, chk.Vx)
+    copyto!(stokes.V.Vy, chk.Vy)
+    copyto!(stokes.P, chk.P)
+    copyto!(stokes.viscosity.η, chk.η)
+    copyto!(stokes.viscosity.ηv, chk.ηv)
+    # Pseudo-velocity left by the diverged iteration would kick the restored velocity.
+    fill!(dyrel.dVxdτ, 0)
+    fill!(dyrel.dVydτ, 0)
+    fill!(dyrel.dVx, 0)
+    fill!(dyrel.dVy, 0)
+    return stokes
+end
+
 function phase_map(phase_ratios_loc)
     # Adapt bulk-copies CellArray.data; Array(CellArray) scalar-indexes on CUDA
     return [argmax(p) for p in Adapt.adapt(Array, phase_ratios_loc)]
@@ -78,7 +120,7 @@ function prepare_vtk!(VTK)
 end
 
 function write_vtk_step!(
-        VTK, it, t, xvi, xci, stokes, phase_ratios, Vx_v, Vy_v, zeros_c, τ_analytic, rsf_fields
+        VTK, it, t, xvi, xci, stokes, phase_ratios, Vx_v, Vy_v, zeros_c, τ_analytic, rsf_fields, G, dt
     )
     VTK.do_vtk || return nothing
     vtk_every = Int(get(VTK, :vtk_every, 1))
@@ -89,15 +131,25 @@ function write_vtk_step!(
     τxy_analytic = fill(τ_analytic, size(zeros_c))
     Rx_c, Ry_c = residuals_to_centers(stokes)
 
+    # LaMEM visc_creep is the stored Maxwell buffer. visc_total is what the stress
+    # update uses. Point data is the shear viscosity (vertices, where the fault lives
+    # for loc = :vertex); cell data is the normal-stress viscosity.
+    Gdt = G * dt
+    η_c = Array(stokes.viscosity.η)
+    η_v = Array(stokes.viscosity.ηv)
+
     data_v = (;
         Vx = Array(Vx_v),
         Vy = Array(Vy_v),
         phase = phase_vertex,
+        visc_creep = η_v,
+        visc_total = maxwell_viscosity(η_v, Gdt),
     )
     data_c = (;
         P = Array(stokes.P),
         T = zeros_c,
-        η = Array(stokes.viscosity.η),
+        visc_creep = η_c,
+        visc_total = maxwell_viscosity(η_c, Gdt),
         τII = Array(stokes.τ.II),
         εII = Array(stokes.ε.II),
         Rx = Rx_c,
@@ -117,12 +169,11 @@ function write_vtk_step!(
                 b_eff = Array(rsf_fields.b_eff),
             ),
         )
-        # Vertices (shear / LaMEM XY-edge nodes) — where τ.xy and ηv live
+        # Vertices (shear / LaMEM XY-edge nodes) — where τ.xy lives
         Vp_v = Array(rsf_fields.Vp_v)
         data_v = merge(
             data_v,
             (;
-                ηv = Array(stokes.viscosity.ηv),
                 τxy = Array(stokes.τ.xy),
                 Ω_v = Array(rsf_fields.Ωv),
                 Vp_rsf_v = Vp_v,
@@ -228,7 +279,7 @@ function main(
     args = (; T = @zeros(ni .+ 2...), P = stokes.P, dt = dt)
 
     # Floor η high enough that rupture localisation cannot collapse η → runaway Vp
-    viscosity_cutoff = rsf_enabled ? (1.0e6, 5.0e26) : (1.0e6, 1.0e28)
+    viscosity_cutoff = rsf_enabled ? (5.0e8, 5.0e26) : (5.0e8, 1.0e28)
     compute_viscosity!(stokes, phase_ratios, args, rheology, viscosity_cutoff)
 
     # Host coords for comprehensions / VTK (device xvi would scalar-index on CUDA)
@@ -255,6 +306,9 @@ function main(
     dt_rsf_switch = rsf_enabled ? Float64(get(rsf_nt, :dt_rsf_switch, 1.0e9)) : Inf
     dt_min = rsf_enabled ? Float64(get(rsf_nt, :dt_min, 1.0e-2)) : 0.0
     dt_max = rsf_enabled ? Float64(get(rsf_nt, :dt_max, 1.0e7)) : Inf
+    # Halve dt and repeat the step when DYREL throws on a residual above 1e10.
+    retry_on_blowup = rsf_enabled && Bool(get(rsf_nt, :retry_on_blowup, false))
+    chk = retry_on_blowup ? step_checkpoint(stokes) : nothing
 
     println(
         "grid: ni=$ni; Δx∈$(extrema(Array(grid.di.vertex[1]))); " *
@@ -284,31 +338,52 @@ function main(
     end
 
     t, it = 0.0, 0
+    retry_on_blowup && println("retry_on_blowup ON: residual > 1e10 restores the step and retries at dt/2")
     for _ in 1:nsteps
-        out = solve_DYREL!(
-            stokes,
-            ρg,
-            dyrel,
-            flow_bcs,
-            phase_ratios,
-            rheology,
-            args,
-            grid,
-            dt,
-            igg;
-            kwargs = (;
-                verbose_PH = true,
-                verbose_DR = false,
-                iterMax = 50.0e3,
-                nout = 10,
-                rel_drop = 1.0e-4,
-                linear_viscosity = true,
-                viscosity_cutoff = viscosity_cutoff,
-                rsf = rsf_bundle,
-                inertia = inertia,
-                ρ_inertia = ρ_for_inertia,
-            )
-        )
+        out = nothing
+        while true
+            retry_on_blowup && save_step!(chk, stokes)
+            try
+                out = solve_DYREL!(
+                    stokes,
+                    ρg,
+                    dyrel,
+                    flow_bcs,
+                    phase_ratios,
+                    rheology,
+                    args,
+                    grid,
+                    dt,
+                    igg;
+                    kwargs = (;
+                        verbose_PH = true,
+                        verbose_DR = false,
+                        iterMax = 50.0e3,
+                        nout = 10,
+                        rel_drop = 1.0e-4,
+                        linear_viscosity = true,
+                        viscosity_cutoff = viscosity_cutoff,
+                        rsf = rsf_bundle,
+                        inertia = inertia,
+                        ρ_inertia = ρ_for_inertia,
+                    )
+                )
+                break
+            catch e
+                if !(retry_on_blowup && kaboom_error(e))
+                    rethrow()
+                end
+                dt_new = dt / 2
+                if dt_new < dt_min
+                    println("Kaboom at t = $t, dt = $dt is already at dt_min = $dt_min. Not retrying.")
+                    rethrow()
+                end
+                restore_step!(stokes, dyrel, chk)
+                println("Kaboom at t = $t, dt = $dt. Restoring the step and retrying with dt = $dt_new.")
+                dt = dt_new
+                args = (; args..., dt = dt)
+            end
+        end
         # Keep Dirichlet top wall under inertia updates
         @views stokes.V.Vx[:, end] .= V_top
         tensor_invariant!(stokes.τ)
@@ -324,6 +399,7 @@ function main(
         write_vtk_step!(
             VTK, it, t, xvi_h, xci_h, stokes, phase_ratios, Vx_v, Vy_v, zeros_c, τ_analytic,
             isnothing(rsf_bundle) ? nothing : rsf_bundle.fields,
+            G0, dt,
         )
 
         # LaMEM-style dt policy after the first step (floor at dt_min even if RSF asks lower)
@@ -358,9 +434,11 @@ RSF = (
     # LaMEM: constitutive RSF on cells and XY edges (JR centers + vertices)
     loc = :vertex,
     V0 = 4.0e-9,
-    dt_min = 1.0e-1,
+    dt_min = 1.0e-3,
     dt_max = 1.0e7,
     dt_rsf_switch = 1.0e9,
+    # On "Kaboom! Error > 1e10", restore this step and retry at dt/2 down to dt_min.
+    retry_on_blowup = true,
     G = 3.0e10,
     ν = 0.25,
     # Both phases carry a_rsf (LaMEM / Herrendörfer Shear_test_PBC)
@@ -394,7 +472,7 @@ VTK = (;
     vtk_dir = joinpath(@__DIR__, "VTK", "vtk"),
     name = "simple_shear_herrendorfer",
     pvd_name = "simple_shear_herrendorfer",
-    vtk_every = 1,
+    vtk_every = 10,
 )
 
 igg = if !(JustRelax.MPI.Initialized())
