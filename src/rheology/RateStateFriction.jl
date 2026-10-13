@@ -42,6 +42,26 @@ LaMEM `updatePhaseRSFState` slip rate from stress (uses frozen Ω for the exp te
     return 2 * r.V₀ * sinh(max(τ - r.C, 0) / (r.a * Peff)) * exp(-(r.μ₀ + r.b * Ω) / r.a)
 end
 
+"""
+    dVp_dτ(r; τ, Ω, P) -> dVp/dτ
+
+Slope of [`compute_Vp_from_stress`](@ref) at frozen state. Zero at and below cohesion.
+For `ξ = (τ − C) / (a Peff) > 0`, ``dVp/dτ = Vp coth(ξ) / (a Peff)``.
+"""
+@inline function dVp_dτ(r::RateStateFriction; τ = 0, Ω = 0, P = 0, kwargs...)
+    Peff = max(P * (1 - r.λ), 1.0e-30)
+    aP = r.a * Peff
+    ξ = max(τ - r.C, zero(aP)) / aP
+    ξ ≤ 0 && return zero(aP)
+    expo = exp(-(r.μ₀ + r.b * Ω) / r.a)
+    # dVp/dτ = 2 V₀ cosh(ξ) expo / aP. For large ξ, cosh(ξ) ≈ exp(ξ)/2 and
+    # Vp ≈ V₀ exp(ξ) expo, so the slope is Vp / aP (coth → 1).
+    if ξ > 40
+        return r.V₀ * exp(min(ξ, 700)) * expo / aP
+    end
+    return 2 * r.V₀ * cosh(ξ) * expo / aP
+end
+
 # strain rate as a function of stress, state, and pressure
 @inline function compute_strain_rate(r::RateStateFriction; τ = 0, Ω_old = 0, P = 0, dt = 0, kwargs...)
     Vp = compute_Vp_from_stress(r; τ = τ, Ω = Ω_old, P = P)

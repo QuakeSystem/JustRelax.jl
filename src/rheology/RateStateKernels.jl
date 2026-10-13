@@ -152,6 +152,7 @@ function apply_rsf_viscosity!(
         ni = size(stokes.P)
         @parallel (@idx ni) _apply_rsf_viscosity_center!(
             stokes.viscosity.η,
+            rsf_arr.η_tan,
             stokes.ε.xx,
             stokes.ε.yy,
             stokes.ε.xy_c,
@@ -181,6 +182,7 @@ function apply_rsf_viscosity!(
         periodic = periodic_dims(stokes)
         @parallel (@idx nv) _apply_rsf_viscosity_vertex!(
             stokes.viscosity.ηv,
+            rsf_arr.η_tan_v,
             stokes.ε.xx,
             stokes.ε.yy,
             stokes.ε.xy,
@@ -210,7 +212,7 @@ function apply_rsf_viscosity!(
 end
 
 @parallel_indices (i, j) function _apply_rsf_viscosity_center!(
-        η, εxx, εyy, εxy_c, τxx_o, τyy_o, τxy_o, P,
+        η, η_tan, εxx, εyy, εxy_c, τxx_o, τyy_o, τxy_o, P,
         Ω_old, a_eff, b_eff, Vp, τ_rsf_arr, rsf_mask, phase_center, phases,
         Gdt, ε_floor, P_floor, η_min, η_max, tol_rel, maxit,
     )
@@ -227,7 +229,7 @@ end
             Pij = max(abs(P[i, j]), P_floor)
             r = rsf_from_phase_params(p, a_eff[i, j], b_eff[i, j])
             η_creep = η[i, j]
-            _, η_creep_out, Vp_ij, _ = rsf_effective_viscosity(
+            _, η_creep_out, Vp_ij, τ_ij = rsf_effective_viscosity(
                 r;
                 DII = DII,
                 η_creep = η_creep,
@@ -237,6 +239,9 @@ end
                 tol_rel = tol_rel,
                 maxit = maxit,
                 ε_floor = ε_floor,
+            )
+            η_tan[i, j] = rsf_tangent_viscosity(
+                r; τ = τ_ij, Ω = Ω_old[i, j], P = Pij, η_creep = η_creep, Gdt = Gdt, ε_floor = ε_floor,
             )
             τ_rsf_arr[i, j] = compute_stress_frozen_Ω(r; ε = DII, Ω_old = Ω_old[i, j], P = Pij)
             Vp[i, j] = _clamp_Vp(Vp_ij)
@@ -250,7 +255,7 @@ end
 end
 
 @parallel_indices (i, j) function _apply_rsf_viscosity_vertex!(
-        ηv, εxx, εyy, εxy, τxx_ov, τyy_ov, τxy_o, P,
+        ηv, η_tan, εxx, εyy, εxy, τxx_ov, τyy_ov, τxy_o, P,
         Ω_old, a_eff, b_eff, Vp, τ_rsf_arr, rsf_mask, phase_vertex, phases,
         Gdt, ε_floor, P_floor, η_min, η_max, tol_rel, maxit, periodic,
     )
@@ -269,7 +274,7 @@ end
             Pij = max(abs(av_clamped(P, Ic...)), P_floor)
             r = rsf_from_phase_params(p, a_eff[i, j], b_eff[i, j])
             η_creep = ηv[i, j]
-            _, η_creep_out, Vp_ij, _ = rsf_effective_viscosity(
+            _, η_creep_out, Vp_ij, τ_ij = rsf_effective_viscosity(
                 r;
                 DII = DII,
                 η_creep = η_creep,
@@ -279,6 +284,9 @@ end
                 tol_rel = tol_rel,
                 maxit = maxit,
                 ε_floor = ε_floor,
+            )
+            η_tan[i, j] = rsf_tangent_viscosity(
+                r; τ = τ_ij, Ω = Ω_old[i, j], P = Pij, η_creep = η_creep, Gdt = Gdt, ε_floor = ε_floor,
             )
             τ_rsf_arr[i, j] = compute_stress_frozen_Ω(r; ε = DII, Ω_old = Ω_old[i, j], P = Pij)
             Vp[i, j] = _clamp_Vp(Vp_ij)

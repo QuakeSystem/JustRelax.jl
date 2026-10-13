@@ -144,6 +144,43 @@ JustRelax Maxwell **creep** buffer so ``η_ve(η_creep_out) = η_eff``:
 end
 
 """
+    rsf_tangent_viscosity(r; τ, Ω, P, η_creep, Gdt) -> η_tan
+
+Viscosity seen by the Gershgorin row: the derivative of the frozen-state
+constitutive law, not the secant `τ / (2ε)`.
+
+```
+η_tan = 1 / (1/(G dt) + 1/η_creep + (dVp/dτ)/Wf)
+```
+
+Locked faults (`dVp/dτ = 0`) reduce to the Maxwell viscosity. The value already
+includes elasticity and creep, so a preconditioner must not Maxwell-combine it again.
+"""
+@inline function rsf_tangent_viscosity(
+        r::RateStateFriction;
+        τ,
+        Ω = 0,
+        P = 0,
+        η_creep,
+        Gdt,
+        ε_floor = 1.0e-30,
+        kwargs...,
+    )
+    Gdt = max(Gdt, ε_floor)
+    η_creep = max(η_creep, ε_floor)
+    inv_tan = inv(Gdt) + inv(η_creep)
+    slope = dVp_dτ(r; τ = τ, Ω = Ω, P = P)
+    if isfinite(slope) && slope > 0
+        inv_tan += slope / r.Wf
+    end
+    η_tan = inv(inv_tan)
+    if !(isfinite(η_tan)) || η_tan ≤ 0
+        η_tan = inv(inv(Gdt) + inv(η_creep))
+    end
+    return η_tan
+end
+
+"""
     rsf_frozen_stress_viscosity(r; ε, Ω_old, P) -> (τ_rsf, η_rsf, Vp)
 
 Asinh / strain-rate branch (RheologyCalculator `compute_stress` style).

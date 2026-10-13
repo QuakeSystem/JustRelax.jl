@@ -99,6 +99,23 @@ end
     @test isapprox(η_ve_out, η_eff_a; rtol = 1.0e-6)
     @test τ_a ≈ 2 * η_eff_a * DII_act
     @test Vp_a ≈ compute_Vp_from_stress(r; τ = τ_a, Ω = -1.0, P = P)
+
+    # Locked: dVp/dτ vanishes, so the tangent is the Maxwell viscosity.
+    η_tan_lock = rsf_tangent_viscosity(
+        r_lock; τ = τ, Ω = 40.0, P = P, η_creep = η_creep, Gdt = Gdt,
+    )
+    @test isapprox(η_tan_lock, η_ve; rtol = 1.0e-6)
+    @test dVp_dτ(r_lock; τ = 0.0, Ω = 40.0, P = P) == 0
+
+    # Loaded: slope matches Vp coth(ξ) / (a P), and η_tan is softer than the secant.
+    aP = 0.011 * P
+    ξ = τ_a / aP
+    @test dVp_dτ(r; τ = τ_a, Ω = -1.0, P = P) ≈ Vp_a * coth(ξ) / aP rtol = 1.0e-8
+    η_tan_a = rsf_tangent_viscosity(
+        r; τ = τ_a, Ω = -1.0, P = P, η_creep = η_creep, Gdt = Gdt,
+    )
+    @test isfinite(η_tan_a) && η_tan_a > 0
+    @test η_tan_a < η_eff_a
 end
 
 @testset "DYREL 2D RSF" begin
@@ -188,9 +205,11 @@ end
     compute_viscosity!(stokes, phase_ratios, args, rheology, (1.0e10, 1.0e28))
     yVx = grid.xi_vel[1][2]
     ybot, ytop = origin[2], origin[2] + li[2]
-    stokes.V.Vx .= PTArray(backend)([
+    stokes.V.Vx .= PTArray(backend)(
+        [
             V_top * (y - ybot) / (ytop - ybot) for _ in xvi[1], y in yVx
-        ])
+        ]
+    )
     fill!(stokes.V.Vy, 0.0)
     @views stokes.V.Vx[:, 2:(end - 1)] .= 0.0
     @views stokes.V.Vx[:, end] .= V_top
@@ -199,6 +218,75 @@ end
 
     dyrel = DYREL(backend, stokes, rheology, phase_ratios, grid.di, dt; ϵ = 1.0e-5)
     rsf_bundle = (; ctrl = ctrl, fields = rsf_fields)
+
+    # A soft tangent moves the diagonal when γ is comparable to η, and does not when γ dominates.
+    γ_saved = copy(Array(dyrel.γ_eff))
+    Dx_saved = copy(Array(dyrel.Dx))
+    Dy_saved = copy(Array(dyrel.Dy))
+    λx_saved = copy(Array(dyrel.λmaxVx))
+    λy_saved = copy(Array(dyrel.λmaxVy))
+    η_saved = copy(Array(stokes.viscosity.η))
+    ηv_saved = copy(Array(stokes.viscosity.ηv))
+    @test Array(rsf_fields.rsf_mask_v)[8, 8] > 0.5
+    fill!(dyrel.γ_eff, 1.0)
+    fill!(stokes.viscosity.η, 10.0)
+    fill!(stokes.viscosity.ηv, 10.0)
+    fill!(rsf_fields.η_tan, 0.0)
+    fill!(rsf_fields.η_tan_v, 0.0)
+    JustRelax2D.Gershgorin_Stokes2D_SchurComplement!(
+        dyrel.Dx, dyrel.Dy, dyrel.λmaxVx, dyrel.λmaxVy,
+        stokes.viscosity.η, stokes.viscosity.ηv, dyrel.γ_eff,
+        phase_ratios, rheology, grid.di, dt,
+    )
+    Dx_plain = copy(Array(dyrel.Dx))
+    ηtv = zeros(size(Array(rsf_fields.η_tan_v)))
+    ηtv[8, 8] = 1.0e-4
+    copyto!(rsf_fields.η_tan_v, ηtv)
+    JustRelax2D.Gershgorin_Stokes2D_SchurComplement!(
+        dyrel.Dx, dyrel.Dy, dyrel.λmaxVx, dyrel.λmaxVy,
+        stokes.viscosity.η, stokes.viscosity.ηv, dyrel.γ_eff,
+        phase_ratios, rheology, grid.di, dt,
+        rsf_fields.η_tan, rsf_fields.η_tan_v, rsf_fields.rsf_mask, rsf_fields.rsf_mask_v,
+    )
+    @test !(Array(dyrel.Dx)[7, 8] ≈ Dx_plain[7, 8])
+    fill!(dyrel.γ_eff, 1.0e12)
+    ηtv[8, 8] = 10.0
+    copyto!(rsf_fields.η_tan_v, ηtv)
+    JustRelax2D.Gershgorin_Stokes2D_SchurComplement!(
+        dyrel.Dx, dyrel.Dy, dyrel.λmaxVx, dyrel.λmaxVy,
+        stokes.viscosity.η, stokes.viscosity.ηv, dyrel.γ_eff,
+        phase_ratios, rheology, grid.di, dt,
+        rsf_fields.η_tan, rsf_fields.η_tan_v, rsf_fields.rsf_mask, rsf_fields.rsf_mask_v,
+    )
+    Dx_stiff = copy(Array(dyrel.Dx))
+    ηtv[8, 8] = 1.0e-8
+    copyto!(rsf_fields.η_tan_v, ηtv)
+    JustRelax2D.Gershgorin_Stokes2D_SchurComplement!(
+        dyrel.Dx, dyrel.Dy, dyrel.λmaxVx, dyrel.λmaxVy,
+        stokes.viscosity.η, stokes.viscosity.ηv, dyrel.γ_eff,
+        phase_ratios, rheology, grid.di, dt,
+        rsf_fields.η_tan, rsf_fields.η_tan_v, rsf_fields.rsf_mask, rsf_fields.rsf_mask_v,
+    )
+    @test isapprox(Array(dyrel.Dx)[7, 8], Dx_stiff[7, 8]; rtol = 1.0e-4)
+    # γ ≫ η_tan, so λmax does not move; the pseudo-step is scaled by √(η_new/η_old).
+    JustRelax2D.update_dτV_α_β!(dyrel)
+    dτ_before = Array(dyrel.dτVx)[7, 8]
+    @test dτ_before > 0
+    η_prev_h = zeros(size(ηtv))
+    η_prev_h[8, 8] = 1.0e-6
+    η_prev = similar(rsf_fields.η_tan_v)
+    copyto!(η_prev, η_prev_h)
+    JustRelax2D.shrink_dτ_where_penalty_dominates!(dyrel, rsf_fields.η_tan_v, η_prev, rsf_fields.rsf_mask_v, 10.0)
+    @test Array(dyrel.dτVx)[7, 8] ≈ dτ_before * 0.1 rtol = 1.0e-8
+    copyto!(dyrel.γ_eff, γ_saved)
+    copyto!(dyrel.Dx, Dx_saved)
+    copyto!(dyrel.Dy, Dy_saved)
+    copyto!(dyrel.λmaxVx, λx_saved)
+    copyto!(dyrel.λmaxVy, λy_saved)
+    copyto!(stokes.viscosity.η, η_saved)
+    copyto!(stokes.viscosity.ηv, ηv_saved)
+    fill!(rsf_fields.η_tan, 0.0)
+    fill!(rsf_fields.η_tan_v, 0.0)
 
     # Ω_old must stay frozen through the solve; only update after convergence
     Ω_before = copy(Array(rsf_fields.Ω_old))
@@ -214,6 +302,7 @@ end
             linear_viscosity = true,
             viscosity_cutoff = (1.0e10, 1.0e28),
             rsf = rsf_bundle,
+            rsf_tangent = true,
         )
     )
 
