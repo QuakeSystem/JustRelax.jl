@@ -164,6 +164,7 @@ export rsf_viscosity_from_stress,
     solve_bisect_eta_rsf,
     rsf_effective_viscosity,
     rsf_tangent_viscosity,
+    rsf_preconditioner_tangent,
     rsf_frozen_stress_viscosity,
     rsf_from_phase_params,
     to_rheology_calculator_kwargs

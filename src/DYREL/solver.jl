@@ -48,12 +48,32 @@ Solve the Stokes system with the self-tuned dynamic relaxation (DYREL) method.
 - `rsf_tangent`: Precondition DYREL with the frozen-state slope `η_tan` on rate-and-state
   nodes (2D). The stress update stays on the secant viscosity. Rebuilds the pseudo-step
   after each Powell-Hestenes fold and whenever the fault slope drops by more than a factor
-  of two. Where `γ_eff` dominates that slope, the pseudo-step is scaled by `√(η_new/η_old)`.
-  The fault band uses its own damping coefficient. Default: `false`.
+  of two. Where `γ_eff` dominates that slope, the pseudo-step is scaled by `√(η_new/η_old)`,
+  bounded below by `rsf_shrink_min`. The fault band uses its own damping coefficient.
+  Default: `false`.
+- `tangent_drop_abort`: If the fault tangent viscosity falls by at least this factor during
+  one inner iteration, throw `TangentDrop` instead of shrinking the pseudo-step. A drop of
+  this size means the trial strain rate left the frozen-state slope. `Inf` disables the
+  check. Default: `Inf`.
+- `rsf_η_contrast`: Relative floor on the RSF effective viscosity, ``η_eff ≥ G dt / rsf_η_contrast``.
+  The fault may not be softer than the elastic wall (``η_ve ≈ G dt``) by more than this
+  factor, whatever `dt` is; the absolute `viscosity_cutoff` still applies afterwards.
+  Locked nodes are unaffected. `Inf` disables the floor. Default: `Inf`.
+- `rsf_relaxation`: Under-relaxation of the RSF viscosity fold between iterations, in log
+  space, toward the previous iterate (initialised to the Maxwell viscosity of the creep
+  buffer at solver entry). `1` folds in one shot. The converged state is unchanged; only
+  the path toward it is damped. Default: `1`.
+- `rsf_shrink_min`: Lower bound on the per-rebuild pseudo-step factor `√(η_new/η_old)`
+  applied where the penalty dominates the fault tangent. Default: `0.1`.
 - `inertia`: Include physical inertia ``ρ (V − V0)/dt`` in the momentum residual (LaMEM-style).
   Uses `stokes.V0` from the previous converged step. Default: `false`.
 - `abort_growing_ph`: After the second Powell-Hestenes pass, abort if the outer residual
   grew and is still above the tolerance. Default: `false`.
+- `abort_on_max_iter`: If the total iteration cap is reached before the residual is
+  below tolerance, throw `MaxIter` with that residual instead of returning the
+  unconverged fields. Default: `false`.
+- `abort_on_positive_residual`: Throw `PositiveResidual` when the relative residual
+  is below tolerance but an absolute momentum residual is still above it. Default: `false`.
 - `ρ_inertia`: Density for the inertia term when `inertia=true`:
   `nothing` (default) → cell-centred phase-averaged density from `phase_ratios` + `rheology`;
   a scalar → uniform fill; a cell-centred array → copied as-is. Face values are averaged
@@ -159,6 +179,12 @@ function _solve_DYREL!(
         inertia = false,
         ρ_inertia = nothing,
         abort_growing_ph = false,
+        abort_on_max_iter = false,
+        abort_on_positive_residual = false,
+        tangent_drop_abort = Inf,
+        rsf_η_contrast = Inf,
+        rsf_relaxation = 1,
+        rsf_shrink_min = 0.1,
         kwargs...,
     ) where {N}
 
@@ -241,16 +267,34 @@ function _solve_DYREL!(
     # Maxwell / GeoParams buffers used as the RSF fold base (avoid stacking folds each PT iter)
     η_creep = nothing
     η_creep_v = nothing
+    # Previous effective viscosity for the relaxed fold. Starts from the Maxwell value of the
+    # base buffer, so the first fold is damped from the elastic state as well.
+    η_eff_prev = nothing
+    η_eff_prev_v = nothing
+    rsf_relax_on = rsf_stokes && rsf_relaxation < 1
     if rsf_stokes
+        Gdt_rsf = rsf.ctrl.G * dt
         if rsf_do_center(rsf.fields)
             η_creep = similar(stokes.viscosity.η)
             copyto!(η_creep, stokes.viscosity.η)
+            if rsf_relax_on
+                η_eff_prev = similar(η_creep)
+                @. η_eff_prev = inv(inv(η_creep) + inv(Gdt_rsf))
+            end
         end
         if rsf_do_vertex(rsf.fields)
             η_creep_v = similar(stokes.viscosity.ηv)
             copyto!(η_creep_v, stokes.viscosity.ηv)
+            if rsf_relax_on
+                η_eff_prev_v = similar(η_creep_v)
+                @. η_eff_prev_v = inv(inv(η_creep_v) + inv(Gdt_rsf))
+            end
         end
     end
+    rsf_fold_kw = (;
+        η_contrast = rsf_η_contrast, relaxation = rsf_relaxation,
+        η_eff_prev = η_eff_prev, η_eff_prev_v = η_eff_prev_v,
+    )
     DYREL!(dyrel, stokes, rheology, phase_ratios, grid.di, dt; CFL = dyrel.CFL)
     if free_surface
         apply_free_surface_diagonal!(fields.D[N], fields.λmaxV[N], ρg[end], grid.di.center, dt)
@@ -294,13 +338,13 @@ function _solve_DYREL!(
         compute_∇V_strain_rate_RP!(stokes, dyrel, rheology, phase_ratios, _di, ni, dt, true; args...)
 
         # RSF: fold frictional η into the Maxwell buffer with frozen Ω_old (before stress)
-        _apply_rsf_viscosity_and_halo!(stokes, rsf, phase_ratios, dt, viscosity_cutoff, rsf_stokes, η_creep, η_creep_v; restore_creep = true)
+        _apply_rsf_viscosity_and_halo!(stokes, rsf, phase_ratios, dt, viscosity_cutoff, rsf_stokes, η_creep, η_creep_v; restore_creep = true, rsf_fold_kw...)
 
         # compute deviatoric stress, refresh τII viscosity, and assemble θc = γ_eff·RP + ΔPψ in one pass
         compute_stress_viscosity_DRYEL!(stokes, θc, dyrel.γ_eff, rheology, phase_ratios, λ_relaxation_PH, dt, viscosity_relaxation, args, viscosity_cutoff, linear_viscosity)
         # GeoParams τII-viscosity may overwrite η; re-fold RSF onto that refreshed buffer
         if rsf_stokes && !linear_viscosity
-            _apply_rsf_viscosity_and_halo!(stokes, rsf, phase_ratios, dt, viscosity_cutoff, true, η_creep, η_creep_v; restore_creep = false)
+            _apply_rsf_viscosity_and_halo!(stokes, rsf, phase_ratios, dt, viscosity_cutoff, true, η_creep, η_creep_v; restore_creep = false, rsf_fold_kw...)
         end
         # Do not enforce τ → τ_rsf: LaMEM keeps τ = 2 η_eff ε. Forcing frictional
         # strength jumps stress (and stress-based Vp) even when the fault is still locked.
@@ -348,10 +392,9 @@ function _solve_DYREL!(
                 ", ",
             )
             @printf("itPH = %02d iter = %06d iter/nx = %03d, err = %1.3e - norm[%s, Rp=%1.3e %1.3e] \n", itPH, iter, iter / ni[1], err, errV_msg, errPt, errPt / errPt0)
-            if rsf_tangent_on
-                @parallel (@idx size(rsf.fields.η_tan_v)) _masked_positive!(tangent_drop, rsf.fields.η_tan_v, rsf.fields.rsf_mask_v, Inf)
-                @printf("  rsf tangent: min η_tan = %1.3e, max γ_eff = %1.3e\n", minimum_mpi(tangent_drop), maximum_mpi(dyrel.γ_eff))
-            end
+        end
+        if verbose_PH && rsf_tangent_on
+            _printf_rsf_diag(igg, dyrel, stokes, rsf, phase_ratios, rheology, dt, tangent_drop, @sprintf("itPH=%02d produced", itPH))
         end
         igg.me == 0 && isnan(err) && error("NaN detected in outer loop")
         igg.me == 0 && err > 1.0e10 && error("Kaboom! Error > 1e10 in outer loop")
@@ -359,9 +402,25 @@ function _solve_DYREL!(
         # larger than the previous pass will not recover by continuing this timestep.
         # Oscillation within 10× of ϵ is the tolerance floor, not a blow-up.
         if abort_growing_ph && itPH ≥ 2 && err > err_ph_prev && err > 10 * ϵ
+            rsf_tangent_on && igg.me == 0 && _printf_residual_hotspot(residuals, dyrel, stokes, rsf)
             error("GrowingPH: Powell-Hestenes residual grew from $err_ph_prev to $err at itPH = $itPH")
         end
         err_ph_prev = err
+        # `err` is min(relative, absolute), so a large drop can pass while the absolute
+        # momentum residual (the first number in the R1/R2 print) is still above ϵ.
+        err_abs = maximum(errV)
+        if abort_on_positive_residual && err < ϵ && err_abs > ϵ
+            err_abs_msg = join(ntuple(d -> @sprintf("R%d=%1.3e", d, errV[d]), dim), ", ")
+            igg.me == 0 && @printf(
+                "Warning: relative residual %1.3e passed ϵ = %1.3e, but the absolute residual is still %1.3e (%s) at itPH = %d\n",
+                err, ϵ, err_abs, err_abs_msg, itPH,
+            )
+            igg.me == 0 && @printf(
+                "  note: this absolute residual is an RMS of the momentum residual. Halving dt restores the step but does not scale that RMS by 1/2. scale_from_η=1 means dτ was not shortened; γ_max/η_tan≤10 means the penalty shrink did not run.\n",
+            )
+            rsf_tangent_on && igg.me == 0 && _printf_residual_hotspot(residuals, dyrel, stokes, rsf)
+            error("PositiveResidual: absolute residual $err_abs ($err_abs_msg) is above ϵ = $ϵ at itPH = $itPH (relative err = $err)")
+        end
         err < ϵ && break
 
         # The fold above just wrote η_tan. Rebuild before the velocity iterations so the
@@ -369,8 +428,9 @@ function _solve_DYREL!(
         if rsf_tangent_on
             _rebuild_dyrel_preconditioner!(
                 dyrel, stokes, phase_ratios, rheology, grid, dt, ρg, free_surface, ρ_inertia_c, _inv_dt, dim;
-                tangent = rsf_tangent_args, η_prev = η_tan_prev_v, γ_ratio = rsf_gamma_ratio,
+                tangent = rsf_tangent_args, η_prev = η_tan_prev_v, γ_ratio = rsf_gamma_ratio, shrink_min = rsf_shrink_min,
             )
+            verbose_PH && _printf_rsf_diag(igg, dyrel, stokes, rsf, phase_ratios, rheology, dt, tangent_drop, @sprintf("itPH=%02d rebuilt", itPH))
         end
 
         # Set tolerance of velocity solve proportional to residual
@@ -398,23 +458,32 @@ function _solve_DYREL!(
             compute_∇V_strain_rate_RP!(stokes, dyrel, rheology, phase_ratios, _di, ni, dt, true; args...)
 
             # RSF frictional η fold (frozen Ω_old) before stress
-            _apply_rsf_viscosity_and_halo!(stokes, rsf, phase_ratios, dt, viscosity_cutoff, rsf_stokes, η_creep, η_creep_v; restore_creep = true)
+            _apply_rsf_viscosity_and_halo!(stokes, rsf, phase_ratios, dt, viscosity_cutoff, rsf_stokes, η_creep, η_creep_v; restore_creep = true, rsf_fold_kw...)
 
             # Deviatoric stress, τII viscosity refresh, and θc = γ_eff·RP + ΔPψ assembly in one pass
             compute_stress_viscosity_DRYEL!(stokes, θc, dyrel.γ_eff, rheology, phase_ratios, λ_relaxation_DR, dt, viscosity_relaxation, args, viscosity_cutoff, linear_viscosity)
             if rsf_stokes && !linear_viscosity
-                _apply_rsf_viscosity_and_halo!(stokes, rsf, phase_ratios, dt, viscosity_cutoff, true, η_creep, η_creep_v; restore_creep = false)
+                _apply_rsf_viscosity_and_halo!(stokes, rsf, phase_ratios, dt, viscosity_cutoff, true, η_creep, η_creep_v; restore_creep = false, rsf_fold_kw...)
             end
             update_stress_halo!(stokes, dim, linear_viscosity && !rsf_stokes)
             free_surface_stress_bcs!(stokes, flow_bcs, dim)
 
             # The fold may have dropped the fault slope since the last pseudo-step.
+            # A drop past `tangent_drop_abort` is a trial state outside that slope: shrinking
+            # dτ by its square root freezes the overshot stress instead of removing it.
             if rsf_tangent_on
                 drop = max_tangent_drop!(tangent_drop, rsf.fields.η_tan_v, η_tan_prev_v, rsf.fields.rsf_mask_v)
+                if drop ≥ tangent_drop_abort
+                    error("TangentDrop: fault tangent viscosity fell by a factor of $drop at inner iter $iter (itPH = $itPH)")
+                end
                 if drop ≥ rsf_tangent_factor
                     _rebuild_dyrel_preconditioner!(
                         dyrel, stokes, phase_ratios, rheology, grid, dt, ρg, free_surface, ρ_inertia_c, _inv_dt, dim;
-                        tangent = rsf_tangent_args, η_prev = η_tan_prev_v, γ_ratio = rsf_gamma_ratio,
+                        tangent = rsf_tangent_args, η_prev = η_tan_prev_v, γ_ratio = rsf_gamma_ratio, shrink_min = rsf_shrink_min,
+                    )
+                    verbose_PH && _printf_rsf_diag(
+                        igg, dyrel, stokes, rsf, phase_ratios, rheology, dt, tangent_drop,
+                        @sprintf("inner iter=%d tangent-drop=%1.3e rebuilt", iter, drop),
                     )
                 end
             end
@@ -482,8 +551,16 @@ function _solve_DYREL!(
                     )
                     _rebuild_dyrel_preconditioner!(
                         dyrel, stokes, phase_ratios, rheology, grid, dt, ρg, free_surface, ρ_inertia_c, _inv_dt, dim;
-                        tangent = rsf_tangent_args, η_prev = η_tan_prev_v, γ_ratio = rsf_gamma_ratio,
+                        tangent = rsf_tangent_args, η_prev = η_tan_prev_v, γ_ratio = rsf_gamma_ratio, shrink_min = rsf_shrink_min,
                     )
+                    if verbose_PH
+                        abs_msg = join(ntuple(d -> @sprintf("R%d=%1.3e", d, errV[d]), dim), " ")
+                        _printf_rsf_diag(
+                            igg, dyrel, stokes, rsf, phase_ratios, rheology, dt, tangent_drop,
+                            @sprintf("inner iter=%d ratio=%1.3e abs[%s]", iter, err, abs_msg);
+                            λmin_fault = λmin_fault, λmin_wall = λmin_wall, c_fault = c_fault, c_wall = c_wall,
+                        )
+                    end
                 else
                     λminV = compute_λminV!(fields, residuals, residuals0, ni, dim)
                     @parallel (@idx ni) update_cV!(fields.cV, 2 * √(λminV) * dyrel.c_fact)
@@ -503,7 +580,34 @@ function _solve_DYREL!(
         compute_∇V_strain_rate_RP!(stokes, dyrel, rheology, phase_ratios, _di, ni, dt, false; args...)
         @. stokes.P += pressure_relaxation * dyrel.γ_eff * stokes.R.RP
 
-        iter > total_iterMax && break
+        if iter > total_iterMax
+            # The cap used to return this state as a finished step. The outer residual
+            # has not been checked since the inner loop overwrote `err`, so recompute it.
+            if abort_on_max_iter
+                @parallel (@idx ni) compute_PH_residual_V!(
+                    residuals...,
+                    @velocity(stokes)...,
+                    @velocity_old(stokes)...,
+                    stokes.P,
+                    stokes.ΔPψ,
+                    @stress(stokes)...,
+                    ρg...,
+                    ρ_inertia_c,
+                    _di.center,
+                    _di.vertex,
+                    dt_fs,
+                    _inv_dt,
+                )
+                err_cap = maximum(ntuple(d -> norm_mpi(residuals[d]) / √(v_dofs[d]), dim))
+                igg.me == 0 && @printf(
+                    "Warning: hit maximum iterations (%d) at itPH = %d, residual = %1.3e\n",
+                    iter, nPH, err_cap,
+                )
+                rsf_tangent_on && igg.me == 0 && _printf_residual_hotspot(residuals, dyrel, stokes, rsf)
+                error("MaxIter: hit maximum iterations ($iter) at itPH = $nPH, residual = $err_cap")
+            end
+            break
+        end
     end
 
     # absorb plastic pressure correction into P (mirrors APT: stokes.P .= θ = P + ΔPψ)
@@ -566,10 +670,13 @@ copy them onto `η` / `ηv` first so repeated PT iterations do not stack harmoni
 
 Vertex ηv is folded **in place** (LaMEM edgeConstEq); do not overwrite with
 `center2vertex!(ηv, η)` after a vertex fold.
+
+Remaining keywords (`η_contrast`, `relaxation`, `η_eff_prev`, `η_eff_prev_v`) are
+forwarded to [`apply_rsf_viscosity!`](@ref).
 """
 function _apply_rsf_viscosity_and_halo!(
         stokes, rsf, phase_ratios, dt, viscosity_cutoff, rsf_on, η_creep, η_creep_v;
-        restore_creep::Bool = true,
+        restore_creep::Bool = true, fold_kwargs...,
     )
     rsf_on || return nothing
     fields = rsf.fields
@@ -588,7 +695,7 @@ function _apply_rsf_viscosity_and_halo!(
     end
     apply_rsf_viscosity!(
         stokes, fields, rsf.ctrl, phase_ratios, dt;
-        viscosity_cutoff = viscosity_cutoff,
+        viscosity_cutoff = viscosity_cutoff, fold_kwargs...,
     )
     # Keep ηv consistent with folded η only when RSF is center-only
     if rsf_do_center(fields) && !rsf_do_vertex(fields)
@@ -615,13 +722,102 @@ function _solve_DYREL!(
     return _solve_DYREL!(stokes, ρg, dyrel, flow_bcs, phase_ratios, rheology, args, grid, dt, igg; kwargs...)
 end
 
+# One line of the RSF preconditioner: the pseudo-step actually stored in `dτ`, the tangent
+# shorten √(η_tan/η_ve), and whether γ_eff is large enough for the penalty shrink.
+# `scratch` is overwritten. Reductions run on every rank; the text is rank 0 only.
+function _printf_rsf_diag(
+        igg, dyrel, stokes, rsf, phase_ratios, rheology, dt, scratch, label;
+        λmin_fault = nothing, λmin_wall = nothing, c_fault = nothing, c_wall = nothing,
+    )
+    fields = rsf.fields
+    @parallel (@idx size(scratch)) _store_tangent_scale!(
+        scratch, stokes.viscosity.ηv, fields.η_tan_v, fields.rsf_mask_v, phase_ratios.vertex, rheology, dt,
+    )
+    scale_min = minimum_mpi(scratch)
+    n_short = sum_mpi(s -> ifelse(s < 1, one(s), zero(s)), scratch)
+    @parallel (@idx size(scratch)) _masked_positive!(scratch, fields.η_tan_v, fields.rsf_mask_v, Inf)
+    ηtan_min = minimum_mpi(scratch)
+    @parallel (@idx size(scratch)) _masked_positive!(scratch, stokes.viscosity.ηv, fields.rsf_mask_v, Inf)
+    ηv_min = minimum_mpi(scratch)
+    @parallel (@idx size(scratch)) _masked_abs!(scratch, fields.Vp_v, fields.rsf_mask_v, 0)
+    Vp_max = maximum_mpi(scratch)
+    @parallel (@idx size(scratch)) _masked_finite!(scratch, fields.Ωv, fields.rsf_mask_v, Inf)
+    Ω_min = minimum_mpi(scratch)
+    @parallel (@idx size(scratch)) _masked_finite!(scratch, fields.Ωv, fields.rsf_mask_v, -Inf)
+    Ω_max = maximum_mpi(scratch)
+    @parallel (@idx size(scratch)) _masked_abs!(scratch, stokes.τ.xy, fields.rsf_mask_v, 0)
+    τ_max = maximum_mpi(scratch)
+    dτ_min = min(minimum_mpi(dyrel.dτVx), minimum_mpi(dyrel.dτVy))
+    dτ_max = max(maximum_mpi(dyrel.dτVx), maximum_mpi(dyrel.dτVy))
+    λ_min = min(minimum_mpi(dyrel.λmaxVx), minimum_mpi(dyrel.λmaxVy))
+    λ_max = max(maximum_mpi(dyrel.λmaxVx), maximum_mpi(dyrel.λmaxVy))
+    γ_max = maximum_mpi(dyrel.γ_eff)
+    γ_over_η = isfinite(ηtan_min) && ηtan_min > 0 ? γ_max / ηtan_min : NaN
+    igg.me == 0 || return nothing
+    damp = if isnothing(λmin_fault)
+        ""
+    else
+        @sprintf(
+            " λmin[fault=%1.3e wall=%1.3e] c[fault=%1.3e wall=%1.3e]",
+            λmin_fault, λmin_wall, c_fault, c_wall,
+        )
+    end
+    @printf(
+        "  diag %s dt=%1.3e dτ_now=[%1.3e, %1.3e] λmax=[%1.3e, %1.3e] scale_from_η=%1.3e shortened=%d η_tan_min=%1.3e ηv_min=%1.3e γ_max/η_tan=%1.3e (penalty shrink if > 10) |Vp|=%1.3e |τxy|=%1.3e Ω=[%1.3e, %1.3e]%s\n",
+        label, dt, dτ_min, dτ_max, λ_min, λ_max, scale_min, Int(n_short), ηtan_min, ηv_min, γ_over_η, Vp_max, τ_max, Ω_min, Ω_max, damp,
+    )
+    return nothing
+end
+
+_at(A, i, j) = (1 ≤ i ≤ size(A, 1) && 1 ≤ j ≤ size(A, 2)) ? A[i, j] : NaN
+
+function _printf_vertex_state(tag, i, j, ηv, η_tan, Vp, Ω, τxy, mask)
+    @printf(
+        "    %s vertex (%d,%d): mask=%1.3e ηv=%1.3e η_tan=%1.3e Vp=%1.3e Ω=%1.3e τxy=%1.3e\n",
+        tag, i, j, _at(mask, i, j), _at(ηv, i, j), _at(η_tan, i, j), _at(Vp, i, j), _at(Ω, i, j), _at(τxy, i, j),
+    )
+    return nothing
+end
+
+# Rank-0 snapshot of the momentum node with the largest residual, and the fault vertices it reads.
+function _printf_residual_hotspot(residuals, dyrel, stokes, rsf)
+    ηv = Array(stokes.viscosity.ηv)
+    η_tan = Array(rsf.fields.η_tan_v)
+    Vp = Array(rsf.fields.Vp_v)
+    Ω = Array(rsf.fields.Ωv)
+    τxy = Array(stokes.τ.xy)
+    mask = Array(rsf.fields.rsf_mask_v)
+    γ = Array(dyrel.γ_eff)
+    comps = (
+        ("Rx", Array(residuals[1]), Array(dyrel.dτVx), Array(dyrel.λmaxVx), Array(dyrel.Dx), Array(dyrel.cVx), Array(stokes.V.Vx), ((1, 0), (1, 1))),
+        ("Ry", Array(residuals[2]), Array(dyrel.dτVy), Array(dyrel.λmaxVy), Array(dyrel.Dy), Array(dyrel.cVy), Array(stokes.V.Vy), ((0, 1), (1, 1))),
+    )
+    for (name, R, dτ, λ, D, c, V, verts) in comps
+        mag, idx = findmax(abs, R)
+        i, j = idx.I
+        @printf(
+            "  hotspot %s=%1.3e at (%d,%d) V=%1.3e dτ=%1.3e λmax=%1.3e D=%1.3e c=%1.3e\n",
+            name, mag, i, j, _at(V, i, j), _at(dτ, i, j), _at(λ, i, j), _at(D, i, j), _at(c, i, j),
+        )
+        for (di, dj) in verts
+            _printf_vertex_state(name, i + di, j + dj, ηv, η_tan, Vp, Ω, τxy, mask)
+        end
+        γi, γj = name == "Rx" ? (i + 1, j) : (i, j + 1)
+        @printf(
+            "    %s γ_eff cells (%d,%d)=%1.3e (%d,%d)=%1.3e\n",
+            name, i, j, _at(γ, i, j), γi, γj, _at(γ, γi, γj),
+        )
+    end
+    return nothing
+end
+
 # Rebuild D, λmax and the pseudo-step from the secant viscosity the residual uses.
 # `tangent` is `(η_tan, η_tan_v, rsf_mask, rsf_mask_v)`. The slope is not written into
 # the row: that would size the step for a softer operator than the one being iterated
 # and the elastic load becomes unstable. It only shortens dτ, by √(η_tan/η_ve).
 function _rebuild_dyrel_preconditioner!(
         dyrel, stokes, phase_ratios, rheology, grid, dt, ρg, free_surface, ρ_inertia_c, _inv_dt, dim;
-        tangent = nothing, η_prev = nothing, γ_ratio = 10.0,
+        tangent = nothing, η_prev = nothing, γ_ratio = 10.0, shrink_min = 0.1,
     )
     fields = dyrel_fields(dyrel, dim)
     N = ndims(stokes.P)
@@ -635,7 +831,7 @@ function _rebuild_dyrel_preconditioner!(
     if !isnothing(tangent)
         scale_dτ_by_tangent!(dyrel, stokes, phase_ratios, rheology, dt, tangent[2], tangent[4])
         if !isnothing(η_prev)
-            shrink_dτ_where_penalty_dominates!(dyrel, tangent[2], η_prev, tangent[4], γ_ratio)
+            shrink_dτ_where_penalty_dominates!(dyrel, tangent[2], η_prev, tangent[4], γ_ratio, shrink_min)
             copyto!(η_prev, tangent[2])
         end
     end

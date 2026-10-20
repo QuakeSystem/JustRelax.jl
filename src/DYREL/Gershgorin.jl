@@ -375,10 +375,13 @@ end
 end
 
 # Where the penalty dominates the tangent, λmax is a ratio and does not shrink
-# dτ after the fault softens. Scale that node's pseudo-step by √(η_new/η_old).
+# dτ after the fault softens. Scale that node's pseudo-step by √(η_new/η_old), but
+# never below `scale_min` per rebuild: the comparison is against the previous rebuild,
+# so a many-decade drop would otherwise freeze the node (dτ ~ 1e-27) for the rest of the
+# pass, and a frozen velocity cannot relieve the stress that caused the drop.
 @parallel_indices (i, j) function _shrink_dτ_rsf!(
         dτVx, dτVy, αVx, αVy, βVx, βVy, cVx, cVy,
-        γ_eff, η_tan_v, η_prev_v, rsf_mask_v, γ_ratio,
+        γ_eff, η_tan_v, η_prev_v, rsf_mask_v, γ_ratio, scale_min,
     )
     if i ≤ size(dτVx, 1) && j ≤ size(dτVx, 2)
         scale = one(eltype(dτVx))
@@ -391,10 +394,10 @@ end
             γE = γ_eff[iE, min(j, size(γ_eff, 2))]
             γrow = max(γW, γE)
             if jS ≤ size(rsf_mask_v, 2)
-                scale = _soften_scale(scale, rsf_mask_v[iv, jS], η_tan_v[iv, jS], η_prev_v[iv, jS], γrow, γ_ratio)
+                scale = _soften_scale(scale, rsf_mask_v[iv, jS], η_tan_v[iv, jS], η_prev_v[iv, jS], γrow, γ_ratio, scale_min)
             end
             if jN ≤ size(rsf_mask_v, 2)
-                scale = _soften_scale(scale, rsf_mask_v[iv, jN], η_tan_v[iv, jN], η_prev_v[iv, jN], γrow, γ_ratio)
+                scale = _soften_scale(scale, rsf_mask_v[iv, jN], η_tan_v[iv, jN], η_prev_v[iv, jN], γrow, γ_ratio, scale_min)
             end
         end
         _apply_dτ_scale!(dτVx, αVx, βVx, cVx, i, j, scale)
@@ -408,11 +411,11 @@ end
             γN = γ_eff[min(i, size(γ_eff, 1)), jN]
             γrow = max(γS, γN)
             if i ≤ size(rsf_mask_v, 1)
-                scale = _soften_scale(scale, rsf_mask_v[i, jv], η_tan_v[i, jv], η_prev_v[i, jv], γrow, γ_ratio)
+                scale = _soften_scale(scale, rsf_mask_v[i, jv], η_tan_v[i, jv], η_prev_v[i, jv], γrow, γ_ratio, scale_min)
             end
             ie = i + 1
             if ie ≤ size(rsf_mask_v, 1)
-                scale = _soften_scale(scale, rsf_mask_v[ie, jv], η_tan_v[ie, jv], η_prev_v[ie, jv], γrow, γ_ratio)
+                scale = _soften_scale(scale, rsf_mask_v[ie, jv], η_tan_v[ie, jv], η_prev_v[ie, jv], γrow, γ_ratio, scale_min)
             end
         end
         _apply_dτ_scale!(dτVy, αVy, βVy, cVy, i, j, scale)
@@ -420,9 +423,9 @@ end
     return nothing
 end
 
-@inline function _soften_scale(scale, mask, ηn, ηo, γrow, γ_ratio)
+@inline function _soften_scale(scale, mask, ηn, ηo, γrow, γ_ratio, scale_min = 0.1)
     if mask > 0.5 && isfinite(ηn) && isfinite(ηo) && ηn > 0 && ηo > ηn && γrow > γ_ratio * ηn
-        return min(scale, sqrt(ηn / ηo))
+        return min(scale, max(sqrt(ηn / ηo), scale_min))
     end
     return scale
 end
@@ -497,11 +500,30 @@ function scale_dτ_by_tangent!(dyrel, stokes, phase_ratios, rheology, dt, η_tan
     return nothing
 end
 
-function shrink_dτ_where_penalty_dominates!(dyrel, η_tan_v, η_prev_v, rsf_mask_v, γ_ratio)
+@parallel_indices (i, j) function _store_tangent_scale!(scale, ηv, η_tan_v, mask_v, phase_vertex, rheology, dt)
+    scale[i, j] = _tangent_step_scale(
+        one(eltype(scale)), mask_v[i, j], ηv[i, j], η_tan_v[i, j], phase_vertex[i, j], rheology, dt,
+    )
+    return nothing
+end
+
+@parallel_indices (i, j) function _masked_finite!(out, A, mask, empty)
+    a = A[i, j]
+    out[i, j] = (mask[i, j] > 0.5 && isfinite(a)) ? a : empty
+    return nothing
+end
+
+@parallel_indices (i, j) function _masked_abs!(out, A, mask, empty)
+    a = A[i, j]
+    out[i, j] = (mask[i, j] > 0.5 && isfinite(a)) ? abs(a) : empty
+    return nothing
+end
+
+function shrink_dτ_where_penalty_dominates!(dyrel, η_tan_v, η_prev_v, rsf_mask_v, γ_ratio, scale_min = 0.1)
     ni = covering_size((dyrel.dτVx, dyrel.dτVy))
     @parallel (@idx ni) _shrink_dτ_rsf!(
         dyrel.dτVx, dyrel.dτVy, dyrel.αVx, dyrel.αVy, dyrel.βVx, dyrel.βVy,
-        dyrel.cVx, dyrel.cVy, dyrel.γ_eff, η_tan_v, η_prev_v, rsf_mask_v, γ_ratio,
+        dyrel.cVx, dyrel.cVy, dyrel.γ_eff, η_tan_v, η_prev_v, rsf_mask_v, γ_ratio, scale_min,
     )
     return nothing
 end

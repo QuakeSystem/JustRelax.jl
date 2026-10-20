@@ -116,6 +116,121 @@ end
     )
     @test isfinite(η_tan_a) && η_tan_a > 0
     @test η_tan_a < η_eff_a
+
+    # Relative floor η_eff ≥ Gdt/η_contrast. Default Inf reproduces the unbounded solve.
+    η_eff_inf, η_out_inf, _, _ = rsf_effective_viscosity(
+        r; DII = DII_act, η_creep = η_creep, Gdt = Gdt, Ω_old = -1.0, P = P, η_contrast = Inf
+    )
+    @test η_eff_inf == η_eff_a
+    @test η_out_inf == η_out_a
+    # Locked: η_eff ≈ Gdt is above the floor, so nothing changes.
+    η_eff_lock_c, η_out_lock_c, _, _ = rsf_effective_viscosity(
+        r_lock; DII = DII, η_creep = η_creep, Gdt = Gdt, Ω_old = 40.0, P = P, η_contrast = 1.0e4
+    )
+    @test η_eff_lock_c == η_eff
+    @test η_out_lock_c ≈ η_creep
+    # Fast-slipping node well below the floor: pinned to Gdt/η_contrast, and the creep
+    # buffer maps back to that value through the Maxwell combine.
+    # At this rate the Maxwell trial stress (30 MPa) gives Vp ~ 1e220 and a stress-based
+    # η_rsf below ε_floor. That guess used to be dropped as "locked", collapsing the
+    # bracket onto η_ve; the solve must return the finite slipping root instead.
+    DII_soft = 1.0e-6
+    η_guess, _ = rsf_viscosity_from_stress(r; τ = 2 * η_ve * DII_soft, Ω_old = -1.0, P = P)
+    @test η_guess < 1.0e-30
+    η_eff_soft, η_out_soft, Vp_soft, τ_soft = rsf_effective_viscosity(
+        r; DII = DII_soft, η_creep = η_creep, Gdt = Gdt, Ω_old = -1.0, P = P
+    )
+    @test isfinite(η_eff_soft) && η_eff_soft > 0
+    @test abs(rsf_cons_eq_residual(η_eff_soft, DII_soft, η_creep, Gdt, r, -1.0, P)) ≤ 1.0e-6 * DII_soft
+    @test isfinite(Vp_soft)
+    @test Vp_soft ≈ 2 * 500.0 * (DII_soft - τ_soft / (2 * Gdt)) rtol = 1.0e-6
+    @test isapprox(1 / (1 / η_out_soft + 1 / Gdt), η_eff_soft; rtol = 1.0e-6)
+    contrast = 2.0
+    @test η_eff_soft < Gdt / contrast / 5
+    η_eff_c, η_out_c, Vp_c, τ_c = rsf_effective_viscosity(
+        r; DII = DII_soft, η_creep = η_creep, Gdt = Gdt, Ω_old = -1.0, P = P, η_contrast = contrast
+    )
+    @test η_eff_c ≈ Gdt / contrast rtol = 1.0e-12
+    @test isapprox(1 / (1 / η_out_c + 1 / Gdt), η_eff_c; rtol = 1.0e-6)
+    @test τ_c ≈ 2 * η_eff_c * DII_soft
+    @test Vp_c ≈ compute_Vp_from_stress(r; τ = τ_c, Ω = -1.0, P = P)
+    # A floor below the unbounded answer is inactive.
+    η_eff_loose, _, _, _ = rsf_effective_viscosity(
+        r; DII = DII_soft, η_creep = η_creep, Gdt = Gdt, Ω_old = -1.0, P = P, η_contrast = 1.0e6
+    )
+    @test η_eff_loose == η_eff_soft
+    # The floor can never exceed the Maxwell trial viscosity.
+    η_eff_tight, _, _, _ = rsf_effective_viscosity(
+        r; DII = DII_act, η_creep = η_creep, Gdt = Gdt, Ω_old = -1.0, P = P, η_contrast = 1.0 + 1.0e-12
+    )
+    @test η_eff_tight ≤ η_ve * (1 + 1.0e-12)
+
+    # Log-space relaxation toward η_prev. relax = 1 or no history: unbounded result.
+    η_prev = Gdt
+    η_eff_r1, _, _, _ = rsf_effective_viscosity(
+        r; DII = DII_soft, η_creep = η_creep, Gdt = Gdt, Ω_old = -1.0, P = P, η_prev = η_prev, relax = 1
+    )
+    @test η_eff_r1 == η_eff_soft
+    η_eff_r0, _, _, _ = rsf_effective_viscosity(
+        r; DII = DII_soft, η_creep = η_creep, Gdt = Gdt, Ω_old = -1.0, P = P, η_prev = 0.0, relax = 0.5
+    )
+    @test η_eff_r0 == η_eff_soft
+    # relax = 0.5 lands at the geometric mean, with τ and Vp evaluated there.
+    η_eff_half, η_out_half, Vp_half, τ_half = rsf_effective_viscosity(
+        r; DII = DII_soft, η_creep = η_creep, Gdt = Gdt, Ω_old = -1.0, P = P, η_prev = η_prev, relax = 0.5
+    )
+    @test η_eff_half ≈ sqrt(η_eff_soft * η_prev) rtol = 1.0e-10
+    @test η_eff_soft < η_eff_half < η_prev
+    @test τ_half ≈ 2 * η_eff_half * DII_soft
+    @test Vp_half ≈ compute_Vp_from_stress(r; τ = τ_half, Ω = -1.0, P = P)
+    @test isapprox(1 / (1 / η_out_half + 1 / Gdt), η_eff_half; rtol = 1.0e-6)
+    # Repeated relaxed folds from the same strain rate converge to the unrelaxed answer.
+    η_iter = η_prev
+    for _ in 1:60
+        η_iter, _, _, _ = rsf_effective_viscosity(
+            r; DII = DII_soft, η_creep = η_creep, Gdt = Gdt, Ω_old = -1.0, P = P, η_prev = η_iter, relax = 0.5
+        )
+    end
+    @test η_iter ≈ η_eff_soft rtol = 1.0e-8
+    # A previous iterate above the Maxwell trial is clipped to it first.
+    η_eff_clip, _, _, _ = rsf_effective_viscosity(
+        r; DII = DII_soft, η_creep = η_creep, Gdt = Gdt, Ω_old = -1.0, P = P, η_prev = 1.0e3 * Gdt, relax = 0.5
+    )
+    @test η_eff_clip ≈ sqrt(η_eff_soft * η_ve) rtol = 1.0e-10
+
+    # Absolute creep-buffer cutoff: η_eff is raised to the Maxwell image of η_min, and
+    # τ / Vp are recomputed there so the Stokes stress update matches the fold.
+    η_min_abs = 1.0e12
+    η_ve_floor = 1 / (1 / η_min_abs + 1 / Gdt)
+    @test η_eff_soft < η_ve_floor
+    η_eff_abs, η_out_abs, Vp_abs, τ_abs = rsf_effective_viscosity(
+        r; DII = DII_soft, η_creep = η_creep, Gdt = Gdt, Ω_old = -1.0, P = P, η_min = η_min_abs
+    )
+    @test η_eff_abs ≈ η_ve_floor rtol = 1.0e-12
+    @test η_out_abs ≈ η_min_abs rtol = 1.0e-6
+    @test τ_abs ≈ 2 * η_eff_abs * DII_soft
+    @test Vp_abs ≈ compute_Vp_from_stress(r; τ = τ_abs, Ω = -1.0, P = P)
+    # A floor below the unbounded answer is inactive; τ/Vp match the unclamped solve.
+    η_eff_abs_lo, η_out_abs_lo, Vp_abs_lo, τ_abs_lo = rsf_effective_viscosity(
+        r; DII = DII_soft, η_creep = η_creep, Gdt = Gdt, Ω_old = -1.0, P = P, η_min = 1.0e6
+    )
+    @test η_eff_abs_lo == η_eff_soft
+    @test η_out_abs_lo == η_out_soft
+    @test τ_abs_lo == τ_soft
+    @test Vp_abs_lo == Vp_soft
+    # Absolute floor wins over a softer relative contrast floor.
+    η_eff_both, _, _, _ = rsf_effective_viscosity(
+        r; DII = DII_soft, η_creep = η_creep, Gdt = Gdt, Ω_old = -1.0, P = P,
+        η_contrast = 1.0e6, η_min = η_min_abs,
+    )
+    @test η_eff_both ≈ η_ve_floor rtol = 1.0e-12
+    # Preconditioner slope cannot be stiffer than the clamped secant.
+    η_tan_unbounded = rsf_tangent_viscosity(
+        r; τ = τ_abs, Ω = -1.0, P = P, η_creep = η_creep, Gdt = Gdt,
+    )
+    @test rsf_preconditioner_tangent(η_tan_unbounded, η_eff_abs) == min(η_tan_unbounded, η_eff_abs)
+    @test rsf_preconditioner_tangent(η_eff_abs * 4, η_eff_abs) == η_eff_abs
+    @test rsf_preconditioner_tangent(η_eff_abs / 4, η_eff_abs) == η_eff_abs / 4
 end
 
 @testset "DYREL 2D RSF" begin
@@ -278,6 +393,22 @@ end
     copyto!(η_prev, η_prev_h)
     JustRelax2D.shrink_dτ_where_penalty_dominates!(dyrel, rsf_fields.η_tan_v, η_prev, rsf_fields.rsf_mask_v, 10.0)
     @test Array(dyrel.dτVx)[7, 8] ≈ dτ_before * 0.1 rtol = 1.0e-8
+    # A drop of many decades is capped at the per-rebuild floor (default 0.1) ...
+    JustRelax2D.update_dτV_α_β!(dyrel)
+    @test Array(dyrel.dτVx)[7, 8] ≈ dτ_before rtol = 1.0e-8
+    η_prev_h[8, 8] = 1.0e20
+    copyto!(η_prev, η_prev_h)
+    JustRelax2D.shrink_dτ_where_penalty_dominates!(dyrel, rsf_fields.η_tan_v, η_prev, rsf_fields.rsf_mask_v, 10.0)
+    @test Array(dyrel.dτVx)[7, 8] ≈ dτ_before * 0.1 rtol = 1.0e-8
+    # ... and the floor is a parameter.
+    JustRelax2D.update_dτV_α_β!(dyrel)
+    JustRelax2D.shrink_dτ_where_penalty_dominates!(dyrel, rsf_fields.η_tan_v, η_prev, rsf_fields.rsf_mask_v, 10.0, 1.0e-3)
+    @test Array(dyrel.dτVx)[7, 8] ≈ dτ_before * 1.0e-3 rtol = 1.0e-8
+    # α/β stay consistent with the scaled dτ.
+    dτ78 = Array(dyrel.dτVx)[7, 8]
+    c78 = Array(dyrel.cVx)[7, 8]
+    @test Array(dyrel.βVx)[7, 8] ≈ 2 * dτ78 / (2 + c78 * dτ78)
+    @test Array(dyrel.αVx)[7, 8] ≈ (2 - c78 * dτ78) / (2 + c78 * dτ78)
     copyto!(dyrel.γ_eff, γ_saved)
     copyto!(dyrel.Dx, Dx_saved)
     copyto!(dyrel.Dy, Dy_saved)
@@ -324,6 +455,37 @@ end
     @test out.Vp_max < 1.0e-3 * V_top
     @test minimum(Array(stokes.viscosity.η)) > 1.0e22
     @test minimum(Array(stokes.viscosity.ηv)) > 1.0e22
+
+    # Second step with the relative floor, the relaxed fold and a custom shrink floor
+    # threaded through the solver. The fault is still locked, so the converged state is the
+    # same elastic loading: η_eff ≈ G dt sits above G dt / η_contrast, and the relaxed fold
+    # has the Maxwell viscosity as both start and fixed point.
+    out2 = solve_DYREL!(
+        stokes, ρg, dyrel, flow_bcs, phase_ratios, rheology, args, grid, dt, igg;
+        kwargs = (;
+            verbose_PH = false,
+            verbose_DR = false,
+            iterMax = 20.0e3,
+            nout = 50,
+            rel_drop = 1.0e-2,
+            linear_viscosity = true,
+            viscosity_cutoff = (1.0e10, 1.0e28),
+            rsf = rsf_bundle,
+            rsf_tangent = true,
+            rsf_η_contrast = 1.0e4,
+            rsf_relaxation = 0.5,
+            rsf_shrink_min = 0.3,
+        )
+    )
+    @test isfinite(out2.dt_rsf) && out2.dt_rsf > 0
+    @test isapprox(maximum(abs, Array(stokes.τ.xy)), 2 * τ_elastic; rtol = 0.15)
+    @test out2.Vp_max < 1.0e-3 * V_top
+    @test minimum(Array(stokes.viscosity.η)) > 1.0e22
+    @test minimum(Array(stokes.viscosity.ηv)) > 1.0e22
+    # relaxation < 1 needs the history arrays when called directly
+    @test_throws ErrorException apply_rsf_viscosity!(
+        stokes, rsf_fields, ctrl, phase_ratios, dt; relaxation = 0.5
+    )
 
     finalize_global_grid(; finalize_MPI = false)
 end

@@ -88,6 +88,20 @@ JustRelax Maxwell **creep** buffer so ``η_ve(η_creep_out) = η_eff``:
 ```
 η_ve = 1 / (1/η_creep + 1/Gdt)
 ```
+
+# Keyword Arguments
+- `η_contrast`: Floor ``η_eff ≥ Gdt / η_contrast``, i.e. the node may not be softer than the
+  elastic wall by more than this factor. Locked nodes (``η_eff ≈ Gdt``) are unaffected.
+  `Inf` disables the floor. Default: `Inf`.
+- `η_min`, `η_max`: Absolute bounds on the Maxwell **creep** buffer (same meaning as
+  `viscosity_cutoff`). After the bisection, `η_eff` is raised/lowered to the Maxwell image
+  of those bounds, ``1 / (1/η_bound + 1/Gdt)``, and ``τ = 2 η_eff DII``, `Vp` and the creep
+  buffer are recomputed from that floored value. That way the stress the Stokes update
+  will form from the clamped buffer matches the fold. Defaults: `-Inf`, `Inf`.
+- `η_prev`, `relax`: Under-relax the fold toward the previous iterate in log space,
+  ``η_eff = exp((1 - relax) log η_prev + relax log η_eff)``, when `relax < 1` and `η_prev`
+  is a finite positive number. `τ`, `Vp` and the creep buffer are evaluated at the relaxed
+  value, so the fixed point of repeated folds is unchanged. Default: `nothing`, `1`.
 """
 @inline function rsf_effective_viscosity(
         r::RateStateFriction;
@@ -99,6 +113,11 @@ JustRelax Maxwell **creep** buffer so ``η_ve(η_creep_out) = η_eff``:
         tol_rel = 1.0e-12,
         maxit = 50,
         ε_floor = 1.0e-30,
+        η_contrast = Inf,
+        η_min = -Inf,
+        η_max = Inf,
+        η_prev = nothing,
+        relax = 1,
         kwargs...,
     )
     DII = max(DII, ε_floor)
@@ -112,7 +131,7 @@ JustRelax Maxwell **creep** buffer so ``η_ve(η_creep_out) = η_eff``:
     inv_creep = inv(η_creep)
     η_ve0 = inv(inv_els + inv_creep)
     τ_trial = 2 * η_ve0 * DII
-    η_rsf_g, _ = rsf_viscosity_from_stress(r; τ = τ_trial, Ω_old = Ω_old, P = P, ε_floor = ε_floor)
+    η_rsf_g, Vp_g = rsf_viscosity_from_stress(r; τ = τ_trial, Ω_old = Ω_old, P = P, ε_floor = ε_floor)
     inv_rsf = isfinite(η_rsf_g) && η_rsf_g > ε_floor ? inv(η_rsf_g) : zero(η_creep)
 
     inv_sum = inv_els + inv_creep + inv_rsf
@@ -123,24 +142,80 @@ JustRelax Maxwell **creep** buffer so ``η_ve(η_creep_out) = η_eff``:
     if η_lo > η_hi
         η_lo, η_hi = η_hi, η_lo
     end
+    # The Maxwell trial stress is so far past locking that `sinh` overflowed, or the
+    # stress-based guess fell below ε_floor and was dropped from `inv_rsf` above. Either way
+    # the bracket has just collapsed onto η_ve0 and would hand back the *elastic* viscosity
+    # for the softest possible node. Bracket the whole range instead: the residual is
+    # positive at ε_floor and very negative at η_ve0, so the bisection finds the real root.
+    very_soft = τ_trial > ε_floor && (!isfinite(Vp_g) || (isfinite(η_rsf_g) && η_rsf_g ≤ ε_floor))
+    if very_soft
+        η_lo = ε_floor
+        η_hi = η_ve0
+    end
 
     tol = tol_rel * DII
     η_eff = solve_bisect_eta_rsf(η_lo, η_hi, tol, maxit, DII, η_creep, Gdt, r, Ω_old, P)
     η_eff = min(max(η_eff, η_lo), η_hi)
 
+    # Relative floor: no softer than the elastic wall by more than η_contrast. The floor
+    # cannot exceed η_ve0, so locked nodes are unchanged.
+    if isfinite(η_contrast) && η_contrast > 0
+        η_eff = max(η_eff, min(Gdt / η_contrast, η_ve0))
+    end
+
+    # Under-relax toward the previous iterate (log space: viscosities span decades).
+    # Both ends are already floored, so the interpolant respects the floor.
+    η_eff = _relax_rsf_viscosity(η_eff, η_prev, relax, η_ve0)
+
+    # Absolute creep-buffer cutoff, applied on η_eff before τ/Vp so the Stokes stress
+    # update (which Maxwell-combines the clamped buffer) sees the same η. Floor first:
+    # harmonic(η_min, Gdt) is what η_ve becomes once η_creep is raised to η_min.
+    η_eff = _clamp_rsf_effective(η_eff, η_min, η_max, Gdt, ε_floor)
+
     τ = 2 * η_eff * DII
     Vp = compute_Vp_from_stress(r; τ = τ, Ω = Ω_old, P = P)
+    η_creep_out = _rsf_creep_from_effective(η_eff, η_ve0, η_creep, Gdt, ε_floor)
+    # Keep the buffer inside the cutoff even when η_eff was already above the Maxwell
+    # image (e.g. locked cell with a tiny η_creep that still maps to η_ve0 ≈ Gdt).
+    η_creep_out = min(max(η_creep_out, η_min), η_max)
 
-    # Map LaMEM η_eff → JR creep η so Maxwell update reproduces η_ve = η_eff.
-    # If η_eff matches Maxwell-only η_ve0, keep the GeoParams buffer unchanged.
-    η_creep_out = if η_eff ≥ η_ve0 * (1 - 1.0e-8)
+    return η_eff, η_creep_out, Vp, τ
+end
+
+# Maxwell image of a creep-buffer bound: η_ve(η) = 1/(1/η + 1/Gdt).
+@inline function _maxwell_image(η_bound, Gdt, ε_floor)
+    return inv(inv(max(η_bound, ε_floor)) + inv(Gdt))
+end
+
+@inline function _clamp_rsf_effective(η_eff, η_min, η_max, Gdt, ε_floor)
+    if isfinite(η_min) && η_min > 0
+        η_eff = max(η_eff, _maxwell_image(η_min, Gdt, ε_floor))
+    end
+    if isfinite(η_max) && η_max > 0
+        η_eff = min(η_eff, _maxwell_image(η_max, Gdt, ε_floor))
+    end
+    return η_eff
+end
+
+@inline _relax_rsf_viscosity(η_eff, ::Nothing, relax, η_ve0) = η_eff
+
+@inline function _relax_rsf_viscosity(η_eff, η_prev, relax, η_ve0)
+    if relax < 1 && isfinite(η_prev) && η_prev > 0
+        η_prev = min(η_prev, η_ve0)
+        η_eff = continuation_log(η_eff, η_prev, relax)
+    end
+    return η_eff
+end
+
+# Map LaMEM η_eff → JR creep η so the Maxwell update reproduces η_ve = η_eff.
+# If η_eff matches Maxwell-only η_ve0, keep the GeoParams buffer unchanged.
+@inline function _rsf_creep_from_effective(η_eff, η_ve0, η_creep, Gdt, ε_floor)
+    return if η_eff ≥ η_ve0 * (1 - 1.0e-8)
         η_creep
     else
         inv_c = inv(η_eff) - inv(Gdt)
         inv_c > ε_floor ? inv(inv_c) : η_creep
     end
-
-    return η_eff, η_creep_out, Vp, τ
 end
 
 """
@@ -155,6 +230,11 @@ constitutive law, not the secant `τ / (2ε)`.
 
 Locked faults (`dVp/dτ = 0`) reduce to the Maxwell viscosity. The value already
 includes elasticity and creep, so a preconditioner must not Maxwell-combine it again.
+
+When the secant `η_eff` has been raised (cutoff / contrast floor), Stokes iterates
+that linear dashpot, not the unbounded RSF slope. [`rsf_preconditioner_tangent`](@ref)
+then takes `min(η_tan, η_eff)` so the pseudo-step is sized for the operator that
+actually updates stress.
 """
 @inline function rsf_tangent_viscosity(
         r::RateStateFriction;
@@ -179,6 +259,17 @@ includes elasticity and creep, so a preconditioner must not Maxwell-combine it a
     end
     return η_tan
 end
+
+"""
+    rsf_preconditioner_tangent(η_tan, η_eff) -> η
+
+Slope written into the DYREL pseudo-step. Never stiffer than the secant Stokes
+actually uses: a cutoff/contrast floor raises `η_eff` to a linear dashpot, and the
+unbounded RSF derivative at that stress can sit *above* it (this run: `η_tan ≈ 3e9`
+with `η_eff = 5e8`). Sizing `dτ` from the stiffer number leaves the residual on the
+soft cells, rebuilds every inner iteration, and trips `GrowingPH`.
+"""
+@inline rsf_preconditioner_tangent(η_tan, η_eff) = min(η_tan, η_eff)
 
 """
     rsf_frozen_stress_viscosity(r; ε, Ω_old, P) -> (τ_rsf, η_rsf, Vp)
