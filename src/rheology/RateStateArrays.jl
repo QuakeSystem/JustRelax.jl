@@ -7,9 +7,7 @@ RSF state / diagnostic fields at **cell centers** and **vertices** (JR shear / L
 XY-edge nodes). Matches LaMEM `svCell` + `svXYEdge` each carrying their own `svDev`.
 
 Center fields (`Ω`, `Vp`, …) are size `ni`; vertex fields (`Ωv`, `Vp_v`, …) are `ni .+ 1`.
-
-`η_tan` / `η_tan_v` are the frozen-state tangent viscosities used by the DYREL
-preconditioner (`rsf_tangent = true`). They are not the creep buffer.
+`τ_rsf` is the frozen-state frictional strength at the current strain rate (diagnostic).
 
 `loc` selects which locations are updated (`:center`, `:vertex`, or `:both`; default `:both`).
 """
@@ -22,7 +20,6 @@ struct RateStateArrays{A, Av, T}
     a_eff::A
     b_eff::A
     rsf_mask::A
-    η_tan::A
     # vertices (shear nodes)
     Ωv::Av
     Ω_old_v::Av
@@ -31,7 +28,6 @@ struct RateStateArrays{A, Av, T}
     a_eff_v::Av
     b_eff_v::Av
     rsf_mask_v::Av
-    η_tan_v::Av
     loc::Symbol
 end
 

@@ -658,67 +658,6 @@ end
     return nothing
 end
 
-# Velocity nodes whose stencil reads a rate-and-state vertex. Indexing matches
-# the 2D Gershgorin kernel: Vx(i,j) reads ηv[i+1, j] and ηv[i+1, j+1];
-# Vy(i,j) reads ηv[i, j+1] and ηv[i+1, j+1].
-@parallel_indices (i, j) function _mark_fault_velocity_mask!(mask_x, mask_y, rsf_mask_v)
-    if i ≤ size(mask_x, 1) && j ≤ size(mask_x, 2)
-        touch = false
-        iv = i + 1
-        if iv ≤ size(rsf_mask_v, 1)
-            if j ≤ size(rsf_mask_v, 2) && rsf_mask_v[iv, j] > 0.5
-                touch = true
-            end
-            jn = j + 1
-            if jn ≤ size(rsf_mask_v, 2) && rsf_mask_v[iv, jn] > 0.5
-                touch = true
-            end
-        end
-        mask_x[i, j] = touch
-    end
-    if i ≤ size(mask_y, 1) && j ≤ size(mask_y, 2)
-        touch = false
-        jv = j + 1
-        if jv ≤ size(rsf_mask_v, 2)
-            if i ≤ size(rsf_mask_v, 1) && rsf_mask_v[i, jv] > 0.5
-                touch = true
-            end
-            ie = i + 1
-            if ie ≤ size(rsf_mask_v, 1) && rsf_mask_v[ie, jv] > 0.5
-                touch = true
-            end
-        end
-        mask_y[i, j] = touch
-    end
-    return nothing
-end
-
-@parallel_indices (i, j) function _invert_velocity_mask!(out_x, out_y, in_x, in_y)
-    if i ≤ size(out_x, 1) && j ≤ size(out_x, 2)
-        out_x[i, j] = !in_x[i, j]
-    end
-    if i ≤ size(out_y, 1) && j ≤ size(out_y, 2)
-        out_y[i, j] = !in_y[i, j]
-    end
-    return nothing
-end
-
-@parallel_indices (i, j) function _update_cV_fault!(cVx, cVy, mask_x, mask_y, c_fault, c_wall)
-    if i ≤ size(cVx, 1) && j ≤ size(cVx, 2)
-        cVx[i, j] = mask_x[i, j] ? c_fault : c_wall
-    end
-    if i ≤ size(cVy, 1) && j ≤ size(cVy, 2)
-        cVy[i, j] = mask_y[i, j] ? c_fault : c_wall
-    end
-    return nothing
-end
-
-function mark_fault_velocity_mask!(mask_x, mask_y, rsf_mask_v)
-    ni = covering_size((mask_x, mask_y))
-    @parallel (@idx ni) _mark_fault_velocity_mask!(mask_x, mask_y, rsf_mask_v)
-    return nothing
-end
-
 ## DR VELOCITY RESIDUAL + DAMPED UPDATE (fused)
 # Per-index damped pseudo-transient velocity update, shared between the fused residual kernel
 # below and the standalone `update_V_damping_DR_V!`. Returns (dVdτⁿ⁺¹, ΔV) so the caller can

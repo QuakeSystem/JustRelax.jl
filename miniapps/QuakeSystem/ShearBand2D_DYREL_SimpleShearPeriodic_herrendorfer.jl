@@ -6,13 +6,12 @@ Herrendörfer-style viscoelastic simple shear with Rate-and-State Friction (DYRE
 - Geometry: LaMEM-style segmented mesh (uniform x for periodicity; refined y) + GMG fault
 - RSF: frozen Ω during DYREL iterations; Ω → Ω_old after converged step
 - Inertia: optional LaMEM-style ``ρ (V − V0)/dt`` via `inertia` / `ρ_inertia` toggles
-- `rsf_tangent`: precondition DYREL with the frozen-state slope on the fault
-- `η_contrast`: fault effective viscosity may not fall below `G dt / η_contrast`, so the
-  contrast against the elastic wall (`η_ve ≈ G dt`) is bounded at every `dt`
-- `rsf_relaxation`: log-space under-relaxation of the RSF viscosity fold between
-  pseudo-transient iterations (1 = fold in one shot)
-- `retry_on_blowup`: on a DYREL residual above 1e10, or fewer than `min_itPH`
-  Powell-Hestenes passes while `dt < min_itPH_dt`, restore the step and retry at `dt/2`
+- Step scheme follows LaMEM `-snes_type ksponly`: the RSF law is folded once from the
+  incoming velocity, Stokes is solved with that viscosity frozen, and the law is
+  re-evaluated at the new velocity before the stress / state are committed.
+  `rsf_picard_max > 1` repeats this (LaMEM SNES Picard iterations).
+- dt control (LaMEM `tssolve` + `ADVUpdateTimeStepRSF`): grow by `inc_dt`, cap by
+  `dt_max` and the rate-and-state limit `dt_rsf`, floor at `dt_min`. No step retries.
 - VTK: ParaView fields including Vp_rsf, visc_creep and visc_total (LaMEM names)
 =#
 const isCUDA = false
@@ -56,100 +55,6 @@ solution(ε̇, t, G, η) = ε̇ * η * (1 - exp(-G * t / η))
 
 """LaMEM `visc_total`: ``1 / (1/η + 1/(G dt))``. `η = Inf` returns `G dt`."""
 maxwell_viscosity(η, Gdt) = @. inv(inv(η) + inv(Gdt))
-
-kaboom_error(e::ErrorException) = occursin("Kaboom!", e.msg) || occursin("GrowingPH", e.msg) || occursin("NaN detected", e.msg) || occursin("MaxIter", e.msg) || occursin("PositiveResidual", e.msg) || occursin("TangentDrop", e.msg)
-kaboom_error(_) = false
-
-"""Fields a rejected DYREL step mutates and the next attempt would otherwise inherit.
-
-Includes the end-of-step commits (`τ_o`, `V0`, RSF `Ω`) so a step that returned
-without really converging can be rolled back, not only a step that threw.
-"""
-function step_checkpoint(stokes, rsf_fields = nothing)
-    chk = (;
-        Vx = similar(stokes.V.Vx),
-        Vy = similar(stokes.V.Vy),
-        V0x = similar(stokes.V0.Vx),
-        V0y = similar(stokes.V0.Vy),
-        P = similar(stokes.P),
-        η = similar(stokes.viscosity.η),
-        ηv = similar(stokes.viscosity.ηv),
-        τxx = similar(stokes.τ_o.xx),
-        τyy = similar(stokes.τ_o.yy),
-        τxy = similar(stokes.τ_o.xy),
-        τxx_v = similar(stokes.τ_o.xx_v),
-        τyy_v = similar(stokes.τ_o.yy_v),
-        τxy_c = similar(stokes.τ_o.xy_c),
-        rsf = rsf_fields,
-        Ω = isnothing(rsf_fields) ? nothing : similar(rsf_fields.Ω),
-        Ω_old = isnothing(rsf_fields) ? nothing : similar(rsf_fields.Ω_old),
-        Ωv = isnothing(rsf_fields) ? nothing : similar(rsf_fields.Ωv),
-        Ω_old_v = isnothing(rsf_fields) ? nothing : similar(rsf_fields.Ω_old_v),
-    )
-    return save_step!(chk, stokes)
-end
-
-function save_step!(chk, stokes)
-    copyto!(chk.Vx, stokes.V.Vx)
-    copyto!(chk.Vy, stokes.V.Vy)
-    copyto!(chk.V0x, stokes.V0.Vx)
-    copyto!(chk.V0y, stokes.V0.Vy)
-    copyto!(chk.P, stokes.P)
-    copyto!(chk.η, stokes.viscosity.η)
-    copyto!(chk.ηv, stokes.viscosity.ηv)
-    copyto!(chk.τxx, stokes.τ_o.xx)
-    copyto!(chk.τyy, stokes.τ_o.yy)
-    copyto!(chk.τxy, stokes.τ_o.xy)
-    copyto!(chk.τxx_v, stokes.τ_o.xx_v)
-    copyto!(chk.τyy_v, stokes.τ_o.yy_v)
-    copyto!(chk.τxy_c, stokes.τ_o.xy_c)
-    if !isnothing(chk.rsf)
-        copyto!(chk.Ω, chk.rsf.Ω)
-        copyto!(chk.Ω_old, chk.rsf.Ω_old)
-        copyto!(chk.Ωv, chk.rsf.Ωv)
-        copyto!(chk.Ω_old_v, chk.rsf.Ω_old_v)
-    end
-    return chk
-end
-
-function restore_step!(stokes, dyrel, chk)
-    copyto!(stokes.V.Vx, chk.Vx)
-    copyto!(stokes.V.Vy, chk.Vy)
-    copyto!(stokes.V0.Vx, chk.V0x)
-    copyto!(stokes.V0.Vy, chk.V0y)
-    copyto!(stokes.P, chk.P)
-    copyto!(stokes.viscosity.η, chk.η)
-    copyto!(stokes.viscosity.ηv, chk.ηv)
-    copyto!(stokes.τ_o.xx, chk.τxx)
-    copyto!(stokes.τ_o.yy, chk.τyy)
-    copyto!(stokes.τ_o.xy, chk.τxy)
-    copyto!(stokes.τ_o.xx_v, chk.τxx_v)
-    copyto!(stokes.τ_o.yy_v, chk.τyy_v)
-    copyto!(stokes.τ_o.xy_c, chk.τxy_c)
-    # Live stress is overwritten from τ_o on the next stress call. Copy it back too so a
-    # print between restore and that call does not still show the rejected trial.
-    copyto!(stokes.τ.xx, chk.τxx)
-    copyto!(stokes.τ.yy, chk.τyy)
-    copyto!(stokes.τ.xy, chk.τxy)
-    copyto!(stokes.τ.xx_v, chk.τxx_v)
-    copyto!(stokes.τ.yy_v, chk.τyy_v)
-    copyto!(stokes.τ.xy_c, chk.τxy_c)
-    if !isnothing(chk.rsf)
-        copyto!(chk.rsf.Ω, chk.Ω)
-        copyto!(chk.rsf.Ω_old, chk.Ω_old)
-        copyto!(chk.rsf.Ωv, chk.Ωv)
-        copyto!(chk.rsf.Ω_old_v, chk.Ω_old_v)
-    end
-    # Pseudo-velocity left by the rejected iteration would kick the restored velocity.
-    fill!(dyrel.dVxdτ, 0)
-    fill!(dyrel.dVydτ, 0)
-    fill!(dyrel.dVx, 0)
-    fill!(dyrel.dVy, 0)
-    return stokes
-end
-
-"""`dt/2`, or `nothing` when that would pass `dt_min`."""
-halved_dt(dt, dt_min) = (dt_new = dt / 2; dt_new < dt_min ? nothing : dt_new)
 
 function phase_map(phase_ratios_loc)
     # Adapt bulk-copies CellArray.data; Array(CellArray) scalar-indexes on CUDA
@@ -342,8 +247,8 @@ function main(
     ρg = @zeros(ni...), @zeros(ni...)
     args = (; T = @zeros(ni .+ 2...), P = stokes.P, dt = dt)
 
-    # Floor η high enough that rupture localisation cannot collapse η → runaway Vp
-    viscosity_cutoff = rsf_enabled ? (5.0e8, 5.0e26) : (5.0e8, 1.0e28)
+    # LaMEM eta_min / eta_max: bounds on the creep viscosity, not on the RSF root
+    viscosity_cutoff = (1.0e-3, 5.0e26)
     compute_viscosity!(stokes, phase_ratios, args, rheology, viscosity_cutoff)
 
     # Host coords for comprehensions / VTK (device xvi would scalar-index on CUDA)
@@ -369,18 +274,11 @@ function main(
     # grid.di is a NamedTuple of (possibly vector) spacings — DYREL / Gershgorin use @dx/@dy
     dyrel = DYREL(backend, stokes, rheology, phase_ratios, grid.di, dt; ϵ = 1.0e-5)
     εbg = V_top / ly
-    dt_rsf_switch = rsf_enabled ? Float64(get(rsf_nt, :dt_rsf_switch, 1.0e9)) : Inf
-    dt_min = rsf_enabled ? Float64(get(rsf_nt, :dt_min, 1.0e-2)) : 0.0
+    dt_min = rsf_enabled ? Float64(get(rsf_nt, :dt_min, 1.0e-1)) : 0.0
     dt_max = rsf_enabled ? Float64(get(rsf_nt, :dt_max, 1.0e7)) : Inf
-    # Halve dt and repeat the step when DYREL throws on a residual above 1e10, or when a
-    # step with dt < min_itPH_dt returns after fewer than min_itPH Powell-Hestenes passes.
-    rsf_tangent = rsf_enabled && Bool(get(rsf_nt, :rsf_tangent, false))
-    rsf_η_contrast = rsf_enabled ? Float64(get(rsf_nt, :η_contrast, Inf)) : Inf
-    rsf_relaxation = rsf_enabled ? Float64(get(rsf_nt, :rsf_relaxation, 1.0)) : 1.0
-    retry_on_blowup = rsf_enabled && Bool(get(rsf_nt, :retry_on_blowup, false))
-    min_itPH = rsf_enabled ? Int(get(rsf_nt, :min_itPH, 3)) : 0
-    min_itPH_dt = rsf_enabled ? Float64(get(rsf_nt, :min_itPH_dt, 1.0e7)) : Inf
-    chk = retry_on_blowup ? step_checkpoint(stokes, isnothing(rsf_bundle) ? nothing : rsf_bundle.fields) : nothing
+    inc_dt = Float64(get(something(rsf_nt, (;)), :inc_dt, 0.1))
+    rsf_picard_max = rsf_enabled ? Int(get(rsf_nt, :rsf_picard_max, 1)) : 1
+    rsf_picard_rtol = rsf_enabled ? Float64(get(rsf_nt, :rsf_picard_rtol, 1.0e-4)) : 1.0e-4
 
     println(
         "grid: ni=$ni; Δx∈$(extrema(Array(grid.di.vertex[1]))); " *
@@ -411,106 +309,37 @@ function main(
 
     t, it = 0.0, 0
     t_run = time()
-    rsf_tangent && println(
-        "rsf_tangent ON: pseudo-step is shortened by √(η_tan/η_ve) where the fault slope is softer than the secant viscosity"
-    )
-    rsf_enabled && isfinite(rsf_η_contrast) && println(
-        "η_contrast = $rsf_η_contrast: fault η_eff ≥ G dt / $rsf_η_contrast (absolute floor $(viscosity_cutoff[1]) still applies)"
-    )
-    rsf_enabled && rsf_relaxation < 1 && println(
-        "rsf_relaxation = $rsf_relaxation: RSF viscosity fold is under-relaxed in log space between pseudo-transient iterations"
-    )
-    retry_on_blowup && println(
-        "retry_on_blowup ON: residual > 1e10, a tangent drop ≥ 1e3, or < $min_itPH Powell-Hestenes passes while dt < $min_itPH_dt, restores the step and retries at dt/2"
+    rsf_enabled && println(
+        "RSF: LaMEM Picard scheme, rsf_picard_max = $rsf_picard_max (1 = ksponly), rsf_picard_rtol = $rsf_picard_rtol; dt ∈ [$dt_min, $dt_max], inc_dt = $inc_dt"
     )
     for _ in 1:nsteps
-        out = nothing
         t_step = time()
-        nretry = 0
-        retried = false
-        while true
-            retry_on_blowup && save_step!(chk, stokes)
-            try
-                out = solve_DYREL!(
-                    stokes,
-                    ρg,
-                    dyrel,
-                    flow_bcs,
-                    phase_ratios,
-                    rheology,
-                    args,
-                    grid,
-                    dt,
-                    igg;
-                    kwargs = (;
-                        verbose_PH = true,
-                        verbose_DR = false,
-                        iterMax = 50.0e1,
-                        nout = 10,
-                        rel_drop = 1.0e-6,
-                        linear_viscosity = true,
-                        viscosity_cutoff = viscosity_cutoff,
-                        rsf = rsf_bundle,
-                        inertia = inertia,
-                        ρ_inertia = ρ_for_inertia,
-                        abort_growing_ph = retry_on_blowup,
-                        abort_on_max_iter = retry_on_blowup,
-                        abort_on_positive_residual = false,
-                        tangent_drop_abort = retry_on_blowup ? 1.0e3 : Inf,
-                        rsf_tangent = rsf_tangent,
-                        rsf_η_contrast = rsf_η_contrast,
-                        rsf_relaxation = rsf_relaxation,
-                    )
-                )
-                # A single Powell-Hestenes pass normalizes the residual to 1 and can
-                # satisfy err < ε without a real velocity solve. Do not keep that step.
-                if retry_on_blowup && it ≥ 10 && dt < min_itPH_dt && out.itPH < min_itPH
-                    dt_new = halved_dt(dt, dt_min)
-                    if isnothing(dt_new)
-                        error("Only $(out.itPH) Powell-Hestenes iterations at t = $t, dt = $dt (dt_min = $dt_min).")
-                    end
-                    restore_step!(stokes, dyrel, chk)
-                    retried = true
-                    println(
-                        "Only $(out.itPH) Powell-Hestenes iterations at t = $t, dt = $dt (need $min_itPH while dt < $min_itPH_dt). Restoring the step and retrying with dt = $dt_new."
-                    )
-                    dt = dt_new
-                    args = (; args..., dt = dt)
-                    continue
-                end
-                break
-            catch e
-                if !(retry_on_blowup && kaboom_error(e))
-                    rethrow()
-                end
-                dt_new = halved_dt(dt, dt_min)
-                reason = if e isa ErrorException && occursin("GrowingPH", e.msg)
-                    "Residuals grew after Powell-Hestenes iteration 2"
-                elseif e isa ErrorException && occursin("MaxIter", e.msg)
-                    "Iteration cap reached ($(e.msg))"
-                elseif e isa ErrorException && occursin("PositiveResidual", e.msg)
-                    "Absolute residual still above tolerance ($(e.msg))"
-                elseif e isa ErrorException && occursin("TangentDrop", e.msg)
-                    "Fault tangent collapsed ($(e.msg))"
-                else
-                    "Kaboom"
-                end
-                if isnothing(dt_new)
-                    println("$reason at t = $t, dt = $dt is already at dt_min = $dt_min. Not retrying.")
-                    rethrow()
-                end
-                restore_step!(stokes, dyrel, chk)
-                retried = true
-                nretry += 1
-                Ωmsg = isnothing(chk.rsf) ? "" : " Ωv=[$(minimum(Array(chk.rsf.Ωv))), $(maximum(Array(chk.rsf.Ωv)))]"
-                println("$reason at t = $t, dt = $dt. Restoring the step and retrying with dt = $dt_new.")
-                println(
-                    "  retry $nretry restored max|Vx|=$(maximum(abs, Array(stokes.V.Vx))) max|Vy|=$(maximum(abs, Array(stokes.V.Vy))) max|τxy_o|=$(maximum(abs, Array(stokes.τ_o.xy))) max|P|=$(maximum(abs, Array(stokes.P)))$Ωmsg pseudo-velocity zeroed",
-                )
-                dt = dt_new
-                args = (; args..., dt = dt)
-            end
-        end
+        out = solve_DYREL!(
+            stokes,
+            ρg,
+            dyrel,
+            flow_bcs,
+            phase_ratios,
+            rheology,
+            args,
+            grid,
+            dt,
+            igg;
+            kwargs = (;
+                verbose_PH = true,
+                verbose_DR = false,
+                iterMax = 50.0e1,
+                nout = 10,
+                rel_drop = 1.0e-6,
+                linear_viscosity = true,
+                viscosity_cutoff = viscosity_cutoff,
+                rsf = rsf_bundle,
+                inertia = inertia,
+                ρ_inertia = ρ_for_inertia,
+                rsf_picard_max = rsf_picard_max,
+                rsf_picard_rtol = rsf_picard_rtol,
+            )
+        )
         # Keep Dirichlet top wall under inertia updates
         @views stokes.V.Vx[:, end] .= V_top
         tensor_invariant!(stokes.τ)
@@ -521,7 +350,7 @@ function main(
 
         τxy_max = maximum(abs, stokes.τ.xy)
         τ_analytic = solution(εbg, t, G0, η0)
-        println("it = $it; t = $t; max|τxy| = $τxy_max; analytic = $τ_analytic; dt = $dt; dt_rsf = $(out.dt_rsf); itPH = $(out.itPH)")
+        println("it = $it; t = $t; max|τxy| = $τxy_max; analytic = $τ_analytic; dt = $dt; dt_rsf = $(out.dt_rsf); itPH = $(out.itPH); picard = $(out.rsf_picard_its); ||F||/||F0|| = $(out.rsf_residual)")
         println("Timestep completed in $(round(time() - t_step; digits = 2)) sec, made $(out.iter) iterations.")
 
         write_vtk_step!(
@@ -530,18 +359,13 @@ function main(
             G0, dt,
         )
 
-        # Take the RSF timestep when it is below the switch (1e9) or below the step
-        # just taken. Otherwise keep dt (initial value, or the last accepted step).
-        # A retry already cut dt because this `dt_rsf` overshot the fault. Do not put
-        # that larger value back on the following step.
-        if rsf_enabled && it ≥ 1 && isfinite(out.dt_rsf) && (out.dt_rsf < dt_rsf_switch || out.dt_rsf < dt)
-            dt_next = clamp(out.dt_rsf, dt_min, dt_max)
-            if retried && dt_next > dt
-                println("Keeping dt = $dt after $nretry retries; dt_rsf = $dt_next would raise it again.")
-            else
-                dt = dt_next
-                args = (; args..., dt = dt)
-            end
+        # LaMEM: dt grows by inc_dt, capped by dt_max and the rate-and-state limit dt_rsf
+        # (ADVUpdateTimeStepRSF), floored at dt_min. The step just taken is never redone.
+        if rsf_enabled
+            dt_next = min(dt * (1 + inc_dt), dt_max)
+            isfinite(out.dt_rsf) && (dt_next = min(dt_next, out.dt_rsf))
+            dt = max(dt_next, dt_min)
+            args = (; args..., dt = dt)
         end
     end
 
@@ -558,7 +382,7 @@ nel_y = (10, 4, 10)                          # cells per y-segment (LaMEM nel_z)
 coord_y = (-150.0e3, -76.0e3, -74.0e3, 0.0)  # segment boundaries (LaMEM coord_z)
 fault = (; x = (-75.0e3, 75.0e3), y = (-75.25e3, -74.75e3))
 V_top = 4.0e-9
-dt = 1.0e7
+dt = 500.0  # LaMEM initial dt; grows by inc_dt up to dt_max
 nsteps = 103000
 # Physical inertia ρ(V−V0)/dt (LaMEM `inertia = 1`). Off by default — set true for inertial runs.
 inertia = true
@@ -571,27 +395,13 @@ RSF = (
     # LaMEM: constitutive RSF on cells and XY edges (JR centers + vertices)
     loc = :vertex,
     V0 = 4.0e-9,
-    # dt_min must stay below the rate-and-state limit dt_rsf (≈ 6 s at the end of the
-    # postseismic stage, 1e-4 s coseismic). A dt_min above it forces the step past the
-    # fault and leaves the retry with nothing to halve.
-    dt_min = 1.0e-2,
+    # LaMEM Shear_test_PBC_herrendorfer.dat: dt_min = 1e-1, dt_max = 1e7, inc_dt = 0.1
+    dt_min = 1.0e-1,
     dt_max = 1.0e7,
-    dt_rsf_switch = 1.0e9,
-    # On "Kaboom! Error > 1e10", a tangent drop ≥ 1e3, or fewer than min_itPH
-    # Powell-Hestenes passes while dt < min_itPH_dt, restore this step and retry
-    # at dt/2 down to dt_min. The reduced dt is kept for the next step.
-    retry_on_blowup = true,
-    rsf_tangent = true,
-    # Fault η_eff ≥ G dt / η_contrast. With G = 3e10 and dt = 10 s the wall is at G dt =
-    # 3e11; η_contrast = 1e2 floors the fault at 3e9 (100×). The previous 1e3 still left
-    # a 600× jump once viscosity_cutoff[1] = 5e8 bound, which DYREL could not close.
-    # The absolute floor takes over below dt ≈ 2e-3 s.
-    η_contrast = 1.0e2,
-    # Log-space under-relaxation of the RSF fold between inner iterations. 0.5 halves the
-    # decades the fault viscosity can drop per iteration; the converged state is unchanged.
-    rsf_relaxation = 0.5,
-    min_itPH = 2,
-    min_itPH_dt = 1.0e7,
+    inc_dt = 0.1,
+    # 1 = LaMEM `-snes_type ksponly`; > 1 = Picard iterations of the frozen-η solve
+    rsf_picard_max = 1,
+    rsf_picard_rtol = 1.0e-4,
     G = 3.0e10,
     ν = 0.25,
     # Both phases carry a_rsf (LaMEM / Herrendörfer Shear_test_PBC)

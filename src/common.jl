@@ -138,7 +138,6 @@ function RateStateArrays(ni::NTuple{N, Integer}; loc::Symbol = :both) where {N}
     a_eff = @zeros(ni...)
     b_eff = @zeros(ni...)
     rsf_mask = @zeros(ni...)
-    η_tan = @zeros(ni...)
     nv = ni .+ 1
     Ωv = @zeros(nv...)
     Ω_old_v = @zeros(nv...)
@@ -147,10 +146,9 @@ function RateStateArrays(ni::NTuple{N, Integer}; loc::Symbol = :both) where {N}
     a_eff_v = @zeros(nv...)
     b_eff_v = @zeros(nv...)
     rsf_mask_v = @zeros(nv...)
-    η_tan_v = @zeros(nv...)
     return JustRelax.RateStateArrays{typeof(Ω), typeof(Ωv), eltype(Ω)}(
-        Ω, Ω_old, Vp, τ_rsf, a_eff, b_eff, rsf_mask, η_tan,
-        Ωv, Ω_old_v, Vp_v, τ_rsf_v, a_eff_v, b_eff_v, rsf_mask_v, η_tan_v,
+        Ω, Ω_old, Vp, τ_rsf, a_eff, b_eff, rsf_mask,
+        Ωv, Ω_old_v, Vp_v, τ_rsf_v, a_eff_v, b_eff_v, rsf_mask_v,
         loc,
     )
 end
@@ -163,8 +161,6 @@ export rsf_viscosity_from_stress,
     rsf_cons_eq_residual,
     solve_bisect_eta_rsf,
     rsf_effective_viscosity,
-    rsf_tangent_viscosity,
-    rsf_preconditioner_tangent,
     rsf_frozen_stress_viscosity,
     rsf_from_phase_params,
     to_rheology_calculator_kwargs
@@ -207,7 +203,6 @@ export init_rate_state_fields!,
     refresh_rsf_ab_mask!,
     apply_rsf_viscosity!,
     check_Vp_rsf!,
-    enforce_rsf_stress!,
     update_rate_state!,
     compute_dt_ratestate_grid
 

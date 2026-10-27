@@ -123,26 +123,17 @@ end
     apply_rsf_viscosity!(stokes, rsf_arr, ctrl, phase_ratios, dt; kwargs...)
 
 LaMEM-style local constitutive solve with frozen `Ω_old` on centers and/or vertices
-(`rsf_arr.loc`):
+(`rsf_arr.loc`), evaluated at the strain rate currently in `stokes.ε`:
 
 1. Viscoelastic trial rate ``DII`` (centers: ``ε + τ_o/(2Gdt)``; vertices: same with
    averaged normals + native ``ε.xy``, ``τ_o.xy``).
-2. Bisection on effective ``η`` so ``DII = DIIels + DIIcreep + DIIrsf``.
-3. Write the equivalent Maxwell creep buffer onto `η` (centers) and/or `ηv` (vertices).
+2. Bisection on the effective ``η`` so ``DII = DIIels + DIIcreep + DIIrsf``
+   ([`rsf_effective_viscosity`](@ref)).
+3. Write the equivalent Maxwell creep buffer onto `η` (centers) and/or `ηv` (vertices),
+   and the slip rate at the root onto `Vp` / `Vp_v`.
 
-`η` / `ηv` on entry must be the GeoParams / Maxwell creep buffers (restored each PT iter
-when stacking must be avoided).
-
-# Keyword Arguments
-- `viscosity_cutoff`: Absolute bounds on the Maxwell creep buffer. The fold floors `η_eff`
-  at the Maxwell image of those bounds and recomputes ``τ = 2 η_eff DII`` / `Vp` there, so
-  the Stokes stress update matches the fold. Default: `(-Inf, Inf)`.
-- `η_contrast`: Relative floor ``η_eff ≥ G dt / η_contrast`` on RSF nodes
-  (see [`rsf_effective_viscosity`](@ref)). Default: `Inf`.
-- `relaxation`: Log-space under-relaxation of the fold toward `η_eff_prev` / `η_eff_prev_v`.
-  `1` applies the fold in one shot. Default: `1`.
-- `η_eff_prev`, `η_eff_prev_v`: Center / vertex arrays holding the previous effective
-  viscosity. Read before and overwritten after the fold. Required when `relaxation < 1`.
+`η` / `ηv` on entry must be the creep buffers (GeoParams / Maxwell), not a previous fold.
+The solver restores them before each call so folds never stack.
 """
 function apply_rsf_viscosity!(
         stokes,
@@ -152,27 +143,15 @@ function apply_rsf_viscosity!(
         dt;
         ε_floor = 1.0e-30,
         P_floor = 1.0e3,
-        viscosity_cutoff = (-Inf, Inf),
         tol_rel = 1.0e-12,
         maxit = 50,
-        η_contrast = Inf,
-        relaxation = 1,
-        η_eff_prev = nothing,
-        η_eff_prev_v = nothing,
     )
     ctrl.enabled || return nothing
-    η_min, η_max = viscosity_cutoff
     Gdt = ctrl.G * dt
-    relaxation < 1 && rsf_do_center(rsf_arr) && isnothing(η_eff_prev) &&
-        error("apply_rsf_viscosity!: `relaxation < 1` needs `η_eff_prev` for the center fold")
-    relaxation < 1 && rsf_do_vertex(rsf_arr) && isnothing(η_eff_prev_v) &&
-        error("apply_rsf_viscosity!: `relaxation < 1` needs `η_eff_prev_v` for the vertex fold")
     if rsf_do_center(rsf_arr)
         ni = size(stokes.P)
         @parallel (@idx ni) _apply_rsf_viscosity_center!(
             stokes.viscosity.η,
-            rsf_arr.η_tan,
-            η_eff_prev,
             stokes.ε.xx,
             stokes.ε.yy,
             stokes.ε.xy_c,
@@ -191,12 +170,8 @@ function apply_rsf_viscosity!(
             Gdt,
             ε_floor,
             P_floor,
-            η_min,
-            η_max,
             tol_rel,
             maxit,
-            η_contrast,
-            relaxation,
         )
     end
     if rsf_do_vertex(rsf_arr)
@@ -204,8 +179,6 @@ function apply_rsf_viscosity!(
         periodic = periodic_dims(stokes)
         @parallel (@idx nv) _apply_rsf_viscosity_vertex!(
             stokes.viscosity.ηv,
-            rsf_arr.η_tan_v,
-            η_eff_prev_v,
             stokes.ε.xx,
             stokes.ε.yy,
             stokes.ε.xy,
@@ -224,28 +197,18 @@ function apply_rsf_viscosity!(
             Gdt,
             ε_floor,
             P_floor,
-            η_min,
-            η_max,
             tol_rel,
             maxit,
-            η_contrast,
-            relaxation,
             periodic,
         )
     end
     return nothing
 end
 
-# Previous-iterate storage is optional: `nothing` disables the relaxation history.
-@inline _rsf_prev(::Nothing, i, j) = nothing
-@inline _rsf_prev(A, i, j) = @inbounds A[i, j]
-@inline _store_rsf_prev!(::Nothing, i, j, v) = nothing
-@inline _store_rsf_prev!(A, i, j, v) = @inbounds A[i, j] = v
-
 @parallel_indices (i, j) function _apply_rsf_viscosity_center!(
-        η, η_tan, η_eff_prev, εxx, εyy, εxy_c, τxx_o, τyy_o, τxy_o, P,
+        η, εxx, εyy, εxy_c, τxx_o, τyy_o, τxy_o, P,
         Ω_old, a_eff, b_eff, Vp, τ_rsf_arr, rsf_mask, phase_center, phases,
-        Gdt, ε_floor, P_floor, η_min, η_max, tol_rel, maxit, η_contrast, relaxation,
+        Gdt, ε_floor, P_floor, tol_rel, maxit,
     )
     @inbounds if rsf_mask[i, j] > 0.5
         ip = _dominant_phase(phase_center, i, j)
@@ -259,33 +222,19 @@ end
             DII = max(DII, ε_floor)
             Pij = max(abs(P[i, j]), P_floor)
             r = rsf_from_phase_params(p, a_eff[i, j], b_eff[i, j])
-            η_creep = η[i, j]
-            η_eff, η_creep_out, Vp_ij, τ_ij = rsf_effective_viscosity(
+            _, η_creep_out, Vp_ij, _ = rsf_effective_viscosity(
                 r;
                 DII = DII,
-                η_creep = η_creep,
+                η_creep = η[i, j],
                 Gdt = Gdt,
                 Ω_old = Ω_old[i, j],
                 P = Pij,
                 tol_rel = tol_rel,
                 maxit = maxit,
                 ε_floor = ε_floor,
-                η_contrast = η_contrast,
-                η_min = η_min,
-                η_max = η_max,
-                η_prev = _rsf_prev(η_eff_prev, i, j),
-                relax = relaxation,
-            )
-            _store_rsf_prev!(η_eff_prev, i, j, η_eff)
-            η_tan[i, j] = rsf_preconditioner_tangent(
-                rsf_tangent_viscosity(
-                    r; τ = τ_ij, Ω = Ω_old[i, j], P = Pij, η_creep = η_creep, Gdt = Gdt, ε_floor = ε_floor,
-                ),
-                η_eff,
             )
             τ_rsf_arr[i, j] = compute_stress_frozen_Ω(r; ε = DII, Ω_old = Ω_old[i, j], P = Pij)
             Vp[i, j] = _clamp_Vp(Vp_ij)
-            # η_creep_out is already inside [η_min, η_max]; the fold recomputed τ/Vp there.
             if isfinite(η_creep_out) && η_creep_out > ε_floor
                 η[i, j] = η_creep_out
             end
@@ -295,9 +244,9 @@ end
 end
 
 @parallel_indices (i, j) function _apply_rsf_viscosity_vertex!(
-        ηv, η_tan, η_eff_prev, εxx, εyy, εxy, τxx_ov, τyy_ov, τxy_o, P,
+        ηv, εxx, εyy, εxy, τxx_ov, τyy_ov, τxy_o, P,
         Ω_old, a_eff, b_eff, Vp, τ_rsf_arr, rsf_mask, phase_vertex, phases,
-        Gdt, ε_floor, P_floor, η_min, η_max, tol_rel, maxit, η_contrast, relaxation, periodic,
+        Gdt, ε_floor, P_floor, tol_rel, maxit, periodic,
     )
     @inbounds if rsf_mask[i, j] > 0.5
         ip = _dominant_phase(phase_vertex, i, j)
@@ -313,33 +262,19 @@ end
             DII = max(DII, ε_floor)
             Pij = max(abs(av_clamped(P, Ic...)), P_floor)
             r = rsf_from_phase_params(p, a_eff[i, j], b_eff[i, j])
-            η_creep = ηv[i, j]
-            η_eff, η_creep_out, Vp_ij, τ_ij = rsf_effective_viscosity(
+            _, η_creep_out, Vp_ij, _ = rsf_effective_viscosity(
                 r;
                 DII = DII,
-                η_creep = η_creep,
+                η_creep = ηv[i, j],
                 Gdt = Gdt,
                 Ω_old = Ω_old[i, j],
                 P = Pij,
                 tol_rel = tol_rel,
                 maxit = maxit,
                 ε_floor = ε_floor,
-                η_contrast = η_contrast,
-                η_min = η_min,
-                η_max = η_max,
-                η_prev = _rsf_prev(η_eff_prev, i, j),
-                relax = relaxation,
-            )
-            _store_rsf_prev!(η_eff_prev, i, j, η_eff)
-            η_tan[i, j] = rsf_preconditioner_tangent(
-                rsf_tangent_viscosity(
-                    r; τ = τ_ij, Ω = Ω_old[i, j], P = Pij, η_creep = η_creep, Gdt = Gdt, ε_floor = ε_floor,
-                ),
-                η_eff,
             )
             τ_rsf_arr[i, j] = compute_stress_frozen_Ω(r; ε = DII, Ω_old = Ω_old[i, j], P = Pij)
             Vp[i, j] = _clamp_Vp(Vp_ij)
-            # η_creep_out is already inside [η_min, η_max]; the fold recomputed τ/Vp there.
             if isfinite(η_creep_out) && η_creep_out > ε_floor
                 ηv[i, j] = η_creep_out
             end
@@ -385,43 +320,6 @@ end
 @parallel_indices (I...) function _clamp_Vp_rsf_field!(Vp, mask, Vp_max_abs)
     @inbounds if mask[I...] > 0.5
         Vp[I...] = _clamp_Vp(Vp[I...], Vp_max_abs)
-    end
-    return nothing
-end
-
-"""
-    enforce_rsf_stress!(stokes, rsf_arr, ctrl)
-
-Scale center stress so ``τII = τ_rsf`` on RSF cells (diagnostic / optional closure).
-Call after the APT stress update; then refresh vertex ``τ.xy`` via `center2vertex!`.
-"""
-function enforce_rsf_stress!(stokes, rsf_arr::JustRelax.RateStateArrays, ctrl::RateStateController)
-    ctrl.enabled || return nothing
-    rsf_do_center(rsf_arr) || return nothing
-    ni = size(stokes.P)
-    @parallel (@idx ni) _enforce_rsf_stress!(
-        stokes.τ.xx,
-        stokes.τ.yy,
-        stokes.τ.xy_c,
-        stokes.τ.II,
-        rsf_arr.τ_rsf,
-        rsf_arr.rsf_mask,
-    )
-    center2vertex!(stokes.τ.xy, stokes.τ.xy_c)
-    return nothing
-end
-
-@parallel_indices (i, j) function _enforce_rsf_stress!(τxx, τyy, τxy_c, τII, τ_rsf, rsf_mask)
-    @inbounds if rsf_mask[i, j] > 0.5
-        τ_target = τ_rsf[i, j]
-        τ_now = τII[i, j]
-        if τ_target > 0 && τ_now > 1.0e-30 && isfinite(τ_target)
-            f = τ_target / τ_now
-            τxx[i, j] *= f
-            τyy[i, j] *= f
-            τxy_c[i, j] *= f
-            τII[i, j] = τ_target
-        end
     end
     return nothing
 end
