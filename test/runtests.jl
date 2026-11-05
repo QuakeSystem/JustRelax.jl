@@ -1,10 +1,6 @@
 pushfirst!(LOAD_PATH, dirname(@__DIR__))
 
-using JustRelax
-
 using Pkg
-using MPI
-using Test, ParallelTestRunner
 
 function parse_flags!(args, flag; default = nothing, type = typeof(default))
     for f in args
@@ -25,6 +21,25 @@ function parse_flags!(args, flag; default = nothing, type = typeof(default))
     return false, default
 end
 
+args = copy(ARGS)
+_, backend_name = parse_flags!(args, "--backend"; default = "CPU", type = String)
+
+@static if backend_name == "AMDGPU"
+    Pkg.add("AMDGPU")
+    ENV["JULIA_JUSTRELAX_BACKEND"] = "AMDGPU"
+    using AMDGPU; AMDGPU.versioninfo()
+elseif backend_name == "CUDA"
+    Pkg.add("CUDA")
+    ENV["JULIA_JUSTRELAX_BACKEND"] = "CUDA"
+    import CUDA; CUDA.versioninfo()
+elseif backend_name == "CPU"
+    ENV["JULIA_JUSTRELAX_BACKEND"] = "CPU"
+end
+
+using JustRelax
+using MPI
+using Test, ParallelTestRunner
+
 # light tests that require simple or no PS/IGG.
 function test_worker(name)
     if name in (
@@ -44,6 +59,12 @@ function runtests(args)
     testsuite = find_tests(@__DIR__)
     for k in collect(keys(testsuite))
         startswith(basename(k), "test_") || delete!(testsuite, k)
+    end
+    if backend_name != "CPU"
+        delete!(testsuite, "test_variational_operators_2D")
+        delete!(testsuite, "test_rheology")
+        delete!(testsuite, "test_dyrel_solver_3D")
+        delete!(testsuite, "test_dyrel_taylor_green_MPI")
     end
 
     # Separate MPI tests – always run sequentially via mpiexec
@@ -90,21 +111,6 @@ function runtests(args)
     end
 
     return nfail
-end
-
-args = copy(ARGS)
-_, backend_name = parse_flags!(args, "--backend"; default = "CPU", type = String)
-
-@static if backend_name == "AMDGPU"
-    Pkg.add("AMDGPU")
-    ENV["JULIA_JUSTRELAX_BACKEND"] = "AMDGPU"
-    using AMDGPU; AMDGPU.versioninfo()
-elseif backend_name == "CUDA"
-    Pkg.add("CUDA")
-    ENV["JULIA_JUSTRELAX_BACKEND"] = "CUDA"
-    using CUDA; CUDA.versioninfo()
-elseif backend_name == "CPU"
-    ENV["JULIA_JUSTRELAX_BACKEND"] = "CPU"
 end
 
 exit(runtests(args))

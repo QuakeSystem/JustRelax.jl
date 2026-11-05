@@ -39,12 +39,6 @@ include(joinpath(@__DIR__, "Subduction2D_rheology.jl"))
 
 ## SET OF HELPER FUNCTIONS PARTICULAR FOR THIS SCRIPT --------------------------------
 
-import ParallelStencil.INDICES
-const idx_k = INDICES[2]
-macro all_k(A)
-    return esc(:($A[$idx_k]))
-end
-
 function copyinn_x!(A, B)
     @parallel function f_x(A, B)
         @all(A) = @inn_x(B)
@@ -54,11 +48,6 @@ function copyinn_x!(A, B)
     return @parallel f_x(A, B)
 end
 
-# Initial pressure profile - not accurate
-@parallel function init_P!(P, ρg, z)
-    @all(P) = abs(@all(ρg) * @all_k(z)) * <(@all_k(z), 0.0)
-    return nothing
-end
 ## END OF HELPER FUNCTION ------------------------------------------------------------
 
 ## BEGIN OF MAIN SCRIPT --------------------------------------------------------------
@@ -161,7 +150,6 @@ function main(li, origin, phases_GMG, igg; nx = 16, ny = 16, figdir = "figs2D", 
         Vy_v = @zeros(ni .+ 1...)
     end
 
-    T_buffer = thermal.T[2:(end - 1), 2:(end - 1)]
     centroid2particle!(pT, thermal.T, particles)
 
     dyrel = DYREL(backend, stokes, rheology, phase_ratios, grid.di, dt; ϵ = 1.0e-3)
@@ -171,14 +159,6 @@ function main(li, origin, phases_GMG, igg; nx = 16, ny = 16, figdir = "figs2D", 
     # Time loop
     t, it = 0.0, 0
     while it < 1000 # run only for 5 Myrs
-
-        # interpolate fields from particles to centroids
-        particle2centroid!(T_buffer, pT, particles; ghost_1 = false, ghost_2 = false, ghost_3 = false)
-        @views thermal.T[2:(end - 1), 2:(end - 1)] .= T_buffer
-        thermal_bcs!(thermal, thermal_bc)
-
-        # interpolate stress back to the grid
-        stress2grid!(stokes, pτ, particles)
 
         # Stokes solver ----------------
         args = (; T = thermal.T, P = stokes.P, dt = Inf)
@@ -260,15 +240,21 @@ function main(li, origin, phases_GMG, igg; nx = 16, ny = 16, figdir = "figs2D", 
         move_particles!(particles, particle_args)
         # Inject phase labels first, then initialize every newly injected particle field
         # through the regular centroid/vertex interpolation paths.
-        inject_particles_phase!(particles, pPhases, (), ())
-        centroid2particle!(pT, thermal.T, particles)
-        centroid2particle!(pτ.τ_normal[1], stokes.τ.xx, particles)
-        centroid2particle!(pτ.τ_normal[2], stokes.τ.yy, particles)
-        grid2particle!(pτ.τ_shear[1], stokes.τ.xy, particles; ghost_1 = false, ghost_2 = false)
-        grid2particle!(pτ.ω[1], stokes.ω.xy, particles; ghost_1 = false, ghost_2 = false)
-
+        inject_particles_phase!(
+            particles,
+            pPhases,
+            (pT, pτ.τ_normal[1], pτ.τ_normal[2], pτ.τ_shear[1], pτ.ω[1]),
+            (thermal.T, stokes.τ.xx, stokes.τ.yy, stokes.τ.xy, stokes.ω.xy),
+        )
         # update phase ratios
         update_phase_ratios!(phase_ratios, particles, pPhases)
+
+        # interpolate fields from particles to centroids
+        particle2centroid!(thermal.T, pT, particles)
+        thermal_bcs!(thermal, thermal_bc)
+
+        # interpolate stress back to the grid
+        stress2grid!(stokes, pτ, particles)
 
         @show it += 1
         t += dt
@@ -288,7 +274,7 @@ function main(li, origin, phases_GMG, igg; nx = 16, ny = 16, figdir = "figs2D", 
                 )
                 data_c = (;
                     P = Array(stokes.P),
-                    T = Array(T_buffer),
+                    T = Array(thermal.T[2:(end - 1), 2:(end - 1)]),
                     η = Array(η_vep),
                 )
                 velocity_v = (

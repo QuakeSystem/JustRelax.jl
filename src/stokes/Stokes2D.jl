@@ -8,8 +8,48 @@ end
 
 ## 2D VISCO-ELASTIC STOKES SOLVER
 
-# backend trait
+"""
+    solve!(stokes::StokesArrays, pt_stokes, grid, flow_bcs, ρg, phase_ratios, rheology, args, dt, igg; kwargs...)
+
+Solve the 2D viscoelastoplastic Stokes equations to pseudo-transient convergence, updating
+`stokes` (velocity, pressure, stress, viscosity) in place for one physical time step `dt`.
+This is the general, multi-phase call form used by most models; dispatch on the type of
+the sixth argument also accepts, for simpler/benchmark setups:
+- a single-phase `rheology::GeoParams.MaterialParams` in place of `phase_ratios`/`rheology`
+  (drop the `phase_ratios` argument), or
+- constant `K` (bulk modulus) or `K, G` (bulk and shear modulus) fields in place of
+  `phase_ratios`/`rheology`/`args`, for linear (visco)elastic problems with no material
+  rheology.
+`grid` may also be replaced by the grid spacing `di` alone (a `NTuple`/`NamedTuple`).
+
+# Arguments
+- `stokes`: solver state allocated with `StokesArrays`.
+- `pt_stokes`: pseudo-transient coefficients, e.g. from `PTStokesCoeffs`.
+- `grid`: the model `Geometry`.
+- `flow_bcs`: velocity/displacement boundary conditions.
+- `ρg`: buoyancy forcing `(ρgx, ρgy)`.
+- `phase_ratios`: per-cell/per-node phase fractions (a `JustPIC.PhaseRatios`).
+- `rheology`: one `GeoParams.MaterialParams` per phase.
+- `args`: auxiliary fields (e.g. temperature `T`, pressure `P`) used by the constitutive updates.
+- `dt`: physical time step.
+- `igg`: the distributed-grid context (`IGG`).
+
+# Keyword arguments
+- `iterMax = 50e3`, `iterMin = 100`: min/max pseudo-transient iterations.
+- `nout = 500`: check convergence every `nout` iterations.
+- `viscosity_cutoff = (-Inf, Inf)`: clamp bounds for the effective viscosity.
+- `viscosity_relaxation = 1e-2`: relaxation factor for nonlinear viscosity updates.
+- `λ_relaxation = 0.2`: relaxation factor for the plastic multiplier.
+- `strain_increment = false`: accumulate strain increments instead of overwriting.
+- `free_surface = false`: enable free-surface stabilization.
+- `b_width = (4, 4, 0)`: halo width used when overlapping communication and computation.
+- `verbose = true`: print convergence progress.
+
+Dispatches on the CPU/CUDA/AMDGPU backend selected by `stokes`.
+"""
 function solve!(stokes::JustRelax.StokesArrays, args...; kwargs)
+    reject_periodic_bcs(flow_bcs_of(args), "the 2D `solve!` pseudo-transient solver")
+    reject_incompressible_cap(rheology_of(args), "the 2D `solve!` pseudo-transient solver")
     return solve!(backend(stokes), stokes, args...; kwargs)
 end
 
@@ -446,7 +486,9 @@ function _solve!(
                 @strain(stokes),
                 @plastic_strain(stokes),
                 stokes.EII_pl,
+                stokes.ε_vol_pl,
                 stokes.P,
+                fluid_pressure(args, stokes.P),
                 θ,
                 η,
                 η_vep,
@@ -543,6 +585,7 @@ function _solve!(
     shear2center!(stokes.Δε)
     # accumulate plastic strain tensor
     accumulate_tensor!(stokes.EII_pl, stokes.ε_pl, dt)
+    stokes.λ .= λ
     accumulate_vol!(stokes.EVol_pl, stokes.ε_vol_pl, dt)
 
     @parallel (@idx ni .+ 1) multi_copy!(@tensor(stokes.τ_o), @tensor(stokes.τ))
@@ -719,6 +762,7 @@ function _solve!(
                     (stokes.τ_o.xy,),
                     θ,
                     stokes.P,
+                    fluid_pressure(args, stokes.P),
                     stokes.viscosity.η,
                     λ,
                     λv,
@@ -744,6 +788,7 @@ function _solve!(
                     (stokes.τ_o.xy,),
                     θ,
                     stokes.P,
+                    fluid_pressure(args, stokes.P),
                     stokes.viscosity.η,
                     λ,
                     λv,
@@ -854,6 +899,8 @@ function _solve!(
 
     # accumulate plastic strain tensor
     accumulate_tensor!(stokes.EII_pl, stokes.ε_pl, dt)
+    stokes.λ .= λ
+    stokes.λv .= λv
     accumulate_vol!(stokes.EVol_pl, stokes.ε_vol_pl, dt)
 
     @parallel (@idx ni .+ 1) multi_copy!(@tensor(stokes.τ_o), @tensor(stokes.τ))
