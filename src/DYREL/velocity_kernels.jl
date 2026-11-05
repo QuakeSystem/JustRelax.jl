@@ -435,7 +435,7 @@ end
             # Vertical velocity
             Vyᵢⱼ = Vy[i + 1, j + 1]
             # Get necessary buoyancy forces
-            j_N = wrapnext(j, ny)
+            j_N = wrap_next(j, ny)
             ρg_S = ρgy[i, j]
             ρg_N = ρgy[i, j_N]
             # Spatial derivatives

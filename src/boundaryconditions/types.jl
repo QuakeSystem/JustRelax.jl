@@ -286,7 +286,7 @@ interior face. `check_periodic_bcs` requires the two to agree.
 """
 function periodic_dims end
 
-@inline periodic_dims(bcs::VelocityBoundaryConditions{T, nD}) where {T, nD} =
+@inline periodic_dims(bcs::VelocityBoundaryConditions{T, D, nD}) where {T, D, nD} =
     _periodic_dims(bcs.periodic, Val(nD))
 @inline periodic_dims(bcs::DisplacementBoundaryConditions{T, nD}) where {T, nD} =
     _periodic_dims(bcs.periodic, Val(nD))
