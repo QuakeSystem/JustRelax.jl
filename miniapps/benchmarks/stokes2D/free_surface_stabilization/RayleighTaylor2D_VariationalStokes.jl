@@ -1,5 +1,5 @@
-# const isCUDA = false
-const isCUDA = true
+const isCUDA = false
+# const isCUDA = true
 
 @static if isCUDA
     using CUDA
@@ -22,14 +22,11 @@ else
     @init_parallel_stencil(Threads, Float64, 2)
 end
 
-using JustPIC, JustPIC._2D
-# Threads is the default backend,
-# to run on a CUDA GPU load CUDA.jl (i.e. "using CUDA") at the beginning of the script,
-# and to run on an AMD GPU load AMDGPU.jl (i.e. "using AMDGPU") at the beginning of the script.
+using JustPIC
 const backend_JP = @static if isCUDA
-    CUDABackend # Options: CPUBackend, CUDABackend, AMDGPUBackend
+    CUDA.CUDABackend # Options: JustPIC.CPU, CUDA.CUDABackend, AMDGPU.ROCBackend
 else
-    JustPIC.CPUBackend # Options: CPUBackend, CUDABackend, AMDGPUBackend
+    JustPIC.CPU # Options: JustPIC.CPU, CUDA.CUDABackend, AMDGPU.ROCBackend
 end
 
 # Load script dependencies
@@ -111,6 +108,7 @@ function main(igg, nx, ny)
     origin = 0.0, -ly          # origin coordinates (15km f sticky air layer)
     grid = Geometry(ni, li; origin = origin)
     (; xci, xvi) = grid # nodes at the center and vertices of the cells
+    grid_vxi = velocity_grids(xci, xvi, di)
     # ----------------------------------------------------
 
     # Physical properties using GeoParams ----------------
@@ -199,7 +197,7 @@ function main(igg, nx, ny)
     # Time loop
     t, it = 0.0, 0
     dt = 25.0e3 * (3600 * 24 * 365.25)
-    dt_max = 50.0e3 * (3600 * 24 * 365.25)
+    dt_max = 25.0e3 * (3600 * 24 * 365.25)
 
     while it < 1000 #00
 
@@ -237,7 +235,7 @@ function main(igg, nx, ny)
         inject_particles_phase!(particles, pPhases, (), ())
 
         # advect marker chain
-        advect_markerchain!(chain, RungeKutta2(), @velocity(stokes), (grid_vx, grid_vy), dt)
+        semilagrangian_advection_markerchain!(chain, RungeKutta2(), @velocity(stokes), grid_vxi, xvi, dt)
         update_phases_given_markerchain!(pPhases, chain, particles, origin, di, air_phase)
 
         # update phase ratios

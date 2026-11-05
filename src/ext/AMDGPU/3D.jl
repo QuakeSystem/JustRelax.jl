@@ -2,13 +2,15 @@ module JustRelax3D
 
 using JustRelax: JustRelax
 using AMDGPU
-using JustPIC, JustPIC._3D
+using JustPIC
+using CellArraysIndexing: @index
 using StaticArrays
 using CellArrays
 using ParallelStencil, ParallelStencil.FiniteDifferences3D
 using ImplicitGlobalGrid
 using GeoParams, LinearAlgebra, Printf
 using MPI
+using Statistics
 
 import JustRelax.JustRelax3D as JR3D
 
@@ -35,7 +37,7 @@ import JustRelax:
 
 import JustRelax: normal_stress, shear_stress, shear_vorticity, unwrap
 
-import JustPIC._3D: numphases, nphases, PhaseRatios, update_phase_ratios!, compute_dx, face_offset
+import JustPIC: numphases, nphases, PhaseRatios, update_phase_ratios!, cell_index
 
 __init__() = @init_parallel_stencil(AMDGPU, Float64, 3)
 
@@ -47,12 +49,12 @@ function JR3D.StokesArrays(::Type{AMDGPUBackend}, ni::NTuple{N, Integer}) where 
     return StokesArrays(ni)
 end
 
-function JR3D.DYREL(::Type{AMDGPUBackend}, ni::NTuple{N, Integer}; ϵ = 1.0e-6, ϵ_vel = 1.0e-6, CFL = 0.99, c_fact = 0.5) where {N}
-    return DYREL(ni; ϵ = ϵ, ϵ_vel = ϵ_vel, CFL = CFL, c_fact = c_fact)
+function JR3D.DYREL(::Type{AMDGPUBackend}, ni::NTuple{N, Integer}; ϵ = 1.0e-6, ϵ_vel = 1.0e-6, CFL = 0.99, c_fact = 0.5, γfact = 20.0) where {N}
+    return DYREL(ni; ϵ = ϵ, ϵ_vel = ϵ_vel, CFL = CFL, c_fact = c_fact, γfact = γfact)
 end
 
-function JR3D.DYREL(::Type{AMDGPUBackend}, nx::Integer, ny::Integer, nz::Integer; ϵ = 1.0e-6, ϵ_vel = 1.0e-6, CFL = 0.99, c_fact = 0.5)
-    return DYREL((nx, ny, nz); ϵ = ϵ, ϵ_vel = ϵ_vel, CFL = CFL, c_fact = c_fact)
+function JR3D.DYREL(::Type{AMDGPUBackend}, nx::Integer, ny::Integer, nz::Integer; ϵ = 1.0e-6, ϵ_vel = 1.0e-6, CFL = 0.99, c_fact = 0.5, γfact = 20.0)
+    return DYREL((nx, ny, nz); ϵ = ϵ, ϵ_vel = ϵ_vel, CFL = CFL, c_fact = c_fact, γfact = γfact)
 end
 
 function JR3D.DYREL(::Type{AMDGPUBackend}, stokes::JustRelax.StokesArrays, rheology, phase_ratios, di, dt; ϵ = 1.0e-6, ϵ_vel = 1.0e-6, CFL = 0.99, c_fact = 0.5, γfact = 20.0)
@@ -238,6 +240,26 @@ function thermal_bcs!(::AMDGPUBackendTrait, thermal::JustRelax.ThermalArrays, bc
     return thermal_bcs!(thermal.T, bcs)
 end
 
+function JR3D.pureshear_bc!(
+        ::AMDGPUBackendTrait, stokes::JustRelax.StokesArrays, xci, xvi, εbg
+    )
+    return _pureshear_bc!(stokes, xci, xvi, εbg)
+end
+
+function pureshear_bc!(::AMDGPUBackendTrait, stokes::JustRelax.StokesArrays, xci, xvi, εbg)
+    return _pureshear_bc!(stokes, xci, xvi, εbg)
+end
+
+function JR3D.simpleshear_bc!(
+        ::AMDGPUBackendTrait, stokes::JustRelax.StokesArrays, xci, xvi, γbg
+    )
+    return _simpleshear_bc!(stokes, xci, xvi, γbg)
+end
+
+function simpleshear_bc!(::AMDGPUBackendTrait, stokes::JustRelax.StokesArrays, xci, xvi, γbg)
+    return _simpleshear_bc!(stokes, xci, xvi, γbg)
+end
+
 # Rheology
 
 ## viscosity
@@ -325,6 +347,29 @@ function JR3D.compute_melt_fraction!(
         ϕ::ROCArray, phase_ratios::JustPIC.PhaseRatios, rheology, args
     )
     return compute_melt_fraction!(ϕ, phase_ratios, rheology, args)
+end
+
+function JR3D.compute_melt_fraction!(
+        ϕ::ROCArray, dϕdT, phase_ratios::JustPIC.PhaseRatios, rheology, args
+    )
+    return compute_melt_fraction!(ϕ, dϕdT, phase_ratios, rheology, args)
+end
+
+function JR3D.compute_melt_fraction_derivative!(dϕdT::ROCArray, rheology, args)
+    return compute_melt_fraction_derivative!(dϕdT, rheology, args)
+end
+
+function JR3D.compute_melt_fraction_derivative!(
+        dϕdT::ROCArray, phase_ratios::JustPIC.PhaseRatios, rheology, args
+    )
+    return compute_melt_fraction_derivative!(dϕdT, phase_ratios, rheology, args)
+end
+
+## Solubility
+function JR3D.compute_dissolved_volatiles!(
+        mH2O::ROCArray, mCO2, phase_ratios::JustPIC.PhaseRatios, rheology, args
+    )
+    return compute_dissolved_volatiles!(mH2O, mCO2, phase_ratios, rheology, args)
 end
 
 function JR3D.shear2center!(::AMDGPUBackendTrait, A::JustRelax.SymmetricTensor)
@@ -490,7 +535,7 @@ end
 function JR3D.rotate_stress_particles!(
         τ::NTuple,
         ω::NTuple,
-        particles::Particles{JustPIC.AMDGPUBackend},
+        particles::Particles{ROCBackend},
         dt;
         method::Symbol = :matrix,
     )
@@ -519,7 +564,7 @@ end
 
 function JR3D.stress2grid!(
         stokes,
-        τ_particles::JustRelax.StressParticles{JustPIC.AMDGPUBackend},
+        τ_particles::JustRelax.StressParticles{ROCBackend},
         particles,
     )
     stress2grid!(stokes, τ_particles, particles)
@@ -527,7 +572,7 @@ function JR3D.stress2grid!(
 end
 
 function JR3D.rotate_stress!(
-        τ_particles::JustRelax.StressParticles{JustPIC.AMDGPUBackend},
+        τ_particles::JustRelax.StressParticles{ROCBackend},
         stokes,
         particles,
         dt,
@@ -538,11 +583,11 @@ end
 
 # Phase ratios with arrays
 function JR3D.update_phase_ratios_3D!(
-        phase_ratios::JustPIC.PhaseRatios{AMDGPUBackend, T},
+        phase_ratios::JustPIC.PhaseRatios{ROCBackend, T},
         phase_arrays::NTuple{N, ROCArray{U, 3}},
         xci,
         xvi
-    ) where {T <: AbstractMatrix, N, U}
+    ) where {T <: AbstractArray, N, U}
 
     phase_ratios_center_from_arrays!(phase_ratios, phase_arrays)
     phase_ratios_vertex_from_arrays!(phase_ratios, phase_arrays, xvi, xci)

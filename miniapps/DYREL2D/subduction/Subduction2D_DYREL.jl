@@ -1,4 +1,5 @@
-const isCUDA = true
+const isCUDA = false
+# const isCUDA = true
 
 @static if isCUDA
     using CUDA
@@ -7,11 +8,8 @@ end
 using JustRelax, JustRelax.JustRelax2D, JustRelax.DataIO
 using Pkg; Pkg.activate("miniapps")
 
-# Load script dependencies
-using GeoParams, GLMakie
-
 const backend = @static if isCUDA
-    CUDABackend # Options: CPUBackend, CUDABackend, AMDGPUBackend
+    JustRelax.CUDABackend # Options: CPUBackend, CUDABackend, AMDGPUBackend
 else
     JustRelax.CPUBackend # Options: CPUBackend, CUDABackend, AMDGPUBackend
 end
@@ -24,19 +22,20 @@ else
     @init_parallel_stencil(Threads, Float64, 2)
 end
 
-using JustPIC, JustPIC._2D
-# Threads is the default backend,
-# to run on a CUDA GPU load CUDA.jl (i.e. "using CUDA") at the beginning of the script,
-# and to run on an AMD GPU load AMDGPU.jl (i.e. "using AMDGPU") at the beginning of the script.
+using JustPIC
 const backend_JP = @static if isCUDA
-    CUDABackend # Options: CPUBackend, CUDABackend, AMDGPUBackend
+    CUDA.CUDABackend # Options: JustPIC.CPU, CUDA.CUDABackend, AMDGPU.ROCBackend
 else
-    JustPIC.CPUBackend # Options: CPUBackend, CUDABackend, AMDGPUBackend
+    JustPIC.CPU # Options: JustPIC.CPU, CUDA.CUDABackend, AMDGPU.ROCBackend
 end
 
+# Load script dependencies
+using GeoParams, CairoMakie
+
+
 # Load file with all the rheology configurations
-include("Subduction2D_setup.jl")
-include("Subduction2D_rheology.jl")
+include(joinpath(@__DIR__, "Subduction2D_setup.jl"))
+include(joinpath(@__DIR__, "Subduction2D_rheology.jl"))
 
 ## SET OF HELPER FUNCTIONS PARTICULAR FOR THIS SCRIPT --------------------------------
 
@@ -123,7 +122,7 @@ function main(li, origin, phases_GMG, igg; nx = 16, ny = 16, figdir = "figs2D", 
     # Buoyancy forces
     ρg = ntuple(_ -> @zeros(ni...), Val(2))
     compute_ρg!(ρg[2], phase_ratios, rheology, (T = thermal.T, P = stokes.P))
-    stokes.P .= PTArray(backend)(reverse(cumsum(reverse((ρg[2]) .* di[2], dims = 2), dims = 2), dims = 2))
+    compute_lithostatic_pressure!(stokes.P, ρg[2], di[2], igg)
 
     # Rheology
     args0 = (T = thermal.T, P = stokes.P, dt = Inf)
@@ -150,10 +149,10 @@ function main(li, origin, phases_GMG, igg; nx = 16, ny = 16, figdir = "figs2D", 
     if do_vtk
         vtk_dir = joinpath(figdir, "vtk")
         take(vtk_dir)
-        checkpoint = joinpath(figdir, "checkpoint")
-        take(checkpoint)
     end
     take(figdir)
+    checkpoint = joinpath(figdir, "checkpoint")
+    take(checkpoint)
     # ----------------------------------------------------
 
     local Vx_v, Vy_v
@@ -163,20 +162,18 @@ function main(li, origin, phases_GMG, igg; nx = 16, ny = 16, figdir = "figs2D", 
     end
 
     T_buffer = thermal.T[2:(end - 1), 2:(end - 1)]
-    dt₀ = similar(stokes.P)
-    centroid2particle!(pT, T_buffer, particles)
-
-    τxx_v = @zeros(ni .+ 1...)
-    τyy_v = @zeros(ni .+ 1...)
+    centroid2particle!(pT, thermal.T, particles)
 
     dyrel = DYREL(backend, stokes, rheology, phase_ratios, grid.di, dt; ϵ = 1.0e-3)
+
+    dt₀ = similar(thermal.T)
 
     # Time loop
     t, it = 0.0, 0
     while it < 1000 # run only for 5 Myrs
 
         # interpolate fields from particles to centroids
-        particle2centroid!(T_buffer, pT, particles)
+        particle2centroid!(T_buffer, pT, particles; ghost_1 = false, ghost_2 = false, ghost_3 = false)
         @views thermal.T[2:(end - 1), 2:(end - 1)] .= T_buffer
         thermal_bcs!(thermal, thermal_bc)
 
@@ -245,9 +242,14 @@ function main(li, origin, phases_GMG, igg; nx = 16, ny = 16, figdir = "figs2D", 
         subgrid_characteristic_time!(
             subgrid_arrays, particles, dt₀, phase_ratios, rheology, thermal, stokes
         )
+        # Populate the ghost cells before interpolating to particles.
+        @views dt₀[1, :] .= dt₀[2, :]
+        @views dt₀[end, :] .= dt₀[end - 1, :]
+        @views dt₀[:, 1] .= dt₀[:, 2]
+        @views dt₀[:, end] .= dt₀[:, end - 1]
         centroid2particle!(subgrid_arrays.dt₀, dt₀, particles)
         subgrid_diffusion_centroid!(
-            pT, T_buffer, thermal.ΔT, subgrid_arrays, particles, dt
+            pT, thermal.T, thermal.ΔT, subgrid_arrays, particles, dt
         )
         # ------------------------------
 
@@ -256,13 +258,14 @@ function main(li, origin, phases_GMG, igg; nx = 16, ny = 16, figdir = "figs2D", 
         advection_MQS!(particles, RungeKutta2(), @velocity(stokes), dt)
         # advect particles in memory
         move_particles!(particles, particle_args)
-        # check if we need to inject particles
-        inject_particles_phase!(
-            particles,
-            pPhases,
-            particle_args_reduced,
-            (T_buffer, stokes.τ.xx_v, stokes.τ.yy_v, stokes.τ.xy, stokes.ω.xy)
-        )
+        # Inject phase labels first, then initialize every newly injected particle field
+        # through the regular centroid/vertex interpolation paths.
+        inject_particles_phase!(particles, pPhases, (), ())
+        centroid2particle!(pT, thermal.T, particles)
+        centroid2particle!(pτ.τ_normal[1], stokes.τ.xx, particles)
+        centroid2particle!(pτ.τ_normal[2], stokes.τ.yy, particles)
+        grid2particle!(pτ.τ_shear[1], stokes.τ.xy, particles; ghost_1 = false, ghost_2 = false)
+        grid2particle!(pτ.ω[1], stokes.ω.xy, particles; ghost_1 = false, ghost_2 = false)
 
         # update phase ratios
         update_phase_ratios!(phase_ratios, particles, pPhases)

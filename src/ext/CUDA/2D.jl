@@ -2,7 +2,8 @@ module JustRelax2D
 
 using JustRelax: JustRelax
 using CUDA
-using JustPIC, JustPIC._2D
+using JustPIC
+using CellArraysIndexing: @index
 using StaticArrays
 using CellArrays
 using ParallelStencil, ParallelStencil.FiniteDifferences2D
@@ -29,7 +30,7 @@ import JustRelax:
 
 import JustRelax: normal_stress, shear_stress, shear_vorticity, unwrap
 
-import JustPIC._2D: numphases, nphases, PhaseRatios, update_phase_ratios!, compute_dx, face_offset
+import JustPIC: numphases, nphases, PhaseRatios, update_phase_ratios!, cell_index
 
 __init__() = @init_parallel_stencil(CUDA, Float64, 2)
 
@@ -38,13 +39,38 @@ include("../../stokes/Stokes2D.jl")
 include("../../variational_stokes/Stokes2D.jl")
 include("../../DYREL/solver.jl")
 
+@parallel_indices (i, j) function _apply_free_surface_diagonal_CUDA!(
+        Dy, λmaxVy, ρgy, di_center, dt
+    )
+    @inbounds if i ≤ size(Dy, 1) && j ≤ size(Dy, 2)
+        _dy = inv(@dy(di_center, j))
+        j_N = min(j + 1, size(ρgy, 2))
+        c_fs = JR2D.free_surface_diagonal(ρgy[i, j], ρgy[i, j_N], _dy, dt)
+        D_old = Dy[i, j]
+        row_sum = λmaxVy[i, j] * D_old + c_fs
+        D_new = D_old + c_fs
+        Dy[i, j] = D_new
+        λmaxVy[i, j] = row_sum / D_new
+    end
+    return nothing
+end
+
+function JR2D.apply_free_surface_diagonal!(
+        Dy::CuArray, λmaxVy::CuArray, ρgy::CuArray, di_center, dt
+    )
+    @parallel (@idx size(Dy)) _apply_free_surface_diagonal_CUDA!(
+        Dy, λmaxVy, ρgy, di_center, dt
+    )
+    return nothing
+end
+
 # Types
 function JR2D.StokesArrays(::Type{CUDABackend}, ni::NTuple{N, Integer}) where {N}
     return StokesArrays(ni)
 end
 
-function JR2D.DYREL(::Type{CUDABackend}, ni::NTuple{N, Integer}; ϵ = 1.0e-6, ϵ_vel = 1.0e-6, CFL = 0.99, c_fact = 0.5) where {N}
-    return DYREL(ni; ϵ = ϵ, ϵ_vel = ϵ_vel, CFL = CFL, c_fact = c_fact)
+function JR2D.DYREL(::Type{CUDABackend}, ni::NTuple{N, Integer}; ϵ = 1.0e-6, ϵ_vel = 1.0e-6, CFL = 0.99, c_fact = 0.5, γfact = 20.0) where {N}
+    return DYREL(ni; ϵ = ϵ, ϵ_vel = ϵ_vel, CFL = CFL, c_fact = c_fact, γfact = γfact)
 end
 
 function JR2D.DYREL(::Type{CUDABackend}, stokes::JustRelax.StokesArrays, rheology, phase_ratios, di, dt; ϵ = 1.0e-6, ϵ_vel = 1.0e-6, CFL = 0.99, c_fact = 0.5, γfact = 20.0)
@@ -221,6 +247,26 @@ function thermal_bcs!(::CUDABackendTrait, thermal::JustRelax.ThermalArrays, bcs)
     return thermal_bcs!(thermal.T, bcs)
 end
 
+function JR2D.pureshear_bc!(
+        ::CUDABackendTrait, stokes::JustRelax.StokesArrays, xci, xvi, εbg
+    )
+    return _pureshear_bc!(stokes, xci, xvi, εbg)
+end
+
+function pureshear_bc!(::CUDABackendTrait, stokes::JustRelax.StokesArrays, xci, xvi, εbg)
+    return _pureshear_bc!(stokes, xci, xvi, εbg)
+end
+
+function JR2D.simpleshear_bc!(
+        ::CUDABackendTrait, stokes::JustRelax.StokesArrays, xci, xvi, γbg
+    )
+    return _simpleshear_bc!(stokes, xci, xvi, γbg)
+end
+
+function simpleshear_bc!(::CUDABackendTrait, stokes::JustRelax.StokesArrays, xci, xvi, γbg)
+    return _simpleshear_bc!(stokes, xci, xvi, γbg)
+end
+
 # Rheology
 
 ## viscosity
@@ -300,6 +346,29 @@ function JR2D.compute_melt_fraction!(
         ϕ::CuArray, phase_ratios::JustPIC.PhaseRatios, rheology, args
     )
     return compute_melt_fraction!(ϕ, phase_ratios, rheology, args)
+end
+
+function JR2D.compute_melt_fraction!(
+        ϕ::CuArray, dϕdT, phase_ratios::JustPIC.PhaseRatios, rheology, args
+    )
+    return compute_melt_fraction!(ϕ, dϕdT, phase_ratios, rheology, args)
+end
+
+function JR2D.compute_melt_fraction_derivative!(dϕdT::CuArray, rheology, args)
+    return compute_melt_fraction_derivative!(dϕdT, rheology, args)
+end
+
+function JR2D.compute_melt_fraction_derivative!(
+        dϕdT::CuArray, phase_ratios::JustPIC.PhaseRatios, rheology, args
+    )
+    return compute_melt_fraction_derivative!(dϕdT, phase_ratios, rheology, args)
+end
+
+## Solubility
+function JR2D.compute_dissolved_volatiles!(
+        mH2O::CuArray, mCO2, phase_ratios::JustPIC.PhaseRatios, rheology, args
+    )
+    return compute_dissolved_volatiles!(mH2O, mCO2, phase_ratios, rheology, args)
 end
 
 function JR2D.shear2center!(::CUDABackendTrait, A::JustRelax.SymmetricTensor)
