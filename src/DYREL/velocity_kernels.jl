@@ -362,14 +362,14 @@ end
         Rx::AbstractArray{T, 2}, Ry, P, ΔPψ, τxx, τyy, τxy, ρgx, ρgy, _di_center, _di_vertex,
         dirichlet::NTuple{2, AbstractDirichletBoundaryCondition},
     ) where {T}
-    Base.@propagate_inbounds @inline av_xa(A) = _av_xa(A, i, j)
-    Base.@propagate_inbounds @inline av_ya(A) = _av_ya(A, i, j)
+    Base.@propagate_inbounds @inline av_xa(A) = _av_xa_wrap(A, i, j)
+    Base.@propagate_inbounds @inline av_ya(A) = _av_ya_wrap(A, i, j)
 
     if i ≤ size(Rx, 1) && j ≤ size(Rx, 2)
         if !isdirichlet(dirichlet[1], i + 1, j + 1)
             _dx_c = @dx(_di_center, i)
             _dy_v = @dy(_di_vertex, j)
-            Base.@propagate_inbounds @inline d_xa(A) = _d_xa(A, _dx_c, i, j)
+            Base.@propagate_inbounds @inline d_xa(A) = _d_xa_wrap(A, _dx_c, i, j)
             Base.@propagate_inbounds @inline d_yi(A) = _d_yi(A, _dy_v, i, j)
             Rx[i, j] = d_xa(τxx) + d_yi(τxy) - d_xa(P) - d_xa(ΔPψ) - av_xa(ρgx)
         else
@@ -380,7 +380,7 @@ end
         if !isdirichlet(dirichlet[2], i + 1, j + 1)
             _dy_c = @dy(_di_center, j)
             _dx_v = @dx(_di_vertex, i)
-            Base.@propagate_inbounds @inline d_ya(A) = _d_ya(A, _dy_c, i, j)
+            Base.@propagate_inbounds @inline d_ya(A) = _d_ya_wrap(A, _dy_c, i, j)
             Base.@propagate_inbounds @inline d_xi(A) = _d_xi(A, _dx_v, i, j)
             Ry[i, j] = d_ya(τyy) + d_xi(τxy) - d_ya(P) - d_ya(ΔPψ) - av_ya(ρgy)
         else
@@ -388,6 +388,58 @@ end
         end
     end
     # end
+    return nothing
+end
+
+@parallel_indices (i, j) function compute_PH_residual_V!(
+        Rx::AbstractArray{T, 2},
+        Ry,
+        Vx,
+        Vy,
+        P,
+        ΔPψ,
+        τxx,
+        τyy,
+        τxy,
+        ρgx,
+        ρgy,
+        _di_center,
+        _di_vertex,
+        dt,
+    ) where {T}
+    # See the overload above: cell-centred fields wrap, the vertex field `τxy` does not.
+    Base.@propagate_inbounds @inline av_xa(A) = _av_xa_wrap(A, i, j)
+    Base.@propagate_inbounds @inline av_ya(A) = _av_ya_wrap(A, i, j)
+
+    nx, ny = size(ρgy)
+    if i ≤ size(Rx, 1) && j ≤ size(Rx, 2)
+        _dx_c = @dx(_di_center, i)
+        _dy_v = @dy(_di_vertex, j)
+        Base.@propagate_inbounds @inline d_xa(A) = _d_xa_wrap(A, _dx_c, i, j)
+        Base.@propagate_inbounds @inline d_yi(A) = _d_yi(A, _dy_v, i, j)
+        Rx[i, j] = d_xa(τxx) + d_yi(τxy) - d_xa(P) - d_xa(ΔPψ) - av_xa(ρgx)
+    end
+
+    if i ≤ size(Ry, 1) && j ≤ size(Ry, 2)
+        _dy_c = @dy(_di_center, j)
+        _dx_v = @dx(_di_vertex, i)
+        Base.@propagate_inbounds @inline d_ya(A) = _d_ya_wrap(A, _dy_c, i, j)
+        Base.@propagate_inbounds @inline d_xi(A) = _d_xi(A, _dx_v, i, j)
+        θ = 1.0
+        # Vertical velocity
+        Vyᵢⱼ = Vy[i + 1, j + 1]
+        # Get necessary buoyancy forces
+        j_N = wrap_next(j, ny)
+        ρg_S = ρgy[i, j]
+        ρg_N = ρgy[i, j_N]
+        # Spatial derivatives
+        ∂ρg∂y = (ρg_N - ρg_S) * _dy_c
+        # correction term
+        ρg_correction = (Vyᵢⱼ * ∂ρg∂y) * θ * dt
+
+        Ry[i, j] = d_ya(τyy) + d_xi(τxy) - d_ya(P) - d_ya(ΔPψ) - av_ya(ρgy) + ρg_correction
+    end
+
     return nothing
 end
 
@@ -798,15 +850,15 @@ end
         _di_vertex,
         dirichlet::NTuple{2, AbstractDirichletBoundaryCondition},
     ) where {T}
-    Base.@propagate_inbounds @inline av_xa(A) = _av_xa(A, i, j)
-    Base.@propagate_inbounds @inline av_ya(A) = _av_ya(A, i, j)
+    Base.@propagate_inbounds @inline av_xa(A) = _av_xa_wrap(A, i, j)
+    Base.@propagate_inbounds @inline av_ya(A) = _av_ya_wrap(A, i, j)
 
     @inbounds begin
         if i ≤ size(Rx, 1) && j ≤ size(Rx, 2)
             if !isdirichlet(dirichlet[1], i + 1, j + 1)
                 _dx_c = @dx(_di_center, i)
                 _dy_v = @dy(_di_vertex, j)
-                Base.@propagate_inbounds @inline d_xa(A) = _d_xa(A, _dx_c, i, j)
+                Base.@propagate_inbounds @inline d_xa(A) = _d_xa_wrap(A, _dx_c, i, j)
                 Base.@propagate_inbounds @inline d_yi(A) = _d_yi(A, _dy_v, i, j)
                 Rx_ij = (d_xa(τxx) + d_yi(τxy) - d_xa(P) - d_xa(θc) - av_xa(ρgx)) / Dx[i, j]
                 Rx[i, j] = Rx_ij
@@ -824,7 +876,7 @@ end
             if !isdirichlet(dirichlet[2], i + 1, j + 1)
                 _dy_c = @dy(_di_center, j)
                 _dx_v = @dx(_di_vertex, i)
-                Base.@propagate_inbounds @inline d_ya(A) = _d_ya(A, _dy_c, i, j)
+                Base.@propagate_inbounds @inline d_ya(A) = _d_ya_wrap(A, _dy_c, i, j)
                 Base.@propagate_inbounds @inline d_xi(A) = _d_xi(A, _dx_v, i, j)
                 Ry_ij = (d_ya(τyy) + d_xi(τxy) - d_ya(P) - d_ya(θc) - av_ya(ρgy)) / Dy[i, j]
                 Ry[i, j] = Ry_ij
@@ -871,15 +923,15 @@ end
         dt,
         dirichlet::NTuple{2, AbstractDirichletBoundaryCondition},
     ) where {T}
-    Base.@propagate_inbounds @inline av_xa(A) = _av_xa(A, i, j)
-    Base.@propagate_inbounds @inline av_ya(A) = _av_ya(A, i, j)
+    Base.@propagate_inbounds @inline av_xa(A) = _av_xa_wrap(A, i, j)
+    Base.@propagate_inbounds @inline av_ya(A) = _av_ya_wrap(A, i, j)
 
     @inbounds begin
         if i ≤ size(Rx, 1) && j ≤ size(Rx, 2)
             if !isdirichlet(dirichlet[1], i + 1, j + 1)
                 _dx_c = @dx(_di_center, i)
                 _dy_v = @dy(_di_vertex, j)
-                Base.@propagate_inbounds @inline d_xa(A) = _d_xa(A, _dx_c, i, j)
+                Base.@propagate_inbounds @inline d_xa(A) = _d_xa_wrap(A, _dx_c, i, j)
                 Base.@propagate_inbounds @inline d_yi(A) = _d_yi(A, _dy_v, i, j)
                 Rx_ij = (d_xa(τxx) + d_yi(τxy) - d_xa(P) - d_xa(θc) - av_xa(ρgx)) / Dx[i, j]
                 Rx[i, j] = Rx_ij
@@ -897,9 +949,9 @@ end
             if !isdirichlet(dirichlet[2], i + 1, j + 1)
                 _dy_c = @dy(_di_center, j)
                 _dx_v = @dx(_di_vertex, i)
-                Base.@propagate_inbounds @inline d_ya(A) = _d_ya(A, _dy_c, i, j)
+                Base.@propagate_inbounds @inline d_ya(A) = _d_ya_wrap(A, _dy_c, i, j)
                 Base.@propagate_inbounds @inline d_xi(A) = _d_xi(A, _dx_v, i, j)
-                j_N = min(j + 1, size(ρgy, 2))
+                j_N = wrap_next(j, size(ρgy, 2))
                 ∂ρg∂y = (ρgy[i, j_N] - ρgy[i, j]) * _dy_c
                 ρg_correction = Vy[i + 1, j + 1] * ∂ρg∂y * dt
                 Ry_ij = (d_ya(τyy) + d_xi(τxy) - d_ya(P) - d_ya(θc) - av_ya(ρgy) + ρg_correction) / Dy[i, j]

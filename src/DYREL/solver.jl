@@ -148,7 +148,7 @@ function _solve_DYREL!(
     _di = grid._di
     di_center = di.center
     ni = size(stokes.P)
-    dirichlet_v = (flow_bcs.dirichlet.Vx, flow_bcs.dirichlet.Vy)
+    dirichlet_v = velocity_dirichlet_args(flow_bcs, dim)
 
     residuals = @residuals(stokes.R)
     fields = dyrel_fields(dyrel, dim)
@@ -227,7 +227,7 @@ function _solve_DYREL!(
             _di.center,
             _di.vertex,
             dt * free_surface,
-            dirichlet_v,
+            dirichlet_v...,
         )
 
         # pressure residual stokes.R.RP already computed in compute_∇V_strain_rate_RP! above
@@ -299,7 +299,7 @@ function _solve_DYREL!(
                 _di.center,
                 _di.vertex,
                 dt * free_surface,
-                dirichlet_v,
+                dirichlet_v...,
             )
             flow_bcs!(stokes, flow_bcs)
             free_surface_bcs!(
@@ -424,6 +424,10 @@ end
 end
 
 @inline dyrel_fields(::JustRelax.DYREL, ::Val{N}) where {N} = error("Unsupported dimension $N")
+
+#Dirichlet velocity bc's not implemented yet for 3D
+@inline velocity_dirichlet_args(bcs, ::Val{2}) = ((bcs.dirichlet.Vx, bcs.dirichlet.Vy),)
+@inline velocity_dirichlet_args(_, ::Val{3}) = ()
 
 function update_stress_halo!(stokes::JustRelax.StokesArrays, ::Val{2}, linear_viscosity)
     if linear_viscosity
