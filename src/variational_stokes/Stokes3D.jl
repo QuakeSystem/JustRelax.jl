@@ -1,8 +1,50 @@
 ## 3D VISCO-ELASTIC STOKES SOLVER
 
 # backend trait
-function solve_VariationalStokes!(stokes::JustRelax.StokesArrays, args...; kwargs)
-    return solve_VariationalStokes!(backend(stokes), stokes, args...; kwargs)
+"""
+    solve_VariationalStokes!(stokes::JustRelax.StokesArrays, args...; kwargs...)
+
+Solve the 3D volume-fraction variational Stokes problem with matrix-free
+pseudo-transient iterations.
+
+`ϕ` carries liquid weights at pressure cells, stress vertices and staggered
+velocity faces; zero-weight rows are written as zero instead of being solved
+with air material properties. See the 2D method for the pressure/velocity
+connectivity rule the weights encode.
+
+# Arguments (in the following order)
+- `stokes`: `JustRelax.StokesArrays` containing the simulation fields.
+- `pt_stokes`: Pseudo-transient coefficients, from `PTStokesCoeffs`.
+- `grid`: `Geometry{3}` object carrying grid spacing and staggered-grid coordinates. A legacy
+  3D spacing tuple or named tuple is also accepted and converted to a uniform `Geometry`.
+- `flow_bcs`: `AbstractFlowBoundaryConditions` defining velocity boundary conditions.
+- `ρg`: buoyancy forces arrays.
+- `phase_ratios`: `JustPIC.PhaseRatios` for material phase tracking.
+- `ϕ`: `JustRelax.RockRatio` carrying the cell, vertex and face volume fractions.
+- `rheology`: Material properties and rheological laws.
+- `args`: Tuple of additional arguments needed to update viscosity, stress, and buoyancy forces.
+- `dt`: Time step.
+- `igg`: `IGG` object for global grid information (MPI).
+
+# Keyword Arguments
+- `air_phase`: Phase index excluded from material averages; `0` disables the correction. Default: `0`.
+- `viscosity_cutoff`: Limits for viscosity `(min, max)`. Default: `(-Inf, Inf)`.
+- `viscosity_relaxation`: Relaxation factor for viscosity updates. Default: `1.0e-2`.
+- `iterMax`: Maximum number of pseudo-transient iterations. Default: `10.0e3`.
+- `nout`: Output frequency for residuals. Default: `500`.
+- `verbose`: Print iteration info. Default: `true`.
+- `b_width`: Halo width used to overlap communication with computation. Default: `(4, 4, 4)`.
+- `free_surface`: Include the density-gradient free-surface stabilization term. Default: `false`.
+
+Options may be passed either as plain keywords or bundled as a single
+`kwargs = (; ...)` NamedTuple.
+"""
+function solve_VariationalStokes!(stokes::JustRelax.StokesArrays, args...; kwargs...)
+    reject_periodic_bcs(flow_bcs_of(args), "`solve_VariationalStokes!`")
+    reject_incompressible_cap(rheology_of(args), "`solve_VariationalStokes!`")
+    return solve_VariationalStokes!(
+        backend(stokes), stokes, args...; kwargs = flatten_solver_kwargs(kwargs)
+    )
 end
 
 # entry point for extensions
@@ -30,6 +72,7 @@ function _solve_VS!(
         verbose = true,
         viscosity_relaxation = 1.0e-2,
         viscosity_cutoff = (-Inf, Inf),
+        free_surface = false,
         kwargs...,
     ) where {N}
 
@@ -42,6 +85,7 @@ function _solve_VS!(
     di = grid.di
     _di = grid._di
     di = di isa NamedTuple ? di.center : di
+    require_uniform_spacing(grid, "`solve_VariationalStokes!`")
     _di = _di isa NamedTuple ? _di.center : _di
     ni = size(stokes.P)
     (; η, η_vep) = stokes.viscosity
@@ -68,10 +112,14 @@ function _solve_VS!(
     # solver loop
     wtime0 = 0.0
     ητ = deepcopy(η)
+    # compute_V! uses enough registers that CUDA caps its blocks at 256 threads, while
+    # ParallelStencil's default launch can exceed that (e.g. 17×16 threads for a 17-wide range).
+    nthreads_V = (32, 4, 1)
+    nblocks_V = cld.(ni .+ 1, nthreads_V)
 
     # compute buoyancy forces and viscosity
-    compute_ρg!(ρg, phase_ratios, rheology, args)
-    compute_viscosity!(stokes, phase_ratios, args, rheology, air_phase, viscosity_cutoff)
+    compute_ρg!(ρg, phase_ratios, rheology, args; air_phase)
+    compute_viscosity!(stokes, phase_ratios, args, rheology, viscosity_cutoff; air_phase = air_phase)
 
     # convert displacement to velocity
     displacement2velocity!(stokes, dt, flow_bcs)
@@ -83,7 +131,7 @@ function _solve_VS!(
             update_halo!(ητ)
 
             @parallel (@idx ni) compute_∇V!(stokes.∇V, @velocity(stokes), ϕ, _di)
-            compute_P!(
+            compute_variational_P!(
                 θ,
                 stokes.P0,
                 stokes.R.RP,
@@ -91,19 +139,20 @@ function _solve_VS!(
                 stokes.Q,
                 ητ,
                 rheology,
-                phase_ratios.center,
+                phase_ratios,
+                ϕ,
                 dt,
                 pt_stokes.r,
                 pt_stokes.θ_dτ,
                 args,
             )
 
-            @parallel (@idx ni) compute_strain_rate!(
+            @parallel (@idx ni .+ 1) compute_strain_rate!(
                 stokes.∇V, @strain(stokes)..., @velocity(stokes)..., ϕ, _di
             )
 
             # Update buoyancy
-            update_ρg!(ρg, phase_ratios, rheology, args)
+            update_ρg!(ρg, phase_ratios, rheology, args; air_phase)
 
             # Update viscosity
             update_viscosity_τII!(
@@ -117,7 +166,8 @@ function _solve_VS!(
             )
             # update_stress!(stokes, θ, λ, phase_ratios, rheology, dt, pt_stokes.θ_dτ)
 
-            @parallel (@idx ni .+ 1) update_stresses_center_vertex!(
+            # Fixed 256-thread blocks avoid heuristic rounding above the GPU kernel limit.
+            @parallel (@idx ni .+ 1) cld.(ni .+ 1, (32, 8, 1)) (32, 8, 1) update_stresses_center_vertex!(
                 @strain(stokes),
                 @plastic_strain(stokes),
                 stokes.EII_pl,
@@ -129,6 +179,7 @@ function _solve_VS!(
                 (stokes.τ_o.yz, stokes.τ_o.xz, stokes.τ_o.xy),
                 θ,
                 stokes.P,
+                fluid_pressure(args, stokes.P),
                 stokes.viscosity.η,
                 λ,
                 (λv_yz, λv_xz, λv_xy),
@@ -150,24 +201,23 @@ function _solve_VS!(
             update_halo!(stokes.τ.xy)
             free_surface_stress_bcs!(stokes, flow_bcs, Val(3))
 
-            @hide_communication b_width begin # communication/computation overlap
-                @parallel compute_V!(
-                    @velocity(stokes)...,
-                    @residuals(stokes.R)...,
-                    stokes.P,
-                    ρg...,
-                    @stress(stokes)...,
-                    ητ,
-                    pt_stokes.ηdτ,
-                    ϕ,
-                    _di,
-                )
-                # apply boundary conditions
-                velocity2displacement!(stokes, dt)
-                flow_bcs!(stokes, flow_bcs)
-                free_surface_bcs!(stokes, flow_bcs, η_vep, di.velocity..., Val(3))
-                update_halo!(@velocity(stokes)...)
-            end
+            @parallel (@idx ni .+ 1) nblocks_V nthreads_V compute_V!(
+                @velocity(stokes)...,
+                @residuals(stokes.R)...,
+                stokes.P,
+                ρg...,
+                @stress(stokes)...,
+                ητ,
+                pt_stokes.ηdτ,
+                ϕ,
+                _di,
+                dt * free_surface,
+            )
+            # apply boundary conditions
+            velocity2displacement!(stokes, dt)
+            flow_bcs!(stokes, flow_bcs)
+            free_surface_bcs!(stokes, flow_bcs, η_vep, grid.di.velocity..., Val(3))
+            update_halo!(@velocity(stokes)...)
         end
 
         iter += 1
@@ -220,6 +270,10 @@ function _solve_VS!(
 
     # accumulate plastic strain tensor
     accumulate_tensor!(stokes.EII_pl, stokes.ε_pl, dt)
+    stokes.λ .= λ
+    stokes.λv_yz .= λv_yz
+    stokes.λv_xz .= λv_xz
+    stokes.λv_xy .= λv_xy
     accumulate_vol!(stokes.EVol_pl, stokes.ε_vol_pl, dt)
 
     @parallel (@idx ni .+ 1) multi_copy!(@tensor(stokes.τ_o), @tensor(stokes.τ))

@@ -1,7 +1,7 @@
 @static if ENV["JULIA_JUSTRELAX_BACKEND"] === "AMDGPU"
     using AMDGPU
 elseif ENV["JULIA_JUSTRELAX_BACKEND"] === "CUDA"
-    using CUDA
+    import CUDA
 end
 
 using Test
@@ -9,22 +9,22 @@ using JustRelax
 import JustRelax.JustRelax3D as JR3
 
 using ParallelStencil, ParallelStencil.FiniteDifferences3D
-const backend_JR = @static if ENV["JULIA_JUSTRELAX_BACKEND"] === "AMDGPU"
+const backend = @static if ENV["JULIA_JUSTRELAX_BACKEND"] === "AMDGPU"
     @init_parallel_stencil(AMDGPU, Float64, 3)
-    AMDGPUBackend
+    JustRelax.AMDGPUBackend
 elseif ENV["JULIA_JUSTRELAX_BACKEND"] === "CUDA"
     @init_parallel_stencil(CUDA, Float64, 3)
-    CUDABackend
+    JustRelax.CUDABackend
 else
     @init_parallel_stencil(Threads, Float64, 3)
-    CPUBackend
+    JustRelax.CPUBackend
 end
 
 using JustPIC
 const backend_JP = @static if ENV["JULIA_JUSTRELAX_BACKEND"] === "AMDGPU"
     AMDGPU.ROCBackend
 elseif ENV["JULIA_JUSTRELAX_BACKEND"] === "CUDA"
-    CUDABackend
+    CUDA.CUDABackend
 else
     JustPIC.CPU
 end
@@ -47,10 +47,10 @@ end
 
     # CellArrays stores an SVector per cell; copy to host so we can index per-cell
     # on any backend.
-    center_h = Base.Array(pr.center)
-    vertex_h = Base.Array(pr.vertex)
-    faces_h = map(Base.Array, (pr.Vx, pr.Vy, pr.Vz))
-    midpoints_h = map(Base.Array, (pr.xy, pr.yz, pr.xz))
+    center_h = to_cpu(pr.center)
+    vertex_h = to_cpu(pr.vertex)
+    faces_h = map(to_cpu, (pr.Vx, pr.Vy, pr.Vz))
+    midpoints_h = map(to_cpu, (pr.xy, pr.yz, pr.xz))
 
     # Staggered grids the ratios live on
     @test size(center_h) == (nx, ny, nz)
@@ -78,7 +78,7 @@ end
     p2b = @fill(0.4, nx, ny, nz)
     p3b = @fill(1.0e-6, nx, ny, nz)             # below the 1e-5 threshold
     JR3.update_phase_ratios_3D!(pr3, (p1b, p2b, p3b), xci, xvi)
-    center3_h = Base.Array(pr3.center)
+    center3_h = to_cpu(pr3.center)
     @test center3_h[2, 2, 2][3] == 0.0          # tiny phase zeroed out
     @test center3_h[2, 2, 2][1] + center3_h[2, 2, 2][2] ≈ 1.0
 end
