@@ -160,15 +160,15 @@ function main(li, origin, phases_GMG, igg, zv; nx = 16, ny = 16, figdir = "figs2
 
         println("="^70)
         println("Asymmetrically refined grid. Top is refined, bottom is coarse.")
-        println("GHOST-NODE CHECK (z): dz bottom=$(dz_bottom_physical/1e3)km top=$(dz_top_physical/1e3)km")
+        println("GHOST-NODE CHECK (z): dz bottom=$(dz_bottom_physical / 1.0e3)km top=$(dz_top_physical / 1.0e3)km")
         println("")
-        println("vertex zcoord top:    ghost_used=$(zvi_particles[end]/1e3)km - ghost_expected=$(z_top_vertex_correct/1e3)km - domain_edge=$(zvi_physical[end]/1e3)km")
-        println("vertex zcoord bottom: ghost_used=$(zvi_particles[1]/1e3)km - ghost_expected=$(z_bottom_vertex_correct/1e3)km - domain_edge=$(zvi_physical[1]/1e3)km")
+        println("vertex zcoord top:    ghost_used=$(zvi_particles[end] / 1.0e3)km - ghost_expected=$(z_top_vertex_correct / 1.0e3)km - domain_edge=$(zvi_physical[end] / 1.0e3)km")
+        println("vertex zcoord bottom: ghost_used=$(zvi_particles[1] / 1.0e3)km - ghost_expected=$(z_bottom_vertex_correct / 1.0e3)km - domain_edge=$(zvi_physical[1] / 1.0e3)km")
         println("")
-        println("centroid zcoord top:    ghost_used=$(xci_particles[end]/1e3)km - ghost_expected=$(z_top_centroid_correct/1e3)km - last_real_centroid=$(xci_physical[end]/1e3)km")
-        println("centroid bottom: ghost_used=$(xci_particles[1]/1e3)km - ghost_expected=$(z_bottom_centroid_correct/1e3)km - first_real_centroid=$(xci_physical[1]/1e3)km")
+        println("centroid zcoord top:    ghost_used=$(xci_particles[end] / 1.0e3)km - ghost_expected=$(z_top_centroid_correct / 1.0e3)km - last_real_centroid=$(xci_physical[end] / 1.0e3)km")
+        println("centroid bottom: ghost_used=$(xci_particles[1] / 1.0e3)km - ghost_expected=$(z_bottom_centroid_correct / 1.0e3)km - first_real_centroid=$(xci_physical[1] / 1.0e3)km")
         println("")
-        println("=> bottom ghost dz: $(round((dz_bottom_physical - dz_bottom_ghost)/1e3, digits=2))km too close; particles with z<$(xci_particles[1]/1e3)km get extrapolated, not interpolated")
+        println("=> bottom ghost dz: $(round((dz_bottom_physical - dz_bottom_ghost) / 1.0e3, digits = 2))km too close; particles with z<$(xci_particles[1] / 1.0e3)km get extrapolated, not interpolated")
         println("="^70)
     end
 
@@ -452,7 +452,7 @@ z0, z1 = -260.0e3, 0.0
 dz_bottom, dz_top = 30.0e3, 0.5e3
 zv = geometric_stretch_1d(z0, z1, dz_bottom, dz_top)
 ny = length(zv) - 1
-println("z-grid: ny=$ny cells, dz_bottom=$(dz_bottom/1e3)km, dz_top=$(dz_top/1e3)km, realized span=$((zv[end]-zv[1])/1e3)km")
+println("z-grid: ny=$ny cells, dz_bottom=$(dz_bottom / 1.0e3)km, dz_top=$(dz_top / 1.0e3)km, realized span=$((zv[end] - zv[1]) / 1.0e3)km")
 
 li, origin, phases_GMG, T_GMG = GMG_subduction_2D(nx + 1, ny + 1)
 igg = if !(JustRelax.MPI.Initialized()) # initialize (or not) MPI grid
