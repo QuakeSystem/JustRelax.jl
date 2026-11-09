@@ -705,13 +705,13 @@ end
 
 """
     norm_mpi(A)
+    norm_mpi(A, B)
 
-Compute the L2 norm of array `A` across all MPI processes.
+Compute the L2 norm of array `A`, or of the elementwise product `A .* B`, across all MPI
+processes.
 """
-function norm_mpi(A)
-    sum2_l = _sum(A .^ 2)
-    return sqrt(MPI.Allreduce(sum2_l, MPI.SUM, MPI.COMM_WORLD))
-end
+norm_mpi(A) = sqrt(sum_mpi(abs2, A))
+norm_mpi(A, B) = sqrt(sum_mpi((a, b) -> abs2(a * b), A, B))
 
 """
     sum_mpi(A)
@@ -720,6 +720,10 @@ Compute the sum of array `A` across all MPI processes.
 """
 function sum_mpi(A)
     return MPI.Allreduce(_sum(A), MPI.SUM, MPI.COMM_WORLD)
+end
+
+function sum_mpi(f::F, A, Bs...) where {F <: Function}
+    return MPI.Allreduce(mapreduce(f, +, A, Bs...), MPI.SUM, MPI.COMM_WORLD)
 end
 
 """
@@ -754,3 +758,5 @@ for (f1, f2) in zip(
         $f1(A) = $f2(A)
     end
 end
+masked_norm_mpi(mask, A) = sqrt(sum_mpi((m, a) -> m ? abs2(a) : zero(abs2(a)), mask, A))
+masked_norm_mpi(mask, A, B) = sqrt(sum_mpi((m, a, b) -> m ? abs2(a * b) : zero(abs2(a * b)), mask, A, B))
