@@ -3,9 +3,15 @@
 
 Fault-row state for the elastic eigenstrain rate-and-state split.
 
-Arrays are vertex-sized (`ni .+ 1`), same layout as `τ.xy`. Only nodes with
-`mask > 0.5` are the fault. `Wf` is the LaMEM fault width: the thickness of the
-zone, usually 25–500 m, in the eigenstrain `V / (2 Wf)`.
+Arrays are vertex-sized (`ni .+ 1`), same layout as `τ.xy`. `mask` selects the fault:
+
+- `1` — rate-and-state eigenstrain. The slip rate is inverted from `τ.xy`.
+- `2` — prescribed slip. The eigenstrain still uses `V_lag`, and the rate-and-state
+  inversion and aging leave that node alone. BP1-FD uses this below `Wf_height`.
+- `0` — off the fault.
+
+`Wf` is the LaMEM fault width: the thickness of the zone, usually 25–500 m, in the
+eigenstrain `V / (2 Wf)`.
 
 SEAS BP1-FD uses the symbol `Wf` for a different length, the down-dip height of
 the rate-and-state section (40 km in that benchmark). That length is `Wf_height`,

@@ -678,5 +678,17 @@ end
                     3 .* Array(unit.V.Vy)[2:(end - 1), :]
             end
         end
+
+        @testset "strike free surface and moving lid" begin
+            stokes = StokesArrays(backend, (4, 4))
+            Vx = stokes.V.Vx
+            fill!(Vx, 0.0)
+            Vx[end, :] .= 1.0
+            Vx[:, end] .= 3.0
+            JustRelax2D.apply_boundary_vx!(Vx, (; free_surface = :right, top = 0.5))
+            Vxh = Array(Vx)
+            @test Vxh[end, 1:(end - 1)] ≈ Vxh[end - 1, 1:(end - 1)]
+            @test Vxh[:, end] ≈ 1.0 .- Vxh[:, end - 1]
+        end
     end
 end

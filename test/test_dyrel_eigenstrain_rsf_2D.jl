@@ -108,6 +108,25 @@ end
     @views stokes.V.Vx[:, end] .= V_init
 
     ez = eigenstrain_rsf(backend, ni; Wf = Wf, G = G, σ = σ, law = proto)
+    # x <= 500 m is prescribed plate rate (mask 2): stress does not change V, and aging skips it.
+    j_creep = init_eigenstrain_row!(
+        ez, xvi; y_fault = 1.0e3, a = a, b = b, ψ = 0.0, V_lag = V_init, x_creep = 500.0,
+    )
+    @test Array(ez.mask)[1, j_creep] == 2
+    @test Array(ez.mask)[3, j_creep] == 1
+    set_eigenstrain_ψ_from_stress!(ez, τ0, V_init)
+    @test Array(ez.ψ)[1, j_creep] == 0.0
+    τ_hi = Array(stokes.τ.xy)
+    τ_hi[1, j_creep] = 1.0e8
+    copyto!(stokes.τ.xy, τ_hi)
+    invert_rsf_eigenstrain!(ez, stokes)
+    @test Array(ez.V)[1, j_creep] == V_init
+    @test Array(ez.V)[3, j_creep] ≈ V_init rtol = 1.0e-6
+    age_rsf_eigenstrain!(ez, 1.0e6)
+    @test Array(ez.ψ)[1, j_creep] == 0.0
+    fill!(stokes.τ.xy, τ0)
+    fill!(stokes.τ_o.xy, τ0)
+
     j_fault = init_eigenstrain_row!(
         ez, xvi; y_fault = 1.0e3, a = a, b = b, ψ = 0.0, V_lag = V_init,
     )

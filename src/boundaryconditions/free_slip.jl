@@ -101,3 +101,61 @@ end
     end
     return nothing
 end
+
+# Strike-slip faces are boundary nodes the momentum kernel does not write. A free
+# surface there is a Neumann condition on the strike velocity, ∂Vx/∂x = 0, not the
+# in-plane free-slip copy of the tangential component.
+@parallel_indices (j) function _neumann_vx_right!(Vx)
+    @inbounds Vx[end, j] = Vx[end - 1, j]
+    return nothing
+end
+
+@parallel_indices (j) function _neumann_vx_left!(Vx)
+    @inbounds Vx[1, j] = Vx[2, j]
+    return nothing
+end
+
+# Ghost value whose average with the first interior node is the wall velocity.
+@parallel_indices (i) function _vx_wall_top!(Vx, Vwall)
+    @inbounds Vx[i, end] = 2 * Vwall - Vx[i, end - 1]
+    return nothing
+end
+
+@parallel_indices (i) function _vx_wall_bot!(Vx, Vwall)
+    @inbounds Vx[i, 1] = 2 * Vwall - Vx[i, 2]
+    return nothing
+end
+
+"""
+    apply_boundary_vx!(Vx, bc)
+
+Apply strike-slip boundary conditions that [`VelocityBoundaryConditions`](@ref)
+does not express. `bc = nothing` does nothing. Otherwise `bc` is a named tuple:
+
+- `free_surface = :right` or `:left` copies the adjacent interior `Vx` onto that
+  face (`∂Vx/∂x = 0`).
+- `top` and `bot`, when set to a number, are wall velocities. The ghost is
+  `2 Vwall − V_interior`.
+
+The free-surface copy runs first and the wall ghosts second, so a corner follows
+the wall.
+"""
+function apply_boundary_vx!(Vx, bc)
+    bc === nothing && return nothing
+    ndims(Vx) == 2 || error("apply_boundary_vx! is implemented for 2D")
+    side = get(bc, :free_surface, :none)
+    if side === :right
+        @parallel (@idx size(Vx, 2)) _neumann_vx_right!(Vx)
+    elseif side === :left
+        @parallel (@idx size(Vx, 2)) _neumann_vx_left!(Vx)
+    elseif side !== :none
+        error("boundary_vx.free_surface must be :none, :left, or :right")
+    end
+    top = get(bc, :top, nothing)
+    bot = get(bc, :bot, nothing)
+    top === nothing ||
+        @parallel (@idx size(Vx, 1)) _vx_wall_top!(Vx, convert(eltype(Vx), top))
+    bot === nothing ||
+        @parallel (@idx size(Vx, 1)) _vx_wall_bot!(Vx, convert(eltype(Vx), bot))
+    return nothing
+end

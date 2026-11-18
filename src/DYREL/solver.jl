@@ -55,6 +55,11 @@ Solve the Stokes system with the self-tuned dynamic relaxation (DYREL) method.
   `nothing` (default) → cell-centred phase-averaged density from `phase_ratios` + `rheology`;
   a scalar → uniform fill; a cell-centred array → copied as-is. Face values are averaged
   in the residual and Gershgorin diagonal.
+- `boundary_vx`: Optional named tuple applied to `Vx` after `flow_bcs!` on every
+  iteration. `free_surface = :right` or `:left` enforces `∂Vx/∂x = 0` on that face
+  (the strike-slip free surface; the momentum kernel does not update the face).
+  `top` and `bot` are wall velocities, imposed as `Vghost = 2 Vwall − V_interior`.
+  Default: `nothing`.
 
 Options may be passed either as plain keywords or bundled as a single
 `kwargs = (; ...)` NamedTuple.
@@ -155,6 +160,7 @@ function _solve_DYREL!(
         rsf_eigenstrain = nothing,
         inertia = false,
         ρ_inertia = nothing,
+        boundary_vx = nothing,
         kwargs...,
     ) where {N}
 
@@ -254,6 +260,8 @@ function _solve_DYREL!(
     if free_surface || !iszero(_inv_dt)
         update_dτV_α_β!(dyrel)
     end
+    # Strike-slip free surface and moving walls, before the first strain-rate evaluation.
+    apply_boundary_vx!(stokes.V.Vx, boundary_vx)
 
     # Powell-Hestenes iterations
     for itPH in 1:Int(iterMax_PH)
@@ -384,6 +392,7 @@ function _solve_DYREL!(
             free_surface_bcs!(
                 stokes, flow_bcs, stokes.viscosity.η_vep, grid.di.velocity..., dim
             )
+            apply_boundary_vx!(stokes.V.Vx, boundary_vx)
             update_halo!(@velocity(stokes)...)
 
             # Residual check

@@ -40,17 +40,23 @@ eigenstrain_rsf(backend, ni::NTuple{N, Integer}; kwargs...) where {N} =
     eigenstrain_rsf(ni; kwargs...)
 
 """
-    init_eigenstrain_row!(ez, xvi; y_fault, a, b, ψ, V_lag, b_x=nothing, b_val=nothing)
+    init_eigenstrain_row!(ez, xvi; y_fault, a, b, ψ, V_lag,
+        a_x=nothing, a_val=nothing, b_x=nothing, b_val=nothing, x_creep=nothing)
 
 Mark the vertex row closest to `y_fault` and set `a`, `b`, `ψ` / `ψ_old`, and `V_lag`.
+`V` on that row starts equal to `V_lag`.
 
-`b_x` and `b_val` are optional knots (strictly increasing `b_x`). Between and outside
-them, `b` follows [`get_rsf_profile`](@ref). Without knots, `b` is the scalar `b`.
+`a_x` / `a_val` and `b_x` / `b_val` are optional knots (strictly increasing). Between
+and outside them, the value follows [`get_rsf_profile`](@ref). Without knots, `a` and
+`b` are the scalars. Nodes with `x <= x_creep` are prescribed plate-rate nodes
+(`mask = 2`); the rest of the row is rate-and-state (`mask = 1`).
 """
 function init_eigenstrain_row!(
         ez::JustRelax.EigenstrainRSF, xvi;
         y_fault, a, b, ψ, V_lag,
+        a_x = nothing, a_val = nothing,
         b_x = nothing, b_val = nothing,
+        x_creep = nothing,
     )
     x = Array(xvi[1])
     y = Array(xvi[2])
@@ -60,11 +66,14 @@ function init_eigenstrain_row!(
     bb = zeros(eltype(ez.b), size(ez.b))
     ψa = zeros(eltype(ez.ψ), size(ez.ψ))
     Vl = zeros(eltype(ez.V_lag), size(ez.V_lag))
-    use_profile = !isnothing(b_x) && !isnothing(b_val)
+    use_a = !isnothing(a_x) && !isnothing(a_val)
+    use_b = !isnothing(b_x) && !isnothing(b_val)
     @inbounds for i in axes(mask, 1)
-        bi = use_profile ? get_rsf_profile(x[i], b_x, b_val) : b
-        mask[i, j_fault] = 1
-        aa[i, j_fault] = a
+        ai = use_a ? get_rsf_profile(x[i], a_x, a_val) : a
+        bi = use_b ? get_rsf_profile(x[i], b_x, b_val) : b
+        creep = !isnothing(x_creep) && x[i] ≤ x_creep
+        mask[i, j_fault] = creep ? 2 : 1
+        aa[i, j_fault] = ai
         bb[i, j_fault] = bi
         ψa[i, j_fault] = ψ
         Vl[i, j_fault] = V_lag
@@ -75,7 +84,7 @@ function init_eigenstrain_row!(
     copyto!(ez.ψ, ψa)
     copyto!(ez.ψ_old, ψa)
     copyto!(ez.V_lag, Vl)
-    fill!(ez.V, 0)
+    copyto!(ez.V, Vl)
     return j_fault
 end
 
@@ -118,8 +127,11 @@ end
 apply_rsf_eigenstrain!(::CPUBackendTrait, stokes, ez, dt) =
     _apply_rsf_eigenstrain!(stokes, ez, dt)
 
-@parallel_indices (I...) function _invert_eigenstrain_V!(V, τxy, mask, ψ_old, a, b, proto, σ, V_cap)
-    if mask[I...] > 0.5
+@parallel_indices (I...) function _invert_eigenstrain_V!(V, τxy, mask, ψ_old, a, b, V_lag, proto, σ, V_cap)
+    if mask[I...] > 1.5
+        # Prescribed slip (BP1-FD below Wf_height): keep the imposed rate.
+        V[I...] = V_lag[I...]
+    elseif mask[I...] > 0.5
         V[I...] = eigenstrain_slip_rate(proto, a[I...], b[I...], τxy[I...], ψ_old[I...], σ, V_cap)
     else
         V[I...] = 0
@@ -127,18 +139,18 @@ apply_rsf_eigenstrain!(::CPUBackendTrait, stokes, ez, dt) =
     return nothing
 end
 
-"""Invert `|τ.xy|` on the fault row into `ez.V`. Uses frozen `ψ_old`, not the aged state."""
+"""Invert `|τ.xy|` on rate-and-state fault nodes into `ez.V`. Prescribed nodes keep `V_lag`."""
 function invert_rsf_eigenstrain!(ez::JustRelax.EigenstrainRSF, stokes)
     T = eltype(ez.V)
     @parallel (@idx size(ez.V)) _invert_eigenstrain_V!(
-        ez.V, stokes.τ.xy, ez.mask, ez.ψ_old, ez.a, ez.b,
+        ez.V, stokes.τ.xy, ez.mask, ez.ψ_old, ez.a, ez.b, ez.V_lag,
         ez.law, T(ez.σ), T(ez.V_cap),
     )
     return nothing
 end
 
 @parallel_indices (I...) function _age_eigenstrain_ψ!(ψ, ψ_old, V, mask, a, b, proto, dt)
-    if mask[I...] > 0.5
+    if mask[I...] > 0.5 && mask[I...] < 1.5
         ψ[I...] = eigenstrain_age_state(proto, a[I...], b[I...], ψ_old[I...], V[I...], dt)
     else
         ψ[I...] = ψ_old[I...]
@@ -167,7 +179,7 @@ function set_eigenstrain_ψ_from_stress!(ez::JustRelax.EigenstrainRSF, τ, V)
     mask = Array(ez.mask)
     law = ez.law
     @inbounds for i in eachindex(ψ, a, b, mask)
-        mask[i] > 0.5 || continue
+        mask[i] > 0.5 && mask[i] < 1.5 || continue
         ψ[i] = eigenstrain_ψ_for_slip(a[i], b[i], law.μ₀, law.V₀, V, τ, ez.σ)
     end
     copyto!(ez.ψ, ψ)
@@ -192,7 +204,8 @@ end
 """
 Smallest LaMEM rate-and-state timestep on the fault row.
 
-`min(dt_weakening, dt_healing, dt_slip)`. While the fault is locked, healing
+`min(dt_weakening, dt_healing, dt_slip)` on rate-and-state nodes (`mask = 1`).
+Prescribed plate-rate nodes are omitted. While the fault is locked, healing
 (`0.2 L / (V₀ exp(-ψ))`) sets the step. During fast slip, weakening and the
 slip Courant number take over.
 """
@@ -205,7 +218,7 @@ function eigenstrain_lamem_dt(ez::JustRelax.EigenstrainRSF; ν)
     law = ez.law
     dt = Inf
     @inbounds for i in eachindex(V, ψ, a, b, mask)
-        mask[i] > 0.5 || continue
+        mask[i] > 0.5 && mask[i] < 1.5 || continue
         dti = compute_dt_ratestate_lamem(;
             Wf = ez.Wf,
             L = law.L,
