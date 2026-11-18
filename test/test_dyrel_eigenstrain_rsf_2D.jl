@@ -53,6 +53,19 @@ end
     @test eigenstrain_slip_rate(proto, a, b, τ0, ψ, σ, 1.0e-8) == 1.0e-8
     @test eigenstrain_slip_rate(proto, a, b, NaN, ψ, σ) == 0.0
 
+    # At the frozen-stress rate the slope term vanishes and the bracket stays there.
+    slope = G * dt / Wf
+    @test eigenstrain_consistent_rate(proto, a, b, τ0, ψ, σ, V_init, 1000.0, slope) ≈
+        V_init rtol = 1.0e-6
+    # A traction the raw law would turn into a huge rate must come back consistent
+    # with τ - slope (V - V_lag), and must not hit the cap.
+    τ_hi = 10 * τ0
+    V_hi = eigenstrain_consistent_rate(proto, a, b, τ_hi, ψ, σ, V_init, 1000.0, slope)
+    τ_at = τ_hi - slope * (V_hi - V_init)
+    @test 0 < V_hi < 1000
+    @test τ_at > 0
+    @test eigenstrain_slip_rate(proto, a, b, τ_at, ψ, σ) ≈ V_hi rtol = 1.0e-4
+
     ψ_new = eigenstrain_age_state(proto, a, b, ψ, V_init, 1.0e5)
     r = RateStateFriction(0.0, μ₀, V₀, a, b, 0.01, 0.0, Wf)
     @test ψ_new ≈ update_Ω(r; Ω_old = ψ, dt = 1.0e5, Vp = V_init)

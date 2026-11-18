@@ -41,9 +41,11 @@ end
     eigenstrain_physical_step!(stokes, ρg, dyrel, flow_bcs, phase_ratios, rheology, args, grid, dt, igg, ez;
         inertia=false, ρ_inertia=nothing, solve_kwargs=(;))
 
-Relax the elastic problem with `ez.V_lag` and `ez.ψ_old` frozen, invert a new slip
-rate, and repeat until the fault slip rate changes by less than `ez.tol` or
-`ez.max_pass` is reached. Then age `ψ` once and commit `ψ_old` and `V_lag`.
+Relax the elastic problem with `ez.V_lag` and `ez.ψ_old` frozen, then invert the
+slip rate that is consistent with unloading `τ` by `(G Δt / Wf)(V − V_lag)`.
+Repeat until the fault slip rate changes by less than `ez.tol` or `ez.max_pass`
+is reached. Then age `ψ` once and commit `ψ_old` and `V_lag`. The inversion is
+the shared kernel, so a CUDA or AMDGPU array takes the same bracket.
 
 `stokes.τ_o` and, when `inertia` is set, `stokes.V0` are restored at the start of
 every pass so the history stays that of the last accepted physical step.
@@ -84,7 +86,7 @@ function _eigenstrain_physical_step!(
             inertia = inertia,
             ρ_inertia = ρ_inertia,
         )
-        invert_rsf_eigenstrain!(ez, stokes)
+        invert_rsf_eigenstrain!(ez, stokes, dt)
         rel = eigenstrain_slip_change(ez)
         rel < ez.tol && break
         copyto!(ez.V_lag, ez.V)

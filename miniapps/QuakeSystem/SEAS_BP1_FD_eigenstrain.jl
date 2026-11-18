@@ -3,18 +3,18 @@ SEAS BP1-FD (Erickson et al.) on the elastic eigenstrain rate-and-state split.
 
 Reference input: LaMEM `SEAS_BP1_FD100m_prestress.dat` (side1000, depth 74 km,
 ksponly, `init_seas_tau0`). The fault is one vertex row at `y = 0`. `x` is depth,
-from −74 km to the free surface at 0. `y` is fault-normal, from −1000 km to
-1000 km.
+`y` is fault-normal.
 
-`Wf = 100 m` is the LaMEM fault width, the thickness in `V / (2 Wf)`.
-`Wf_height = 40 km` is the SEAS down-dip height of the rate-and-state section
-(the length that benchmark calls `Wf`). Nodes deeper than `Wf_height` keep the
+This run is a 160 km × 160 km box: depth from −160 km to the free surface,
+fault-normal from −80 km to 80 km. `Wf = 100 m` is the LaMEM fault width in
+`V / (2 Wf)` and the fine cell size. `Wf_height = 40 km` is the SEAS down-dip
+height of the rate-and-state section. Nodes deeper than `Wf_height` keep the
 plate rate and are not inverted.
 
-The mesh generator is the Herrendörfer one, with growth in both directions.
-Fault-normal cells grow from the 100 m band toward both sides. Along fault, the
-top 20 km stays at 100 m (the seismogenic zone in that LaMEM file) and the cells
-grow downward. The adjacent-cell ratio is 2.
+The fault grid is 100 m × 100 m. Fault-normal, that band is 20 cells (2 km,
+fault on a vertex). Along depth, 100 m cells run from the surface to 20 km.
+Outside that band, and below 20 km, cells grow at an adjacent ratio of 3. The
+largest jump, including the fine-to-coarse junction, stays under 3.6.
 
 Periodic `y` is not used. DYREL periodic directions need uniform spacing, and a
 periodic pair copies the tangential velocity from one side onto the other, so
@@ -32,6 +32,13 @@ nucleating near 12.5 km and rupturing upward.
 
 The fault starts at the SEAS prestress: uniform `τ0` from `a_max`, `V = Vp`,
 and `ψ(x)` such that the local `a(x)` returns that same stress and rate.
+
+After each elastic solve the slip rate is the root of the sinh law on
+`τ − (G Δt / Wf)(V − V_lag)`, not the law at the frozen traction. Up to 8
+passes are allowed, because the onset of slip needed 6 before the rate settled.
+Each of those solves starts with a cleared pseudo-velocity. The kernels are the
+shared ones included by the CUDA and AMDGPU modules; leave `isCUDA = false`
+here and switch it on only for a device run.
 =#
 const isCUDA = false
 
@@ -72,43 +79,53 @@ end
 
 const YEAR = 365.25 * 86400.0
 
-"""Outer cell sizes that fill `L`, with a constant adjacent ratio near `ratio`."""
-function cell_sizes_ratio(L, h_fine; ratio = 2.0)
+"""
+Outer cell sizes that fill `L`. Cells grow at `ratio`, and the series is scaled
+so the sum is `L`. The count is the one whose sum is closest to `L` while the
+fine-to-coarse jump stays below `jump_max`.
+"""
+function cell_sizes_ratio(L, h_fine; ratio = 3.0, jump_max = 3.5)
     ratio > 1 || error("growth ratio must be > 1, got $ratio")
     L > 0 || error("outer length must be positive, got $L")
     h1 = ratio * h_fine
-    best_n, best = 1, Inf
+    best_n, best = 0, Inf
     n = 1
     while n ≤ 60
         s = h1 * (ratio^n - 1) / (ratio - 1)
-        err = abs(log(s / L))
-        if err < best
-            best = err
-            best_n = n
+        h_first = h1 * L / s
+        r = max(h_first / h_fine, h_fine / h_first)
+        if r < jump_max
+            err = abs(log(s / L))
+            if err < best
+                best = err
+                best_n = n
+            end
         end
-        s > L && break
+        s > L * jump_max && best_n > 0 && break
         n += 1
     end
-    hs = [h1 * ratio^(k - 1) for k in 1:best_n]
-    hs .*= L / sum(hs)
-    return hs
+    best_n > 0 || error(
+        "cannot fill $L m from $h_fine m at ratio $ratio with jump < $jump_max",
+    )
+    scale = L / (h1 * (ratio^best_n - 1) / (ratio - 1))
+    return [h1 * ratio^(k - 1) * scale for k in 1:best_n]
 end
 
 """
-BP1-FD mesh. `x` is depth (fine from `x_fine` to the surface). `y` is
-fault-normal (fine band `fine_width` centered on the fault). Both outer regions
-grow at `ratio`.
+BP1-FD mesh. `x` is depth (`h_x` from `x_fine` to the surface, then ratio growth
+downward). `y` is fault-normal: `n_fault` cells of `h_fault` centered on the
+fault, then ratio growth to the sides.
 """
 function seas_bp1_graded_mesh(;
-        x0 = -74.0e3, x1 = 0.0, x_fine = -20.0e3, h_fine = 100.0,
-        y0 = -1.0e6, y1 = 1.0e6, y_fault = 0.0, fine_width = 1.0e3,
-        ratio = 2.0,
+        x0 = -160.0e3, x1 = 0.0, x_fine = -20.0e3, h_x = 100.0,
+        y0 = -80.0e3, y1 = 80.0e3, y_fault = 0.0, h_fault = 100.0, n_fault = 20,
+        ratio = 3.0,
     )
     (x0 < x_fine < x1) || error("fine depth interval ($x_fine, $x1) is outside ($x0, $x1)")
-    (x1 - x_fine) % h_fine == 0 ||
-        error("fine depth $(x1 - x_fine) m is not a multiple of $h_fine m")
-    n_fine_x = round(Int, (x1 - x_fine) / h_fine)
-    h_deep = cell_sizes_ratio(x_fine - x0, h_fine; ratio = ratio)
+    (x1 - x_fine) % h_x == 0 ||
+        error("fine depth $(x1 - x_fine) m is not a multiple of $h_x m")
+    n_fine_x = round(Int, (x1 - x_fine) / h_x)
+    h_deep = cell_sizes_ratio(x_fine - x0, h_x; ratio = ratio)
     xv = Float64[x0]
     x = x0
     for h in reverse(h_deep)
@@ -117,19 +134,20 @@ function seas_bp1_graded_mesh(;
     end
     xv[end] = x_fine
     for _ in 1:n_fine_x
-        x = xv[end] + h_fine
+        x = xv[end] + h_x
         push!(xv, x)
     end
     xv[end] = x1
 
-    fine_width % h_fine == 0 || error("fine band $fine_width m is not a multiple of $h_fine m")
-    n_fine_y = round(Int, fine_width / h_fine)
-    iseven(n_fine_y) || error("fine band needs an even cell count so the fault sits on a vertex")
+    n_fault > 0 && iseven(n_fault) ||
+        error("fault band needs a positive even cell count so the fault sits on a vertex")
+    h_fault > 0 || error("fault cell size must be positive, got $h_fault")
+    fine_width = n_fault * h_fault
     y_fine0 = y_fault - fine_width / 2
     y_fine1 = y_fault + fine_width / 2
-    (y0 < y_fine0 < y_fault < y_fine1 < y1) || error("fine band is outside the domain")
-    h_bot = cell_sizes_ratio(y_fine0 - y0, h_fine; ratio = ratio)
-    h_top = cell_sizes_ratio(y1 - y_fine1, h_fine; ratio = ratio)
+    (y0 < y_fine0 < y_fault < y_fine1 < y1) || error("fault band is outside the domain")
+    h_bot = cell_sizes_ratio(y_fine0 - y0, h_fault; ratio = ratio)
+    h_top = cell_sizes_ratio(y1 - y_fine1, h_fault; ratio = ratio)
     yv = Float64[y0]
     y = y0
     for h in reverse(h_bot)
@@ -137,8 +155,8 @@ function seas_bp1_graded_mesh(;
         push!(yv, y)
     end
     yv[end] = y_fine0
-    for _ in 1:n_fine_y
-        y = yv[end] + h_fine
+    for _ in 1:n_fault
+        y = yv[end] + h_fault
         push!(yv, y)
     end
     yv[end] = y_fine1
@@ -304,7 +322,7 @@ function main(
     τ0 = eigenstrain_steady_stress(a_max, σ, μ₀, b, V₀, Vp)
     proto = RateStateFriction(0.0, μ₀, V₀, a_val[end], b, L, 0.0, Wf)
     ez = eigenstrain_rsf(
-        backend, ni; Wf = Wf, G = G0, σ = σ, law = proto, tol = 1.0e-2, max_pass = 4,
+        backend, ni; Wf = Wf, G = G0, σ = σ, law = proto, tol = 1.0e-2, max_pass = 8,
     )
     # Depth is negative downward. Creep is imposed where x <= −Wf_height.
     j_fault = init_eigenstrain_row!(
@@ -514,16 +532,21 @@ end
 if abspath(PROGRAM_FILE) == @__FILE__
     Wf = 100.0
     Wf_height = 40.0e3
-    mesh = seas_bp1_graded_mesh(; h_fine = Wf, ratio = 2.0)
+    # 160 km × 160 km. 100 m cells across a 20-cell fault band and down to 20 km.
+    # Ratio 3 toward the sides and below 20 km. Wf_height stays the 40 km RSF cutoff.
+    mesh = seas_bp1_graded_mesh(;
+        x0 = -160.0e3, x1 = 0.0, x_fine = -20.0e3, h_x = Wf,
+        y0 = -80.0e3, y1 = 80.0e3, h_fault = Wf, n_fault = 20, ratio = 3.0,
+    )
     println("ni = $(mesh.ni)   max adjacent ratio = $(round(mesh.jump; digits = 3))")
     println("dx [m], bottom → surface:")
     println(join(round.(mesh.dx; digits = 2), ", "))
-    println("dy [m], −1000 km → +1000 km:")
+    println("dy [m], −80 km → +80 km:")
     println(join(round.(mesh.dy; digits = 2), ", "))
     flush(stdout)
     nx, ny = mesh.ni
     igg = IGG(init_global_grid(nx, ny, 1; init_MPI = !JustRelax.MPI.Initialized())...)
-    vtk_dir = joinpath(@__DIR__, "VTK_SEAS_BP1_FD", "vtk")
+    vtk_dir = joinpath(@__DIR__, "VTK_SEAS_BP1_FD_160km", "vtk")
     main(
         igg;
         xvi = mesh.xvi,

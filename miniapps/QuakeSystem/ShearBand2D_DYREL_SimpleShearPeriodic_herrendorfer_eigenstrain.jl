@@ -4,8 +4,11 @@ Herrendörfer simple shear with the elastic eigenstrain rate-and-state split.
 The fault is one vertex row. `Wf` is the LaMEM fault width (500 m here), the
 thickness in `V / (2 Wf)`. SEAS BP1-FD also writes `Wf` for the down-dip height
 of the rate-and-state section; that length is `Wf_height` and is not this width.
-The host is Maxwell / elastic. Slip rate is inverted after each DYREL solve, not
-inside the pseudo-time iteration. Inertia is on.
+The host is Maxwell / elastic. After each DYREL solve the slip rate is the root
+of the sinh law on `τ − (G Δt / Wf)(V − V_lag)`. That bracket, and the clearing
+of the pseudo-velocity at the start of each solve, live in the shared kernels
+compiled by the CUDA and AMDGPU modules. Inertia is on. Up to 8 passes are
+allowed; the loop stops earlier once the rate changes by less than 1%.
 
 The production mesh keeps a uniform 500 m spacing along the periodic x direction.
 Around the fault, 4 km of 500 m cells (so the eigenstrain vertex sits in the
@@ -20,7 +23,8 @@ shear until the velocity-weakening patch fails. The physical step is the LaMEM
 minimum of healing, weakening, and slip Courant time.
 
 This is the second RSF path (`rsf_eigenstrain`). The viscosity-fold path in
-`ShearBand2D_DYREL_SimpleShearPeriodic_herrendorfer.jl` is unchanged.
+`ShearBand2D_DYREL_SimpleShearPeriodic_herrendorfer.jl` keeps its own friction
+update. Both drop the pseudo-velocity at the start of a rate-and-state solve.
 =#
 const isCUDA = false
 
@@ -230,7 +234,7 @@ function main(
     # Herrendörfer initial state: locked fault, φ = −1, shear stress still zero.
     # Steady sliding at the plate rate would already be the failed state.
     ez = eigenstrain_rsf(
-        backend, ni; Wf = Wf, G = G0, σ = σ, law = proto, tol = 1.0e-2, max_pass = 4,
+        backend, ni; Wf = Wf, G = G0, σ = σ, law = proto, tol = 1.0e-2, max_pass = 8,
     )
     j_fault = init_eigenstrain_row!(
         ez, grid.xvi;

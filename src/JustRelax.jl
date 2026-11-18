@@ -289,6 +289,7 @@ export RateStateFriction,
 export EigenstrainRSF,
     eigenstrain_trial_stress,
     eigenstrain_slip_rate,
+    eigenstrain_consistent_rate,
     eigenstrain_age_state,
     eigenstrain_steady_stress,
     eigenstrain_ψ_for_slip

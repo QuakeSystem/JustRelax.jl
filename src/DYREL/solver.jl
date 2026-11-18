@@ -47,7 +47,9 @@ Solve the Stokes system with the self-tuned dynamic relaxation (DYREL) method.
   Returns also `dt_rsf`, `Vp_max`.
 - `rsf_eigenstrain`: Optional [`EigenstrainRSF`](@ref). After each elastic stress update,
   fault-row `τ.xy` is replaced by the frozen-slip eigenstrain traction. The `sinh` law is
-  not inside the iteration. Do not combine with `rsf` when `affect_stokes` is true.
+  not inside the iteration: the rate is the root of the sinh law on the traction
+  `τ − (G Δt / Wf)(V − V_lag)`. Do not combine with `rsf` when `affect_stokes` is true.
+  Either rate-and-state path clears the pseudo-velocity at the start of the solve.
   Default: `nothing`.
 - `inertia`: Include physical inertia ``ρ (V − V0)/dt`` in the momentum residual (LaMEM-style).
   Uses `stokes.V0` from the previous converged step. Default: `false`.
@@ -259,6 +261,16 @@ function _solve_DYREL!(
     add_inertia_diagonal!(fields.D..., fields.λmaxV..., ρ_inertia_c, _inv_dt)
     if free_surface || !iszero(_inv_dt)
         update_dτV_α_β!(dyrel)
+    end
+    # α, β and dτV were just rebuilt for this dt (η_ve = η / (1 + η/(G dt)),
+    # dτ = 2 CFL / √λmax). dVdτ and the residual history were not. An eigenstrain
+    # pass or a rate-and-state viscosity drop changes the operator by orders of
+    # magnitude, and the inherited search direction is then a kick. The variational
+    # solver drops the same state because its free-surface mask can change. Inside
+    # this solve, dVdτ accumulates again. `fill!` is the device array method, so
+    # this is the same on CPU, CUDA and AMDGPU.
+    if !isnothing(rsf_eigenstrain) || rsf_stokes
+        foreach(A -> fill!(A, zero(eltype(A))), (fields.dVdτ..., fields.R0...))
     end
     # Strike-slip free surface and moving walls, before the first strain-rate evaluation.
     apply_boundary_vx!(stokes.V.Vx, boundary_vx)

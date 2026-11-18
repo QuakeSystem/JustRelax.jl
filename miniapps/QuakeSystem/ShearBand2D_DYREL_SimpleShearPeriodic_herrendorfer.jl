@@ -348,6 +348,11 @@ V_top = 4.0e-9
 dt = 500.0
 nsteps = 103000
 # Physical inertia ρ(V−V0)/dt (LaMEM `inertia = 1`). Off by default — set true for inertial runs.
+# Each DYREL solve that folds RSF viscosity starts with a cleared pseudo-velocity.
+# The fault viscosity can drop by orders of magnitude between steps, and the
+# search direction of the locked fault is then the wrong size. The coefficients
+# α, β and dτ are still rebuilt from the current dt and viscosity. This reset is
+# in the shared solver, so the CUDA and AMDGPU modules do the same thing.
 inertia = true
 ρ_inertia = nothing  # nothing → phase-averaged Density field (both phases 2700 here)
 nx, ny = sum(nel_x isa Integer ? (nel_x,) : Tuple(nel_x)), sum(nel_y isa Integer ? (nel_y,) : Tuple(nel_y))

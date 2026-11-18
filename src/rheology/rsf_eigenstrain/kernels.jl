@@ -2,7 +2,7 @@
 # (`common.jl`); the index tuple `I...` follows the array rank.
 
 """
-    eigenstrain_rsf(ni; Wf, G, σ, law, V_cap=1000, tol=1e-2, max_pass=4)
+    eigenstrain_rsf(ni; Wf, G, σ, law, V_cap=1000, tol=1e-2, max_pass=8)
     eigenstrain_rsf(backend, ni; ...)
 
 Allocate a vertex-sized [`EigenstrainRSF`](@ref) with this module's `@zeros`.
@@ -17,7 +17,7 @@ function eigenstrain_rsf(
         law::JustRelax.RateStateFriction,
         V_cap = 1000.0,
         tol = 1.0e-2,
-        max_pass = 4,
+        max_pass = 8,
     ) where {N}
     Wf > 0 || throw(ArgumentError("Wf must be positive, got $Wf"))
     max_pass ≥ 1 || throw(ArgumentError("max_pass must be ≥ 1, got $max_pass"))
@@ -127,24 +127,34 @@ end
 apply_rsf_eigenstrain!(::CPUBackendTrait, stokes, ez, dt) =
     _apply_rsf_eigenstrain!(stokes, ez, dt)
 
-@parallel_indices (I...) function _invert_eigenstrain_V!(V, τxy, mask, ψ_old, a, b, V_lag, proto, σ, V_cap)
+@parallel_indices (I...) function _invert_eigenstrain_V!(
+        V, τxy, mask, ψ_old, a, b, V_lag, proto, σ, V_cap, slope,
+    )
     if mask[I...] > 1.5
         # Prescribed slip (BP1-FD below Wf_height): keep the imposed rate.
         V[I...] = V_lag[I...]
     elseif mask[I...] > 0.5
-        V[I...] = eigenstrain_slip_rate(proto, a[I...], b[I...], τxy[I...], ψ_old[I...], σ, V_cap)
+        V[I...] = eigenstrain_consistent_rate(
+            proto, a[I...], b[I...], τxy[I...], ψ_old[I...], σ, V_lag[I...], V_cap, slope,
+        )
     else
         V[I...] = 0
     end
     return nothing
 end
 
-"""Invert `|τ.xy|` on rate-and-state fault nodes into `ez.V`. Prescribed nodes keep `V_lag`."""
-function invert_rsf_eigenstrain!(ez::JustRelax.EigenstrainRSF, stokes)
+"""
+Invert the fault traction into `ez.V`.
+
+`slope = G Δt / Wf` is the local eigenstrain stiffness. Prescribed nodes keep
+`V_lag`. `dt == 0` makes the slope zero and recovers the frozen-stress rate.
+"""
+function invert_rsf_eigenstrain!(ez::JustRelax.EigenstrainRSF, stokes, dt = 0)
     T = eltype(ez.V)
+    slope = T(ez.G) * T(dt) / T(ez.Wf)
     @parallel (@idx size(ez.V)) _invert_eigenstrain_V!(
         ez.V, stokes.τ.xy, ez.mask, ez.ψ_old, ez.a, ez.b, ez.V_lag,
-        ez.law, T(ez.σ), T(ez.V_cap),
+        ez.law, T(ez.σ), T(ez.V_cap), slope,
     )
     return nothing
 end

@@ -53,6 +53,48 @@ eigenstrain_slip_rate(proto, a, b, τ, ψ, σ; V_cap = 1000) =
     eigenstrain_slip_rate(proto, a, b, τ, ψ, σ, V_cap)
 
 """
+    eigenstrain_consistent_rate(proto, a, b, τ_star, ψ, σ, V_lag, V_cap, slope) -> V
+
+Slip rate consistent with the local eigenstrain slope `∂τ/∂V = -slope`.
+
+`τ_star` is the traction the elastic solve returned at `V_lag`. A plain fixed-point
+pass `V ← law(τ(V_lag))` amplifies by `slope * V / (a σ)`. That factor crosses 1
+during rupture (`slope = G Δt / Wf`), so the passes oscillate and the next elastic
+solve is handed a rate that unloads the fault in one step. The residual
+`law(τ_star - slope (V - V_lag)) - V` is monotone, so it is bracketed instead.
+A non-positive traction has rate 0: the slip-rate magnitude uses `|τ|`, and a
+reversed traction must not become a second high-rate root.
+"""
+@inline function eigenstrain_consistent_rate(proto, a, b, τ_star, ψ, σ, V_lag, V_cap, slope)
+    z = zero(τ_star)
+    hi = convert(typeof(z), V_cap)
+    hi > 0 || return z
+    τs = convert(typeof(z), τ_star)
+    Vl = convert(typeof(z), V_lag)
+    sl = convert(typeof(z), slope)
+    # Rates span locked values (~1e-12 m/s) to the cap, so the bracket is logarithmic.
+    # A linear bracket on [0, V_cap] cannot resolve the interseismic rate.
+    log_lo = log(convert(typeof(z), 1.0e-30))
+    log_hi = log(hi)
+    Vfloor = exp(log_lo)
+    τ_floor = τs - sl * (Vfloor - Vl)
+    rate_floor = τ_floor > 0 ? eigenstrain_slip_rate(proto, a, b, τ_floor, ψ, σ, hi) : z
+    rate_floor > Vfloor || return z
+    for _ in 1:80
+        log_mid = 0.5 * (log_lo + log_hi)
+        mid = exp(log_mid)
+        τ = τs - sl * (mid - Vl)
+        rate = τ > 0 ? eigenstrain_slip_rate(proto, a, b, τ, ψ, σ, hi) : z
+        if rate > mid
+            log_lo = log_mid
+        else
+            log_hi = log_mid
+        end
+    end
+    return exp(0.5 * (log_lo + log_hi))
+end
+
+"""
     eigenstrain_age_state(proto, a, b, ψ_old, V, dt) -> ψ
 
 One aging step. A non-positive slip rate heals with `Vp = 0`, which is the locked-fault
