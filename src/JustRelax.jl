@@ -260,6 +260,8 @@ export IGG, lazy_grid, Geometry, GeometryAnnulus, velocity_grids, x_g, y_g, z_g
 include("rheology/RateStateFriction.jl")
 include("rheology/RateStateSetup.jl")
 include("rheology/RateStateArrays.jl")
+include("rheology/rsf_eigenstrain/law.jl")
+include("rheology/rsf_eigenstrain/types.jl")
 export RateStateFriction,
     compute_strain_rate,
     compute_stress,
@@ -283,6 +285,13 @@ export RateStateFriction,
     as_rate_state_friction,
     rsf_do_center,
     rsf_do_vertex
+
+export EigenstrainRSF,
+    eigenstrain_trial_stress,
+    eigenstrain_slip_rate,
+    eigenstrain_age_state,
+    eigenstrain_steady_stress,
+    eigenstrain_ψ_for_slip
 
 include("JustRelax_CPU.jl")
 

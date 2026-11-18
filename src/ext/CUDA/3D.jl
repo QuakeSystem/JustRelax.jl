@@ -68,6 +68,10 @@ function JR3D.RateStateArrays(::Type{CUDABackend}, ni::NTuple{N, Integer}; loc::
     return RateStateArrays(ni; loc = loc)
 end
 
+function JR3D.eigenstrain_rsf(::Type{CUDABackend}, ni::NTuple{N, Integer}; kwargs...) where {N}
+    return eigenstrain_rsf(ni; kwargs...)
+end
+
 function JR3D.DYREL(::Type{CUDABackend}, ni::NTuple{N, Integer}, periodic::NTuple{N, Bool} = ntuple(_ -> false, Val(N)); ϵ = 1.0e-6, ϵ_vel = 1.0e-6, CFL = 0.99, c_fact = 0.5, γfact = 20.0) where {N}
     return DYREL(ni, periodic; ϵ = ϵ, ϵ_vel = ϵ_vel, CFL = CFL, c_fact = c_fact, γfact = γfact)
 end
@@ -488,6 +492,14 @@ end
 
 function JR3D.solve_DYREL!(::CUDABackendTrait, stokes, args...; kwargs)
     return _solve_DYREL!(stokes, args...; kwargs...)
+end
+
+function JR3D.eigenstrain_physical_step!(::CUDABackendTrait, args...; kwargs...)
+    return _eigenstrain_physical_step!(args...; kwargs...)
+end
+
+function JR3D.apply_rsf_eigenstrain!(::CUDABackendTrait, stokes, ez, dt)
+    return _apply_rsf_eigenstrain!(stokes, ez, dt)
 end
 
 function JR3D.heatdiffusion_PT!(::CUDABackendTrait, thermal, args...; kwargs)

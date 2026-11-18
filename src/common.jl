@@ -197,6 +197,19 @@ export tensor_invariant!, accumulate_tensor!, accumulate_vol!
 # RSF kernels need clamped_indices / av_clamped from StressKernels and
 # center2vertex! / shear2center! from Interpolations (included above).
 include("rheology/RateStateKernels.jl")
+include("rheology/rsf_eigenstrain/kernels.jl")
+include("rheology/rsf_eigenstrain/step.jl")
+export eigenstrain_rsf,
+    init_eigenstrain_row!,
+    set_eigenstrain_ψ_from_stress!,
+    apply_rsf_eigenstrain!,
+    invert_rsf_eigenstrain!,
+    age_rsf_eigenstrain!,
+    eigenstrain_slip_change,
+    eigenstrain_dt_limit,
+    eigenstrain_lamem_dt,
+    eigenstrain_physical_step!
+
 export init_rate_state_fields!,
     refresh_rsf_ab_mask!,
     apply_rsf_viscosity!,

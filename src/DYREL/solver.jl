@@ -45,6 +45,10 @@ Solve the Stokes system with the self-tuned dynamic relaxation (DYREL) method.
   equivalent creep buffer onto `η` / `ηv`. With `affect_stokes=false`, Stokes stays Maxwell-only
   and only `Vp`/`Ω` update after convergence. No ``τ → τ_rsf`` projection.
   Returns also `dt_rsf`, `Vp_max`.
+- `rsf_eigenstrain`: Optional [`EigenstrainRSF`](@ref). After each elastic stress update,
+  fault-row `τ.xy` is replaced by the frozen-slip eigenstrain traction. The `sinh` law is
+  not inside the iteration. Do not combine with `rsf` when `affect_stokes` is true.
+  Default: `nothing`.
 - `inertia`: Include physical inertia ``ρ (V − V0)/dt`` in the momentum residual (LaMEM-style).
   Uses `stokes.V0` from the previous converged step. Default: `false`.
 - `ρ_inertia`: Density for the inertia term when `inertia=true`:
@@ -148,6 +152,7 @@ function _solve_DYREL!(
         free_surface = false,
         update_material = true,
         rsf = nothing,
+        rsf_eigenstrain = nothing,
         inertia = false,
         ρ_inertia = nothing,
         kwargs...,
@@ -167,6 +172,9 @@ function _solve_DYREL!(
     rsf_on = !isnothing(rsf) && rsf.ctrl.enabled
     # Debug / diagnostics: compute Vp & Ω after the step, but do not fold η into Stokes
     rsf_stokes = rsf_on && rsf.ctrl.affect_stokes
+    if rsf_stokes && !isnothing(rsf_eigenstrain)
+        error("rsf_eigenstrain and rsf with affect_stokes both update the fault stress; pass only one")
+    end
     # Physical inertia ρ(V − V0)/dt (V0 = previous converged velocity)
     dt_fs = dt * free_surface
     _inv_dt = (inertia && !isinf(dt) && dt > 0) ? inv(Float64(dt)) : 0.0
@@ -261,6 +269,7 @@ function _solve_DYREL!(
 
         # compute deviatoric stress, refresh τII viscosity, and assemble θc = γ_eff·RP + ΔPψ in one pass
         compute_stress_viscosity_DRYEL!(stokes, θc, dyrel.γ_eff, rheology, phase_ratios, λ_relaxation_PH, dt, viscosity_relaxation, args, viscosity_cutoff, linear_viscosity)
+        _apply_rsf_eigenstrain!(stokes, rsf_eigenstrain, dt)
         # GeoParams τII-viscosity may overwrite η; re-fold RSF onto that refreshed buffer
         if rsf_stokes && !linear_viscosity
             _apply_rsf_viscosity_and_halo!(stokes, rsf, phase_ratios, dt, viscosity_cutoff, true, η_creep, η_creep_v; restore_creep = false)
@@ -343,6 +352,7 @@ function _solve_DYREL!(
 
             # Deviatoric stress, τII viscosity refresh, and θc = γ_eff·RP + ΔPψ assembly in one pass
             compute_stress_viscosity_DRYEL!(stokes, θc, dyrel.γ_eff, rheology, phase_ratios, λ_relaxation_DR, dt, viscosity_relaxation, args, viscosity_cutoff, linear_viscosity)
+            _apply_rsf_eigenstrain!(stokes, rsf_eigenstrain, dt)
             if rsf_stokes && !linear_viscosity
                 _apply_rsf_viscosity_and_halo!(stokes, rsf, phase_ratios, dt, viscosity_cutoff, true, η_creep, η_creep_v; restore_creep = false)
             end
