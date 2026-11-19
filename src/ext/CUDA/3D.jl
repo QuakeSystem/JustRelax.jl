@@ -43,6 +43,11 @@ import JustRelax:
 
 import JustRelax: normal_stress, shear_stress, shear_vorticity, unwrap
 import JustRelax: @dxi, @dx, @dy, @dz
+import JustRelax:
+    eigenstrain_trial_stress,
+    eigenstrain_slip_rate,
+    eigenstrain_consistent_rate,
+    eigenstrain_age_state
 
 import JustPIC: numphases, nphases, PhaseRatios, update_phase_ratios!, cell_index
 

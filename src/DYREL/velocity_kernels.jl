@@ -752,7 +752,6 @@ end
     return nothing
 end
 
-"""Add face-averaged mass ``ρ/dt`` to the Gershgorin diagonal / λmax (2D). No-op when `_inv_dt == 0`."""
 @parallel_indices (i, j) function _add_inertia_diagonal_2D!(Dx, Dy, λmaxVx, λmaxVy, ρ_inertia, _inv_dt)
     Base.@propagate_inbounds @inline av_xa(A) = _av_xa_wrap(A, i, j)
     Base.@propagate_inbounds @inline av_ya(A) = _av_ya_wrap(A, i, j)
@@ -777,7 +776,11 @@ end
 
 function add_inertia_diagonal!(Dx, Dy, λmaxVx, λmaxVy, ρ_inertia, _inv_dt)
     iszero(_inv_dt) && return nothing
-    ni = size(Dx)
+    # `Dx` is one column shorter than `Dy` when x is not periodic. Launching on
+    # `size(Dx)` skips the last Vy column — the free-surface row. That column then
+    # keeps a viscous diagonal while the residual still applies ρ(V − V0)/dt, and a
+    # coseismic step overflows. Same shape mismatch in 3D.
+    ni = covering_size((Dx, Dy))
     @parallel (@idx ni) _add_inertia_diagonal_2D!(Dx, Dy, λmaxVx, λmaxVy, ρ_inertia, _inv_dt)
     return nothing
 end
@@ -937,7 +940,7 @@ end
 
 function add_inertia_diagonal!(Dx, Dy, Dz, λmaxVx, λmaxVy, λmaxVz, ρ_inertia, _inv_dt)
     iszero(_inv_dt) && return nothing
-    ni = size(Dx)
+    ni = covering_size((Dx, Dy, Dz))
     @parallel (@idx ni) _add_inertia_diagonal_3D!(Dx, Dy, Dz, λmaxVx, λmaxVy, λmaxVz, ρ_inertia, _inv_dt)
     return nothing
 end
