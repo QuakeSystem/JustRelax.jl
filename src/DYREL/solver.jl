@@ -294,6 +294,13 @@ function _solve_DYREL!(
         if rsf_stokes && !linear_viscosity
             _apply_rsf_viscosity_and_halo!(stokes, rsf, phase_ratios, dt, viscosity_cutoff, true, η_creep, η_creep_v; restore_creep = false)
         end
+        # The fold is one Picard update per outer iteration. The pseudo-time loop
+        # below keeps this η. Its diagonal has to match that η before the first
+        # velocity step; rebuilding it later, after η has changed inside the loop,
+        # steps a soft fault against a stress field that is still elastic.
+        rsf_stokes && _refresh_momentum_preconditioner!(
+            dyrel, stokes, phase_ratios, rheology, grid, ρg, ρ_inertia_c, dt, _inv_dt, free_surface
+        )
         # Do not enforce τ → τ_rsf: LaMEM keeps τ = 2 η_eff ε. Forcing frictional
         # strength jumps stress (and stress-based Vp) even when the fault is still locked.
         update_stress_halo!(stokes, dim, linear_viscosity && !rsf_stokes)
@@ -367,10 +374,9 @@ function _solve_DYREL!(
             # compute divergence, deviatoric strain rate and pressure residual in one pass
             compute_∇V_strain_rate_RP!(stokes, dyrel, rheology, phase_ratios, _di, ni, dt, true; args...)
 
-            # RSF frictional η fold (frozen Ω_old) before stress
-            _apply_rsf_viscosity_and_halo!(stokes, rsf, phase_ratios, dt, viscosity_cutoff, rsf_stokes, η_creep, η_creep_v; restore_creep = true)
-
-            # Deviatoric stress, τII viscosity refresh, and θc = γ_eff·RP + ΔPψ assembly in one pass
+            # Deviatoric stress from the Picard viscosity of this outer iteration.
+            # Refolding η on every pseudo-step, then rebuilding the diagonal from it,
+            # does not converge on a nucleating fault next to a coarse cell.
             compute_stress_viscosity_DRYEL!(stokes, θc, dyrel.γ_eff, rheology, phase_ratios, λ_relaxation_DR, dt, viscosity_relaxation, args, viscosity_cutoff, linear_viscosity)
             _apply_rsf_eigenstrain!(stokes, rsf_eigenstrain, dt)
             if rsf_stokes && !linear_viscosity
@@ -480,13 +486,15 @@ function _solve_DYREL!(
         end
     end
 
-    # Advance RSF state only after a converged time step (Ω_old was frozen during iterations)
+    # Advance RSF state only after a converged time step (Ω_old was frozen during iterations).
+    # A step that exhausts the iteration budget still holds the elastic stress. Aging that
+    # stress at the slip-rate cap sends Ω to ln(V₀/V_cap) and the following steps overflow.
     dt_rsf = Inf
     Vp_max = 0.0
     dt_h = Inf
     dt_w = Inf
     dt_c = Inf
-    if rsf_on
+    if rsf_on && !(iter ≥ total_iterMax && err > ϵ)
         update_rate_state!(rsf.fields, stokes, rsf.ctrl, phase_ratios, dt)
         dt_info = compute_dt_ratestate_grid(rsf.fields, stokes, rsf.ctrl, phase_ratios, dt)
         dt_rsf = dt_info.dt_rsf
@@ -501,6 +509,31 @@ function _solve_DYREL!(
         dt_rsf, Vp_max, dt_h, dt_w, dt_c,
     )
 
+end
+
+"""Rebuild the momentum diagonal after a rate-and-state viscosity fold.
+
+The fold has just replaced η. The diagonal and the pseudo-time step still belong
+to the previous viscosity, and the search direction was accumulated for that
+operator. The inner loop keeps this η fixed, so the rebuilt diagonal stays valid
+for the whole pseudo-time solve.
+"""
+function _refresh_momentum_preconditioner!(
+        dyrel, stokes, phase_ratios, rheology, grid, ρg, ρ_inertia_c, dt, _inv_dt, free_surface
+    )
+    dim = Val(ndims(stokes.P))
+    fields = dyrel_fields(dyrel, dim)
+    N = ndims(stokes.P)
+    Gershgorin_Stokes_SchurComplement!(
+        dim, fields.D..., fields.λmaxV...,
+        stokes.viscosity.η, stokes.viscosity.ηv, dyrel.γ_eff,
+        phase_ratios, rheology, grid.di, dt,
+    )
+    free_surface && apply_free_surface_diagonal!(fields.D[N], fields.λmaxV[N], ρg[end], grid.di.center, dt)
+    add_inertia_diagonal!(fields.D..., fields.λmaxV..., ρ_inertia_c, _inv_dt)
+    update_dτV_α_β!(dyrel)
+    foreach(A -> fill!(A, zero(eltype(A))), fields.dVdτ)
+    return nothing
 end
 
 """Apply RSF viscosity fold on centers and/or vertices when RSF is enabled.

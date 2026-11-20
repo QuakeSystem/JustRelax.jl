@@ -299,7 +299,7 @@ function main(
             kwargs = (;
                 verbose_PH = true,
                 verbose_DR = false,
-                iterMax = 50.0e3,
+                iterMax = 10.0e2,
                 nout = 10,
                 rel_drop = 1.0e-4,
                 linear_viscosity = true,

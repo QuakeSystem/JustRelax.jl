@@ -361,12 +361,47 @@ right, coarse cell on that skipped column, and the GPU step's `τ`, `V` and `dt`
 It must stay finite, and `min(Dy)` on the free-surface column must be at least
 `ρ/dt`.
 
+## Viscosity fold: nucleation step did not converge
+
+The viscosity Herrendörfer run (inertia on, `affect_stokes = true`) was physical
+through step 1204: `t = 1.410e9 s`, max `|τxy| = 2.23 MPa`, `dt = 0.150 s`, and the
+rate-and-state step asked for `dt = 0.516 s`. The fault row already carried a
+grid-scale pattern around `x = -49 km`: one vertex at 1.71 MPa and `Ω = -0.24`,
+its neighbors near 1 kPa on the viscosity floor `1e6`, and `Vy` alternating by a
+few cm/s. The next solve used that `dt` and did not converge. It returned
+`|τxy| = 9.7 MPa` on the vertices that had been elastic (`η` still `5e26`) and
+`Vp = 100 m/s` on the cap. Aging that step sends `Ω` to `ln(V₀/V_cap) ≈ -24`.
+The driver then clamps `dt` to `dt_min = 0.1 s` while the law asks for `1e-5 s`,
+and the stress runs away until the outer residual is NaN.
+
+A uniform 500 m mesh damps the same state. The blow-up needs the fault-normal
+jump used in that run (500 m on the fault, then several kilometres). Refolding `η`
+on every pseudo-time step, and rebuilding the diagonal from the new `η`, does not
+converge there: the iteration hits its cap and the state update ages the bad
+stress. The fold is now one Picard update per outer iteration, the diagonal is
+rebuilt from that frozen `η` before the pseudo-time loop, and a step that exhausts
+the iteration budget does not age `Ω`.
+
+`test/test_dyrel_rsf_nucleation_2D.jl` replays the recorded fault row on that
+coarse spacing at `dt = 0.516 s`. Stress has to stay near 2 MPa, `Vp` off the
+cap, and `Ω` above -10.
+
+The same guard is not enough on the full run. With the frozen fold, nucleation
+stayed physical through step 1250 (`t = 1.410e9 s`, max `|τxy| = 2.14 MPa`,
+`Vp ≈ 3 mm/s`, `dt = 0.17 s`). The next step used the `0.36 s` asked for by that
+slip rate. That solve exhausted the iteration budget. `Ω` was left at `-13.5`
+and `dt_rsf` came back as `Inf`, so the driver kept `dt = 0.36 s`. The stress
+and velocity of the unfinished solve were still stored: fault `|τxy|` jumped to
+7 MPa and then 14 MPa, with `Vp` on the `100 m/s` cap. The terminal log had
+already stopped flushing at step 425; the VTK files are the record.
+
 ## Files
 
 - `SEAS_BP1_FD_eigenstrain.jl` — 160 km BP1 eigenstrain driver. `boundary_vx = (; free_surface = :right, top = Vp)`, `max_pass = 8`.
 - `ShearBand2D_DYREL_SimpleShearPeriodic_herrendorfer_eigenstrain.jl` — Herrendörfer eigenstrain, locked initial state, `Wf = 500 m`.
-- `ShearBand2D_DYREL_SimpleShearPeriodic_herrendorfer.jl` — viscosity-fold Herrendörfer. Same friction update as before; its DYREL solves now also start from a cleared pseudo-velocity.
+- `ShearBand2D_DYREL_SimpleShearPeriodic_herrendorfer.jl` — viscosity-fold Herrendörfer. The nucleation step is the case in `test/test_dyrel_rsf_nucleation_2D.jl`.
 - `seas_stickslip_slider.jl`, `SEAS_stickslip_eigenstrain.jl` — the scalar cycle and the 4×40 strip.
+- `test/test_dyrel_rsf_nucleation_2D.jl` — viscosity-fold nucleation step at the recorded 2.2 MPa state, on the coarse fault-normal spacing. Must not return the 9.7 MPa / `Vp = 100` state.
 - `test/test_dyrel_eigenstrain_rsf_2D.jl` — law, consistent-rate bracket, one inertial DYREL step. `invert_rsf_eigenstrain!` is called there with no `Δt`; keep that default working.
 - `test/test_eigenstrain_coseismic_graded.jl` — graded free-surface column at the GPU blow-up step. Every momentum diagonal must carry `ρ/dt`.
 - `test/test_eigenstrain_stickslip.jl` — the scalar cycle.
@@ -374,6 +409,7 @@ It must stay finite, and `min(Dy)` on the free-surface column must be at least
 CPU check:
 
 ```sh
+JULIA_JUSTRELAX_BACKEND=CPU julia --project=. --startup-file=no test/test_dyrel_rsf_nucleation_2D.jl
 JULIA_JUSTRELAX_BACKEND=CPU julia --project=. --startup-file=no test/test_dyrel_eigenstrain_rsf_2D.jl
 JULIA_JUSTRELAX_BACKEND=CPU julia --project=. --startup-file=no test/test_eigenstrain_coseismic_graded.jl
 JULIA_JUSTRELAX_BACKEND=CPU julia --project=. --startup-file=no test/test_eigenstrain_stickslip.jl

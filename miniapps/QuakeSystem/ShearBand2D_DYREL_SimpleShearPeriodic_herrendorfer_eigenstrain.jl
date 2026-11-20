@@ -130,6 +130,21 @@ function herrendorfer_graded_mesh(;
     )
 end
 
+"""Square cells of size `h` over the Herrendörfer domain. `y = -75 km` lands on a vertex for 250 m and 500 m."""
+function herrendorfer_uniform_mesh(;
+        x0 = -75.0e3, x1 = 75.0e3, y0 = -150.0e3, y1 = 0.0, h = 500.0,
+    )
+    nx = round(Int, (x1 - x0) / h)
+    ny = round(Int, (y1 - y0) / h)
+    abs((x1 - x0) - nx * h) < 1.0e-6 || error("x-domain is not an integer number of h=$h cells")
+    abs((y1 - y0) - ny * h) < 1.0e-6 || error("y-domain is not an integer number of h=$h cells")
+    return (;
+        xvi = (collect(range(x0, x1; length = nx + 1)), collect(range(y0, y1; length = ny + 1))),
+        ni = (nx, ny),
+        h = h,
+    )
+end
+
 function prepare_eigen_vtk!(dir, pvd_name)
     mkpath(dir)
     for f in readdir(dir)
@@ -143,24 +158,21 @@ end
 
 function write_eigen_vtk!(vtk_dir, pvd, it, t_s, xvi, xci, stokes, ez, Vx_v, Vy_v)
     velocity2vertex!(Vx_v, Vy_v, stokes.V.Vx, stokes.V.Vy)
-    V = Array(ez.V)
-    mask = Array(ez.mask)
-    logV = fill(-30.0, size(V))
-    @inbounds for i in eachindex(V, mask)
-        mask[i] > 0.5 && (logV[i] = log10(max(V[i], 1.0e-30)))
-    end
+    tensor_invariant!(stokes.ε)
+    # Velocity is the VTK vector. Vx and Vy are not written again as scalars.
     data_v = (;
-        Vx = Array(Vx_v),
-        Vy = Array(Vy_v),
         τxy = Array(stokes.τ.xy),
-        V_slip = V,
-        log10_V_slip = logV,
+        εxy = Array(stokes.ε.xy),
+        V_slip = Array(ez.V),
         ψ = Array(ez.ψ),
         a = Array(ez.a),
         b = Array(ez.b),
-        fault = mask,
+        fault = Array(ez.mask),
     )
-    data_c = (; P = Array(stokes.P))
+    data_c = (;
+        P = Array(stokes.P),
+        εII = Array(stokes.ε.II),
+    )
     path = joinpath(vtk_dir, "step_" * lpad(string(it), 6, '0'))
     save_vtk(path, xvi, xci, data_v, data_c, (Array(Vx_v), Array(Vy_v)); t = t_s, pvd = pvd)
     return nothing
@@ -254,9 +266,11 @@ function main(
 
     ybot, ytop = xvi[2][1], xvi[2][end]
     yVx = Array(grid.xi_vel[1][2])
-    stokes.V.Vx .= PTArray(backend)([
+    stokes.V.Vx .= PTArray(backend)(
+        [
             V_top * (y - ybot) / (ytop - ybot) for _ in xvi[1], y in yVx
-        ])
+        ]
+    )
     fill!(stokes.V.Vy, 0.0)
     @views stokes.V.Vx[:, 2:(end - 1)] .= 0.0
     @views stokes.V.Vx[:, end] .= V_top
@@ -265,8 +279,9 @@ function main(
     flow_bcs!(stokes, flow_bcs)
     update_halo!(@velocity(stokes)...)
 
-    dt = eigenstrain_lamem_dt(ez; ν = ν)
-    dt = clamp(dt, 1.0e-6, 1.0e9)
+    dt_min = 1.0e-2
+    dt_max = 1.0e9
+    dt = clamp(eigenstrain_lamem_dt(ez; ν = ν), dt_min, dt_max)
     ρg = @zeros(ni...), @zeros(ni...)
     args = (; T = @zeros(ni .+ 2...), P = stokes.P, dt = dt)
     compute_viscosity!(stokes, phase_ratios, args, rheology, (-Inf, Inf))
@@ -285,8 +300,8 @@ function main(
         "probe x=$(Array(grid.xvi[1])[i_probe]) m (Herrendörfer x = 25 km)  " *
             "y=$(yv[j_fault]) m  b=$(Array(ez.b)[i_probe, j_fault])",
     )
-    (dy_lo ≈ Wf && dy_hi ≈ Wf) ||
-        error("fault vertex is not between two $Wf m cells (dy = $dy_lo, $dy_hi)")
+    dy_lo ≈ dy_hi ||
+        error("fault vertex cells differ (dy = $dy_lo, $dy_hi)")
 
     xvi_h = Array.(grid.xvi)
     xci_h = Array.(grid.xci)
@@ -313,12 +328,10 @@ function main(
     t = 0.0
     n_events = 0
     in_event = false
-    last_vtk_t = -Inf
     it = 0
     try
         if !isnothing(pvd)
             write_eigen_vtk!(vtk_dir, pvd, 0, 0.0, xvi_h, xci_h, stokes, ez, Vx_v, Vy_v)
-            last_vtk_t = 0.0
             println("ParaView: $(pvd).pvd   (time axis is seconds)")
             flush(stdout)
         end
@@ -332,7 +345,7 @@ function main(
                 solve_kwargs = (;
                     verbose_PH = false,
                     verbose_DR = false,
-                    iterMax = 2.0e4,
+                    iterMax = 5.0e2,
                     iterMax_PH = 6,
                     nout = 50,
                     rel_drop = 1.0e-3,
@@ -351,7 +364,6 @@ function main(
             ϕ_probe = Array(ez.ψ)[i_probe, j_fault]
             τ_probe = τ_row[i_probe]
             t_year = t / YEAR
-            was_in = in_event
             if !in_event && out.V_max > V_event
                 in_event = true
                 println("rupture $(n_events + 1) starts at t=$(round(t_year; digits = 4)) yr  Vmax=$(out.V_max)")
@@ -377,16 +389,11 @@ function main(
                 println(probe, "$t,$dt,$V_probe,$ϕ_probe,$τ_probe")
                 flush(probe)
             end
-            if !isnothing(pvd)
-                fast = out.V_max > 1.0e-4
-                crossed = in_event != was_in
-                due = fast ? (t - last_vtk_t >= 3600.0) : (t - last_vtk_t >= YEAR)
-                if crossed || due || it == 1
-                    write_eigen_vtk!(
-                        vtk_dir, pvd, it, t, xvi_h, xci_h, stokes, ez, Vx_v, Vy_v,
-                    )
-                    last_vtk_t = t
-                end
+            # One frame every 10 steps, in the interseismic build-up and during slip.
+            if !isnothing(pvd) && rem(it, 10) == 0
+                write_eigen_vtk!(
+                    vtk_dir, pvd, it, t, xvi_h, xci_h, stokes, ez, Vx_v, Vy_v,
+                )
             end
             if n_ruptures > 0 && n_events >= n_ruptures
                 println("stopped after $n_events rupture periods at t=$(round(t_year; digits = 4)) yr")
@@ -396,7 +403,7 @@ function main(
                 println("stopped at the $max_years yr cap with $n_events rupture periods")
                 break
             end
-            dt = clamp(eigenstrain_lamem_dt(ez; ν = ν), 1.0e-6, 1.0e9)
+            dt = clamp(eigenstrain_lamem_dt(ez; ν = ν), dt_min, dt_max)
             args = (; args..., dt = dt)
         end
         if !isnothing(pvd)
