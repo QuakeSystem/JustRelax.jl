@@ -170,10 +170,13 @@ function main(
         P0 = 5.0e6,
         dt = 500.0,
         nsteps = 5,
+        t_end = Inf,
         rsf_nt = nothing,
         inertia = false,
         ρ_inertia = nothing,   # nothing → phase-averaged Density field; Number or array override
         VTK = nothing,
+        probe_csv = nothing,
+        probe_xy = (-50.0e3, -75.0e3),
     )
     mesh = segmented_grid_2D(;
         nel_x = nel_x, coord_x = coord_x,
@@ -184,14 +187,16 @@ function main(
     nx, ny = ni
     lx, ly = li
 
-    isnothing(VTK) && (VTK = (;
+    isnothing(VTK) && (
+        VTK = (;
             do_vtk = true,
             folder = joinpath(@__DIR__, "VTK"),
             vtk_dir = joinpath(@__DIR__, "VTK", "vtk"),
             name = "simple_shear_herrendorfer",
             pvd_name = "simple_shear_herrendorfer",
             vtk_every = 1,
-        ))
+        )
+    )
     prepare_vtk!(VTK)
 
     staggered_grid, ph_vertex, _T = simple_shear_2D(xvi, 1250.0, fault, VTK)
@@ -236,9 +241,11 @@ function main(
     xci_h = Array.(xci)
     yVx = Array(grid.xi_vel[1][2])
     ybot, ytop = origin[2], origin[2] + ly
-    stokes.V.Vx .= PTArray(backend)([
+    stokes.V.Vx .= PTArray(backend)(
+        [
             V_top * (y - ybot) / (ytop - ybot) for _ in xvi_h[1], y in yVx
-        ])
+        ]
+    )
     fill!(stokes.V.Vy, 0.0)
     @views stokes.V.Vx[:, 2:(end - 1)] .= 0.0
     @views stokes.V.Vx[:, end] .= V_top
@@ -260,6 +267,19 @@ function main(
         "grid: ni=$ni; Δx∈$(extrema(Array(grid.di.vertex[1]))); " *
             "Δy∈$(extrema(Array(grid.di.vertex[2]))); periodic_x OK (uniform Δx)"
     )
+    probe_io = nothing
+    i_probe = j_probe = 0
+    if !isnothing(probe_csv)
+        mkpath(dirname(probe_csv))
+        i_probe = argmin(abs.(xvi_h[1] .- probe_xy[1]))
+        j_probe = argmin(abs.(xvi_h[2] .- probe_xy[2]))
+        probe_io = open(probe_csv, "w")
+        println(probe_io, "it,t_s,dt_s,tauxy,Vp,Omega,Vx,Vy")
+        println(
+            "probe ($(xvi_h[1][i_probe]), $(xvi_h[2][j_probe])) m → $probe_csv",
+        )
+        flush(stdout)
+    end
 
     # Density for inertia: nothing → phase-averaged field; Number → uniform; array → as-is
     ρ_for_inertia = if !inertia
@@ -320,106 +340,126 @@ function main(
         τxy_max = maximum(abs, stokes.τ.xy)
         τ_analytic = solution(εbg, t, G0, η0)
         println("it = $it; t = $t; max|τxy| = $τxy_max; analytic = $τ_analytic; dt = $dt; dt_rsf = $(out.dt_rsf)")
+        flush(stdout)
 
         write_vtk_step!(
             VTK, it, t, xvi_h, xci_h, stokes, phase_ratios, Vx_v, Vy_v, zeros_c, τ_analytic,
             isnothing(rsf_bundle) ? nothing : rsf_bundle.fields,
         )
+        if !isnothing(probe_io)
+            velocity2vertex!(Vx_v, Vy_v, @velocity(stokes)...)
+            τxy_p = Array(stokes.τ.xy)[i_probe, j_probe]
+            Vp_p = isnothing(rsf_bundle) ? NaN : Array(rsf_bundle.fields.Vp_v)[i_probe, j_probe]
+            Ω_p = isnothing(rsf_bundle) ? NaN : Array(rsf_bundle.fields.Ωv)[i_probe, j_probe]
+            println(
+                probe_io,
+                "$it,$t,$dt,$τxy_p,$Vp_p,$Ω_p,$(Array(Vx_v)[i_probe, j_probe]),$(Array(Vy_v)[i_probe, j_probe])",
+            )
+            flush(probe_io)
+        end
 
         # LaMEM-style dt policy after the first step (floor at dt_min even if RSF asks lower)
         if rsf_enabled && it ≥ 1 && isfinite(out.dt_rsf) && out.dt_rsf < dt_rsf_switch
             dt = clamp(out.dt_rsf, dt_min, dt_max)
             args = (; args..., dt = dt)
         end
+        if t ≥ t_end
+            println("stopped at t = $t s (t_end = $t_end)")
+            flush(stdout)
+            break
+        end
     end
 
+    isnothing(probe_io) || close(probe_io)
     return nothing
 end
 
 # -----------------------------------------------------------------------------
 # Default run — LaMEM-style segments (Herrendörfer / Shear_test_PBC)
-# Periodic x: single uniform segment. Refined y around the fault band.
-nel_x = 300
-coord_x = (-75.0e3, 75.0e3)
-nel_y = (10, 4, 10)                          # cells per y-segment (LaMEM nel_z)
-coord_y = (-150.0e3, -76.0e3, -74.0e3, 0.0)  # segment boundaries (LaMEM coord_z)
-fault = (; x = (-75.0e3, 75.0e3), y = (-75.2e3, -74.8e3))
-V_top = 4.0e-9
-dt = 500.0
-nsteps = 103000
-# Physical inertia ρ(V−V0)/dt (LaMEM `inertia = 1`). Off by default — set true for inertial runs.
-# Each DYREL solve that folds RSF viscosity starts with a cleared pseudo-velocity.
-# The fault viscosity can drop by orders of magnitude between steps, and the
-# search direction of the locked fault is then the wrong size. The coefficients
-# α, β and dτ are still rebuilt from the current dt and viscosity. This reset is
-# in the shared solver, so the CUDA and AMDGPU modules do the same thing.
-inertia = true
-ρ_inertia = nothing  # nothing → phase-averaged Density field (both phases 2700 here)
-nx, ny = sum(nel_x isa Integer ? (nel_x,) : Tuple(nel_x)), sum(nel_y isa Integer ? (nel_y,) : Tuple(nel_y))
+if abspath(PROGRAM_FILE) == @__FILE__
+    # Periodic x: single uniform segment. Refined y around the fault band.
+    nel_x = 300
+    coord_x = (-75.0e3, 75.0e3)
+    nel_y = (10, 4, 10)                          # cells per y-segment (LaMEM nel_z)
+    coord_y = (-150.0e3, -76.0e3, -74.0e3, 0.0)  # segment boundaries (LaMEM coord_z)
+    fault = (; x = (-75.0e3, 75.0e3), y = (-75.2e3, -74.8e3))
+    V_top = 4.0e-9
+    dt = 500.0
+    nsteps = 103000
+    # Physical inertia ρ(V−V0)/dt (LaMEM `inertia = 1`). Off by default — set true for inertial runs.
+    # Each DYREL solve that folds RSF viscosity starts with a cleared pseudo-velocity.
+    # The fault viscosity can drop by orders of magnitude between steps, and the
+    # search direction of the locked fault is then the wrong size. The coefficients
+    # α, β and dτ are still rebuilt from the current dt and viscosity. This reset is
+    # in the shared solver, so the CUDA and AMDGPU modules do the same thing.
+    inertia = true
+    ρ_inertia = nothing  # nothing → phase-averaged Density field (both phases 2700 here)
+    nx, ny = sum(nel_x isa Integer ? (nel_x,) : Tuple(nel_x)), sum(nel_y isa Integer ? (nel_y,) : Tuple(nel_y))
 
-RSF = (
-    enabled = true,
-    affect_stokes = true,
-    # LaMEM: constitutive RSF on cells and XY edges (JR centers + vertices)
-    loc = :vertex,
-    V0 = 4.0e-9,
-    dt_min = 1.0e-1,
-    dt_max = 1.0e7,
-    dt_rsf_switch = 1.0e9,
-    G = 3.0e10,
-    ν = 0.25,
-    # Both phases carry a_rsf (LaMEM / Herrendörfer Shear_test_PBC)
-    Phase1 = (
-        a_rsf = 0.011,
-        b_rsf = 0.017,
-        mu0_rsf = 0.2,
-        D_rs = 0.01,
-        Wf = 500.0,
-        state_rsf_init = 40.0,
-        λ = 0.0,
-        C = 0.0,
-    ),
-    Phase2 = (
-        a_rsf = 0.011,
-        b_rsf = 0.001,
-        b_rsf_val = (0.001, 0.017, 0.017, 0.001),
-        b_rsf_x = (-47000.0, -43000.0, 33000.0, 37000.0),
-        mu0_rsf = 0.2,
-        D_rs = 0.01,
-        Wf = 500.0,
-        state_rsf_init = -1.0,
-        λ = 0.0,
-        C = 0.0,
-    ),
-)
+    RSF = (
+        enabled = true,
+        affect_stokes = true,
+        # LaMEM: constitutive RSF on cells and XY edges (JR centers + vertices)
+        loc = :vertex,
+        V0 = 4.0e-9,
+        dt_min = 1.0e-2,
+        dt_max = 1.0e7,
+        dt_rsf_switch = 1.0e9,
+        G = 3.0e10,
+        ν = 0.25,
+        # Both phases carry a_rsf (LaMEM / Herrendörfer Shear_test_PBC)
+        Phase1 = (
+            a_rsf = 0.011,
+            b_rsf = 0.017,
+            mu0_rsf = 0.2,
+            D_rs = 0.01,
+            Wf = 500.0,
+            state_rsf_init = 40.0,
+            λ = 0.0,
+            C = 0.0,
+        ),
+        Phase2 = (
+            a_rsf = 0.011,
+            b_rsf = 0.001,
+            b_rsf_val = (0.001, 0.017, 0.017, 0.001),
+            b_rsf_x = (-47000.0, -43000.0, 33000.0, 37000.0),
+            mu0_rsf = 0.2,
+            D_rs = 0.01,
+            Wf = 500.0,
+            state_rsf_init = -1.0,
+            λ = 0.0,
+            C = 0.0,
+        ),
+    )
 
-VTK = (;
-    do_vtk = true,
-    folder = joinpath(@__DIR__, "VTK"),
-    vtk_dir = joinpath(@__DIR__, "VTK", "vtk"),
-    name = "simple_shear_herrendorfer",
-    pvd_name = "simple_shear_herrendorfer",
-    vtk_every = 1,
-)
+    VTK = (;
+        do_vtk = true,
+        folder = joinpath(@__DIR__, "VTK"),
+        vtk_dir = joinpath(@__DIR__, "VTK", "vtk"),
+        name = "simple_shear_herrendorfer",
+        pvd_name = "simple_shear_herrendorfer",
+        vtk_every = 1,
+    )
 
-igg = if !(JustRelax.MPI.Initialized())
-    IGG(init_global_grid(nx, ny, 1; init_MPI = true)...)
-else
-    igg
+    igg = if !(JustRelax.MPI.Initialized())
+        IGG(init_global_grid(nx, ny, 1; init_MPI = true)...)
+    else
+        igg
+    end
+
+    @time main(
+        igg;
+        nel_x = nel_x,
+        coord_x = coord_x,
+        nel_y = nel_y,
+        coord_y = coord_y,
+        fault = fault,
+        V_top = V_top,
+        dt = dt,
+        nsteps = nsteps,
+        rsf_nt = RSF,
+        inertia = inertia,
+        ρ_inertia = ρ_inertia,
+        VTK = VTK,
+    )
 end
-
-@time main(
-    igg;
-    nel_x = nel_x,
-    coord_x = coord_x,
-    nel_y = nel_y,
-    coord_y = coord_y,
-    fault = fault,
-    V_top = V_top,
-    dt = dt,
-    nsteps = nsteps,
-    rsf_nt = RSF,
-    inertia = inertia,
-    ρ_inertia = ρ_inertia,
-    VTK = VTK,
-)

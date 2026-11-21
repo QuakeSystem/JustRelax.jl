@@ -377,23 +377,40 @@ and the stress runs away until the outer residual is NaN.
 A uniform 500 m mesh damps the same state. The blow-up needs the fault-normal
 jump used in that run (500 m on the fault, then several kilometres). Refolding `η`
 on every pseudo-time step, and rebuilding the diagonal from the new `η`, does not
-converge there: the iteration hits its cap and the state update ages the bad
-stress. The fold is now one Picard update per outer iteration, the diagonal is
-rebuilt from that frozen `η` before the pseudo-time loop, and a step that exhausts
-the iteration budget does not age `Ω`.
+converge there. The fold is one Picard update per physical step when the host
+viscosity is linear. Later outer passes keep that `η` and the search direction.
+A step that is still above the tolerance does not age `Ω`.
 
 `test/test_dyrel_rsf_nucleation_2D.jl` replays the recorded fault row on that
 coarse spacing at `dt = 0.516 s`. Stress has to stay near 2 MPa, `Vp` off the
-cap, and `Ω` above -10.
+cap, and `Ω` above -10. The same file also starts from the shear jump below.
 
 The same guard is not enough on the full run. With the frozen fold, nucleation
 stayed physical through step 1250 (`t = 1.410e9 s`, max `|τxy| = 2.14 MPa`,
-`Vp ≈ 3 mm/s`, `dt = 0.17 s`). The next step used the `0.36 s` asked for by that
-slip rate. That solve exhausted the iteration budget. `Ω` was left at `-13.5`
-and `dt_rsf` came back as `Inf`, so the driver kept `dt = 0.36 s`. The stress
-and velocity of the unfinished solve were still stored: fault `|τxy|` jumped to
-7 MPa and then 14 MPa, with `Vp` on the `100 m/s` cap. The terminal log had
-already stopped flushing at step 425; the VTK files are the record.
+`Vp ≈ 3 mm/s`, `dt = 0.17 s`). The velocity already jumped by about `0.13 m/s`
+across the fault: `Vx` just below `y = -75 km` and just above it had opposite
+sign, while the frictional `Vp` was still millimetres per second. The next step
+used the `0.36 s` asked for by that slip rate. Each outer iteration folded a new
+`η` from that unfinished jump and cleared the pseudo-time search direction. The
+residual stayed of order 1 for the whole budget. `Ω` was left at `-13.5` and
+`dt_rsf` came back as `Inf`, so the driver kept `dt = 0.36 s` and stored the
+unfinished stress: fault `|τxy|` went 2.8, 3.8, then 7 MPa, with `Vp` on the
+`100 m/s` cap. Replaying the saved step-1250 fields on the same 300×24 graded
+mesh does this. The same stress with a smooth plate velocity converges. The
+terminal log had already stopped flushing at step 425; the VTK files are the record.
+
+For a linear host the frictional viscosity is now one Picard update per physical
+step. Later outer passes keep that `η` and the search direction, and only correct
+the pressure. The replay then converges in 2400 iterations (`|τxy| ≈ 1.9 MPa`,
+`Vp ≈ 1 cm/s`, finite `dt_rsf`). Eight further steps stay near 2 MPa. A step that
+is still above the tolerance is discarded: stress, pressure and velocity go back
+to the start of the step, and `dt_rsf` comes back as `dt/2` so the driver does
+not repeat the failed step. The miniapp floor `dt_min` is `1e-2`, as in the
+LaMEM Herrendörfer input. `1e-1` was holding the step above the rate the law
+asked for. LaMEM does not turn the dashpot off during the interseismic period
+(`rsf_elastic_interseis` defaults to 0, and the Herrendörfer input does not set
+it), and its `dteta` floor of 0.1 is commented out; at these parameters `dteta`
+is already about 0.11, so that floor was not the difference.
 
 ## Files
 
@@ -401,7 +418,7 @@ already stopped flushing at step 425; the VTK files are the record.
 - `ShearBand2D_DYREL_SimpleShearPeriodic_herrendorfer_eigenstrain.jl` — Herrendörfer eigenstrain, locked initial state, `Wf = 500 m`.
 - `ShearBand2D_DYREL_SimpleShearPeriodic_herrendorfer.jl` — viscosity-fold Herrendörfer. The nucleation step is the case in `test/test_dyrel_rsf_nucleation_2D.jl`.
 - `seas_stickslip_slider.jl`, `SEAS_stickslip_eigenstrain.jl` — the scalar cycle and the 4×40 strip.
-- `test/test_dyrel_rsf_nucleation_2D.jl` — viscosity-fold nucleation step at the recorded 2.2 MPa state, on the coarse fault-normal spacing. Must not return the 9.7 MPa / `Vp = 100` state.
+- `test/test_dyrel_rsf_nucleation_2D.jl` — viscosity-fold nucleation. The recorded 2.2 MPa row on the coarse fault-normal spacing, and a graded column that starts from the 0.13 m/s shear jump with the inner solve cut at 100 iterations. The jump must converge; it must not return at the iteration cap.
 - `test/test_dyrel_eigenstrain_rsf_2D.jl` — law, consistent-rate bracket, one inertial DYREL step. `invert_rsf_eigenstrain!` is called there with no `Δt`; keep that default working.
 - `test/test_eigenstrain_coseismic_graded.jl` — graded free-surface column at the GPU blow-up step. Every momentum diagonal must carry `ρ/dt`.
 - `test/test_eigenstrain_stickslip.jl` — the scalar cycle.

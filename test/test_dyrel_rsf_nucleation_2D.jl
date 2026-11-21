@@ -219,3 +219,154 @@ const _Vy_row = [
 
     finalize_global_grid(; finalize_MPI = false)
 end
+
+@parallel_indices (i, j) function _fill_shear_jump_band!(phases, j0, j1)
+    if j0 ≤ j ≤ j1
+        @index phases[1, i, j] = 0.0
+        @index phases[2, i, j] = 1.0
+    else
+        @index phases[1, i, j] = 1.0
+        @index phases[2, i, j] = 0.0
+    end
+    return nothing
+end
+
+@testset "DYREL viscosity RSF shear jump on a graded fault" begin
+    # The viscosity run at it = 1250 was still at 2.1 MPa, but the velocity already
+    # jumped by ~0.13 m/s across the fault, antisymmetric in y. The inner solve is
+    # cut at `iterMax` (1000 in that run; 100 here) before that jump has relaxed.
+    # Folding a new η from the unfinished velocity, and clearing the search
+    # direction, leaves the residual above 1 until the iteration budget runs out.
+    # One frozen η converges. A rejected step would come back as dt/2 = 0.179 s.
+    nx = 16
+    yv = [
+        -150.0e3, -142.6e3, -135.2e3, -127.8e3, -120.4e3, -113.0e3, -105.6e3,
+        -98.2e3, -90.8e3, -83.4e3, -76.0e3, -75.5e3, -75.0e3, -74.5e3, -74.0e3,
+        -66.6e3, -59.2e3, -51.8e3, -44.4e3, -37.0e3, -29.6e3, -22.2e3, -14.8e3,
+        -7.4e3, 0.0,
+    ]
+    h = 500.0
+    xv = [-55.0e3 + (i - 1) * h for i in 1:(nx + 1)]
+    ny = length(yv) - 1
+    dt = 0.357619
+    P0 = 5.0e6
+    G0 = 3.0e10
+    V_plate = 4.0e-9
+    j_fault = findfirst(==(-75.0e3), yv)
+
+    init_mpi = !JustRelax.MPI.Initialized()
+    igg = IGG(init_global_grid(nx, ny, 1; init_MPI = init_mpi)...)
+    grid = Geometry(PTArray(backend), xv, yv)
+    (; xci, xvi) = grid
+
+    el = ConstantElasticity(; G = G0, ν = 0.25)
+    visc = LinearViscous(; η = 5.0e26)
+    rheology = (
+        SetMaterialParams(;
+            Phase = 1,
+            Density = ConstantDensity(; ρ = 2700.0),
+            Gravity = ConstantGravity(; g = 0.0),
+            CompositeRheology = CompositeRheology((visc, el)),
+            Elasticity = el,
+        ),
+        SetMaterialParams(;
+            Phase = 2,
+            Density = ConstantDensity(; ρ = 2700.0),
+            Gravity = ConstantGravity(; g = 0.0),
+            CompositeRheology = CompositeRheology((visc, el)),
+            Elasticity = el,
+        ),
+    )
+    phase_ratios = PhaseRatios(backend_JP, 2, (nx, ny))
+    @parallel (@idx (nx, ny)) _fill_shear_jump_band!(phase_ratios.center, j_fault - 1, j_fault)
+    @parallel (@idx (nx, ny) .+ 1) _fill_shear_jump_band!(
+        phase_ratios.vertex, j_fault - 1, j_fault + 1
+    )
+
+    RSF = (
+        enabled = true,
+        loc = :vertex,
+        V0 = V_plate,
+        dt_min = 1.0e-2,
+        dt_max = 1.0e7,
+        dt_rsf_switch = 1.0e9,
+        G = G0,
+        ν = 0.25,
+        affect_stokes = true,
+        Phase1 = (
+            a_rsf = 0.011, b_rsf = 0.017, mu0_rsf = 0.2, D_rs = 0.01, Wf = 500.0,
+            state_rsf_init = 40.0, λ = 0.0, C = 0.0,
+        ),
+        Phase2 = (
+            a_rsf = 0.011, b_rsf = 0.017, mu0_rsf = 0.2, D_rs = 0.01, Wf = 500.0,
+            state_rsf_init = -1.0, λ = 0.0, C = 0.0,
+        ),
+    )
+    ctrl = build_rate_state_controller(RSF; nphases = 2, di = (h, h))
+    fields = RateStateArrays(backend, (nx, ny); loc = :vertex)
+    init_rate_state_fields!(fields, ctrl, phase_ratios, xci, xvi)
+    Ωv = Array(fields.Ωv)
+    Ωv[:, j_fault] .= -0.45
+    copyto!(fields.Ωv, Ωv)
+    copyto!(fields.Ω_old_v, Ωv)
+
+    flow_bcs = VelocityBoundaryConditions(;
+        free_slip = (left = false, right = false, top = false, bot = false),
+        no_slip = (left = false, right = false, top = false, bot = true),
+        periodic = (left = true, right = true, top = false, bot = false),
+    )
+    stokes = StokesArrays(backend, (nx, ny), flow_bcs)
+    fill!(stokes.P, P0)
+    for τ in (stokes.τ, stokes.τ_o)
+        xy = fill(1.0e6, size(Array(τ.xy)))
+        xy[:, j_fault] .= 1.72e6
+        copyto!(τ.xy, xy)
+        fill!(τ.xx, 0.0)
+        fill!(τ.yy, 0.0)
+    end
+    ρg = @zeros((nx, ny)...), @zeros((nx, ny)...)
+    args = (; T = @zeros((nx, ny) .+ 2...), P = stokes.P, dt = dt)
+    cutoff = (1.0e6, 5.0e26)
+    compute_viscosity!(stokes, phase_ratios, args, rheology, cutoff)
+
+    yVx = Array(grid.xi_vel[1][2])
+    vx = [y < -75.0e3 ? -0.13 : 0.13 for _ in xv, y in yVx]
+    vx[:, end] .= V_plate
+    stokes.V.Vx .= PTArray(backend)(vx)
+    fill!(stokes.V.Vy, 0.0)
+    flow_bcs!(stokes, flow_bcs)
+    update_halo!(@velocity(stokes)...)
+    copyto!(stokes.V0.Vx, stokes.V.Vx)
+    copyto!(stokes.V0.Vy, stokes.V.Vy)
+
+    dyrel = DYREL(backend, stokes, rheology, phase_ratios, grid.di, dt; ϵ = 1.0e-8)
+    out = solve_DYREL!(
+        stokes, ρg, dyrel, flow_bcs, phase_ratios, rheology, args, grid, dt, igg;
+        kwargs = (;
+            verbose_PH = false,
+            verbose_DR = false,
+            iterMax = 100.0,
+            total_iterMax = 2.0e3,
+            nout = 10,
+            rel_drop = 1.0e-4,
+            linear_viscosity = true,
+            viscosity_cutoff = cutoff,
+            rsf = (; ctrl = ctrl, fields = fields),
+            inertia = true,
+            ρ_inertia = 2700.0,
+        ),
+    )
+
+    τ = Array(stokes.τ.xy)
+    Vp = Array(fields.Vp_v)
+    @test all(isfinite, τ)
+    @test all(isfinite, Vp)
+    # Refolding η on every outer pass stays above the tolerance and returns at
+    # the 2000-iteration cap, with dt_rsf = dt/2.
+    @test out.iter < 1_000
+    @test maximum(abs, τ) < 3.0e6
+    @test maximum(Vp) < 10.0
+    @test 0.0 < out.dt_rsf < 1.0e-2
+
+    finalize_global_grid(; finalize_MPI = false)
+end

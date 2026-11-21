@@ -284,8 +284,13 @@ function _solve_DYREL!(
         # isone(itPH) &&
         compute_∇V_strain_rate_RP!(stokes, dyrel, rheology, phase_ratios, _di, ni, dt, true; args...)
 
-        # RSF: fold frictional η into the Maxwell buffer with frozen Ω_old (before stress)
-        _apply_rsf_viscosity_and_halo!(stokes, rsf, phase_ratios, dt, viscosity_cutoff, rsf_stokes, η_creep, η_creep_v; restore_creep = true)
+        # Linear host: one frictional viscosity for the whole physical step.
+        # Folding again from a velocity the inner solve has not finished, and
+        # clearing the search direction each time, makes the residual oscillate
+        # once a shear jump sits across the fault. A nonlinear host still folds
+        # on every outer pass, after GeoParams has refreshed the creep buffer.
+        fold_rsf = rsf_stokes && (isone(itPH) || !linear_viscosity)
+        fold_rsf && _apply_rsf_viscosity_and_halo!(stokes, rsf, phase_ratios, dt, viscosity_cutoff, true, η_creep, η_creep_v; restore_creep = true)
 
         # compute deviatoric stress, refresh τII viscosity, and assemble θc = γ_eff·RP + ΔPψ in one pass
         compute_stress_viscosity_DRYEL!(stokes, θc, dyrel.γ_eff, rheology, phase_ratios, λ_relaxation_PH, dt, viscosity_relaxation, args, viscosity_cutoff, linear_viscosity)
@@ -294,11 +299,9 @@ function _solve_DYREL!(
         if rsf_stokes && !linear_viscosity
             _apply_rsf_viscosity_and_halo!(stokes, rsf, phase_ratios, dt, viscosity_cutoff, true, η_creep, η_creep_v; restore_creep = false)
         end
-        # The fold is one Picard update per outer iteration. The pseudo-time loop
-        # below keeps this η. Its diagonal has to match that η before the first
-        # velocity step; rebuilding it later, after η has changed inside the loop,
-        # steps a soft fault against a stress field that is still elastic.
-        rsf_stokes && _refresh_momentum_preconditioner!(
+        # The diagonal has to match the frozen η before the first velocity step.
+        # Later outer passes keep both, so the pseudo-time search can finish.
+        fold_rsf && _refresh_momentum_preconditioner!(
             dyrel, stokes, phase_ratios, rheology, grid, ρg, ρ_inertia_c, dt, _inv_dt, free_surface
         )
         # Do not enforce τ → τ_rsf: LaMEM keeps τ = 2 η_eff ε. Forcing frictional
@@ -456,6 +459,23 @@ function _solve_DYREL!(
         iter > total_iterMax && break
     end
 
+    # A viscosity-fold step that is still above the tolerance is not a time step.
+    # Committing its stress and its shear jump is what the Herrendörfer run stored
+    # at it = 1251, after which the fault stress climbed and Vp sat on the cap.
+    # Put the fields back and ask for half the step instead of aging that state.
+    if rsf_stokes && err > ϵ
+        _restore_rsf_step!(stokes, dim, inertia)
+        dt_rsf = 0.5 * dt
+        Vp_max = 0.0
+        dt_h = Inf
+        dt_w = Inf
+        dt_c = Inf
+        return (;
+            iter, err_evo_it, err_evo_V, err_evo_P, err_evo_tot,
+            dt_rsf, Vp_max, dt_h, dt_w, dt_c,
+        )
+    end
+
     # absorb plastic pressure correction into P (mirrors APT: stokes.P .= θ = P + ΔPψ)
     @. stokes.P += stokes.ΔPψ
 
@@ -487,8 +507,6 @@ function _solve_DYREL!(
     end
 
     # Advance RSF state only after a converged time step (Ω_old was frozen during iterations).
-    # A step that exhausts the iteration budget still holds the elastic stress. Aging that
-    # stress at the slip-rate cap sends Ω to ln(V₀/V_cap) and the following steps overflow.
     dt_rsf = Inf
     Vp_max = 0.0
     dt_h = Inf
@@ -719,6 +737,36 @@ function compute_λminV!(fields, residuals, residuals0, ni, ::Val{N}) where {N}
     numerator = sum(ntuple(d -> sum_mpi(fields.dV[d] .* (residuals[d] .- residuals0[d])), Val(N)))
     denominator = sum(ntuple(d -> sum_mpi(fields.dV[d] .^ 2), Val(N)))
     return rayleigh_quotient(numerator, denominator)
+end
+
+function _restore_stress_vertices!(stokes::JustRelax.StokesArrays, ::Val{2})
+    stokes.τ.xx_v .= stokes.τ_o.xx_v
+    return stokes.τ.yy_v .= stokes.τ_o.yy_v
+end
+
+function _restore_stress_vertices!(stokes::JustRelax.StokesArrays, ::Val{3})
+    stokes.τ.xx_v .= stokes.τ_o.xx_v
+    stokes.τ.yy_v .= stokes.τ_o.yy_v
+    return stokes.τ.zz_v .= stokes.τ_o.zz_v
+end
+
+"""Undo a viscosity-fold step that did not reach the tolerance.
+
+`τ_o`, `P0` and (with inertia) `V0` still hold the start of the step. The
+unfinished stress and the shear jump across the fault are discarded.
+"""
+function _restore_rsf_step!(stokes, dim, inertia)
+    ni = size(stokes.P)
+    @parallel (@idx ni .+ 1) multi_copy!(@tensor(stokes.τ), @tensor(stokes.τ_o))
+    @parallel (@idx ni) multi_copy!(@tensor_center(stokes.τ), @tensor_center(stokes.τ_o))
+    _restore_stress_vertices!(stokes, dim)
+    @copy stokes.P stokes.P0
+    if inertia
+        for (V, V0) in zip(unpack_velocity(stokes.V), unpack_velocity(stokes.V0))
+            copyto!(V, V0)
+        end
+    end
+    return nothing
 end
 
 function copy_stress_vertices!(stokes::JustRelax.StokesArrays, ::Val{2})

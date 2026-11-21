@@ -126,6 +126,19 @@ end
     return nothing
 end
 
+# Plate-rate Dirichlet on the two strike-slip nodes beside the fault, over a
+# depth range. LaMEM's deep VelBoxes set these faces; the momentum kernel writes
+# them, so this runs after every velocity update.
+@parallel_indices (i) function _vx_fault_plates!(Vx, i1, i2, j_neg, j_pos, V_neg, V_pos)
+    if i1 ≤ i ≤ i2
+        @inbounds begin
+            Vx[i, j_neg] = V_neg
+            Vx[i, j_pos] = V_pos
+        end
+    end
+    return nothing
+end
+
 """
     apply_boundary_vx!(Vx, bc)
 
@@ -136,9 +149,11 @@ does not express. `bc = nothing` does nothing. Otherwise `bc` is a named tuple:
   face (`∂Vx/∂x = 0`).
 - `top` and `bot`, when set to a number, are wall velocities. The ghost is
   `2 Vwall − V_interior`.
+- `fault_plates = (; i1, i2, j_neg, j_pos, V_neg, V_pos)` overwrites `Vx` on two
+  fault-normal columns between depth indices `i1` and `i2`.
 
-The free-surface copy runs first and the wall ghosts second, so a corner follows
-the wall.
+The free-surface copy runs first, the wall ghosts second, and the fault plates
+last.
 """
 function apply_boundary_vx!(Vx, bc)
     bc === nothing && return nothing
@@ -157,5 +172,17 @@ function apply_boundary_vx!(Vx, bc)
         @parallel (@idx size(Vx, 1)) _vx_wall_top!(Vx, convert(eltype(Vx), top))
     bot === nothing ||
         @parallel (@idx size(Vx, 1)) _vx_wall_bot!(Vx, convert(eltype(Vx), bot))
+    plates = get(bc, :fault_plates, nothing)
+    if plates !== nothing
+        @parallel (@idx size(Vx, 1)) _vx_fault_plates!(
+            Vx,
+            Int(plates.i1),
+            Int(plates.i2),
+            Int(plates.j_neg),
+            Int(plates.j_pos),
+            convert(eltype(Vx), plates.V_neg),
+            convert(eltype(Vx), plates.V_pos),
+        )
+    end
     return nothing
 end
