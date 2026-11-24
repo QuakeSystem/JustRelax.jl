@@ -4,6 +4,7 @@
 # would mark the neighbouring 100 m vertices as well.
 # Wf = 100 m on the wall rock and on the fault (LaMEM fault width, not the cell size).
 # Frames every 10 steps. The −50 km fault point is written every step. Stops at t = 3e9 s.
+const isCUDA = true
 include(joinpath(@__DIR__, "ShearBand2D_DYREL_SimpleShearPeriodic_herrendorfer.jl"))
 
 nel_x = 1500

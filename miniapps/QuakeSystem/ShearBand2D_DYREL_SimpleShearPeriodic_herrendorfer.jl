@@ -8,7 +8,7 @@ Herrendörfer-style viscoelastic simple shear with Rate-and-State Friction (DYRE
 - Inertia: optional LaMEM-style ``ρ (V − V0)/dt`` via `inertia` / `ρ_inertia` toggles
 - VTK: ParaView fields including Vp_rsf (LaMEM names)
 =#
-const isCUDA = false
+@isdefined(isCUDA) || (const isCUDA = false)
 
 @static if isCUDA
     using CUDA

@@ -163,6 +163,11 @@ function _solve_DYREL!(
         inertia = false,
         ρ_inertia = nothing,
         boundary_vx = nothing,
+        # When true (default), a viscosity-fold solve that ends above ϵ restores the
+        # Stokes fields and returns dt/2 so the caller can retry. SEAS BP1-FD with a
+        # locked VW prestress never clears ϵ on a growing step and rejects to dt_min;
+        # that setup passes `reject_unconverged = false` and ages the imperfect step.
+        reject_unconverged = true,
         kwargs...,
     ) where {N}
 
@@ -240,6 +245,11 @@ function _solve_DYREL!(
     if update_material
         compute_viscosity!(stokes, phase_ratios, args, rheology, viscosity_cutoff)
         compute_ρg!(ρg[end], phase_ratios, rheology, args)
+    elseif rsf_stokes
+        # A previous viscosity-fold step left the frictional η on the Stokes arrays.
+        # Snapshotting that as the creep base stacks another harmonic fold and the
+        # residual never drops (SEAS BP1-FD then rejects every try down to dt_min).
+        compute_viscosity!(stokes, phase_ratios, args, rheology, viscosity_cutoff)
     end
     # Maxwell / GeoParams buffers used as the RSF fold base (avoid stacking folds each PT iter)
     η_creep = nothing
@@ -463,7 +473,7 @@ function _solve_DYREL!(
     # Committing its stress and its shear jump is what the Herrendörfer run stored
     # at it = 1251, after which the fault stress climbed and Vp sat on the cap.
     # Put the fields back and ask for half the step instead of aging that state.
-    if rsf_stokes && err > ϵ
+    if rsf_stokes && reject_unconverged && err > ϵ
         _restore_rsf_step!(stokes, dim, inertia)
         dt_rsf = 0.5 * dt
         Vp_max = 0.0
@@ -506,13 +516,15 @@ function _solve_DYREL!(
         end
     end
 
-    # Advance RSF state only after a converged time step (Ω_old was frozen during iterations).
+    # Advance RSF state after a kept time step (Ω_old was frozen during iterations).
+    # Viscosity-fold rejects already returned above. With `reject_unconverged=false`
+    # an imperfect step is still aged; only a strict reject path skips aging here.
     dt_rsf = Inf
     Vp_max = 0.0
     dt_h = Inf
     dt_w = Inf
     dt_c = Inf
-    if rsf_on && !(iter ≥ total_iterMax && err > ϵ)
+    if rsf_on && !(reject_unconverged && iter ≥ total_iterMax && err > ϵ)
         update_rate_state!(rsf.fields, stokes, rsf.ctrl, phase_ratios, dt)
         dt_info = compute_dt_ratestate_grid(rsf.fields, stokes, rsf.ctrl, phase_ratios, dt)
         dt_rsf = dt_info.dt_rsf

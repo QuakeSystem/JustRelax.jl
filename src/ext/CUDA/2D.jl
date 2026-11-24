@@ -515,6 +515,10 @@ function JR2D.solve_DYREL!(::CUDABackendTrait, stokes, args...; kwargs)
     return _solve_DYREL!(stokes, args...; kwargs...)
 end
 
+function JR2D.apply_boundary_vx!(Vx::CUDA.CuArray, bc)
+    return apply_boundary_vx!(Vx, bc)
+end
+
 function JR2D.eigenstrain_physical_step!(::CUDABackendTrait, args...; kwargs...)
     return _eigenstrain_physical_step!(args...; kwargs...)
 end

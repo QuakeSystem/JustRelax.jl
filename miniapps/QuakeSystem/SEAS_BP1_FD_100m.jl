@@ -30,10 +30,10 @@ is `Vp`, and `Ω(x)` is the state that returns that rate at the local `a(x)`.
 
 `iterMax = 10000`, `iterMax_PH = 10`. A step that is still above the tolerance
 is discarded and retried at half `dt`; time does not advance on that try.
-Leave `isCUDA = false` here and switch it on for the device run. The arrays
+`isCUDA` is on for the GH200 run. The arrays
 are the same `PTArray` / `@zeros` allocations as the other DYREL miniapps.
 =#
-const isCUDA = false
+const isCUDA = true
 
 @static if isCUDA
     using CUDA
@@ -220,13 +220,18 @@ function main(
         μ₀ = 0.6,
         V₀ = 1.0e-6,
         L = 0.008,
-        dt = 2522.0,
+        # Locked VW start (aging-steady Ω, τ0 from a_max). Fixed Stokes dt; inertia off
+        # until the lock releases (a full-DR accept leaves a shear jump that never clears ϵ).
+        # Reject-on-nonconvergence stays off so imperfect steps age instead of spinning to dt_min.
+        dt = 100.0,
         dt_min = 5.0e-3,
-        dt_max = 1.0e9,
+        dt_max = 100.0,
+        dt_grow = 1.0,
         nsteps = 245_000,
         max_time = 3.0e10,
         iterMax = 1.0e4,
         iterMax_PH = 10,
+        ϵ = 1.0e-4,
         vtk_dir = nothing,
         pvd_name = "seas_bp1_fd_100m",
         vtk_every = 10,
@@ -297,18 +302,22 @@ function main(
     Vx0 = [y ≥ 0.0 ? half : -half for _ in xVx, y in yVx]
     stokes.V.Vx .= PTArray(backend)(Vx0)
     fill!(stokes.V.Vy, 0.0)
-    JustRelax.apply_boundary_vx!(stokes.V.Vx, bcvx)
+    JustRelax2D.apply_boundary_vx!(stokes.V.Vx, bcvx)
     stokes.V0.Vx .= stokes.V.Vx
     stokes.V0.Vy .= stokes.V.Vy
     update_halo!(stokes.V.Vx, stokes.V.Vy)
 
     args = (; T = @zeros(ni .+ 2...), P = stokes.P, dt = dt)
     compute_viscosity!(stokes, phase_ratios, args, rheology, (-Inf, Inf))
-    # init_seas_tau0: one stress, local a(x), rate Vp. Overwrites state_rsf_init.
+    # LaMEM / SEAS BP1: one prestress τ0 from a_max, aging-steady Ω = ln(V₀/Vp) on the
+    # whole fault. Do not use the slip-law inverse at local a — that Ω is not aging-steady
+    # where a < a_max, so the first update_rate_state! heals the VW zone, Vp drops, and
+    # every later Stokes step rejects down to dt_min.
     Ωh = Array(rsf_fields.Ωv)
     ah = Array(rsf_fields.a_eff_v)
+    Ω_ss = log(V₀ / Vp)
     for i in axes(Ωh, 1)
-        Ωh[i, j_fault] = eigenstrain_ψ_for_slip(ah[i, j_fault], b, μ₀, V₀, Vp, τ0, σ)
+        Ωh[i, j_fault] = Ω_ss
     end
     copyto!(rsf_fields.Ωv, Ωh)
     copyto!(rsf_fields.Ω_old_v, Ωh)
@@ -334,7 +343,7 @@ function main(
     ah[argmin(abs.(xv .+ 20.0e3)), j_fault] ≈ 0.025 || error("a at −20 km is not 0.025")
     flush(stdout)
 
-    dyrel = DYREL(backend, stokes, rheology, phase_ratios, grid.di, dt; ϵ = 1.0e-6, CFL = 0.9)
+    dyrel = DYREL(backend, stokes, rheology, phase_ratios, grid.di, dt; ϵ = ϵ, CFL = 0.9)
     ρg = @zeros(ni...), @zeros(ni...)
     xvi_h = Array.(grid.xvi)
     xci_h = Array.(grid.xci)
@@ -404,8 +413,7 @@ function main(
             args = (; args..., dt = dt)
             out = solve_DYREL!(
                 stokes, ρg, dyrel, flow_bcs, phase_ratios, rheology, args, grid, dt, igg;
-                inertia = true,
-                ρ_inertia = ρ,
+                inertia = false,
                 verbose_PH = false,
                 verbose_DR = false,
                 iterMax = iterMax,
@@ -417,8 +425,9 @@ function main(
                 update_material = false,
                 rsf = rsf,
                 boundary_vx = bcvx,
+                reject_unconverged = false,
             )
-            JustRelax.apply_boundary_vx!(stokes.V.Vx, bcvx)
+            JustRelax2D.apply_boundary_vx!(stokes.V.Vx, bcvx)
             # A discarded step returns dt/2 with the three rate-and-state limits left at Inf.
             rejected = !isfinite(out.dt_h) && isfinite(out.dt_rsf)
             τ_row = Array(stokes.τ.xy)[:, j_fault]
@@ -444,10 +453,11 @@ function main(
             end
             it += 1
             t += dt
-            dt_next = isfinite(out.dt_rsf) ? clamp(out.dt_rsf, dt_min, dt_max) : dt
+            dt_rsf_raw = isfinite(out.dt_rsf) ? clamp(out.dt_rsf, dt_min, dt_max) : dt
+            dt_next = min(dt_rsf_raw, dt * dt_grow, dt_max)
             @printf(
-                "it=%d  t=%9.4f yr  iter=%d  Vp_max=%.3e  dt=%.3e s  dt_rsf=%.3e s  wall=%.2f s  12.5km τ=%.4f MPa V=%.3e\n",
-                it, t / YEAR, out.iter, out.Vp_max, dt, out.dt_rsf, wall, τ_row[i125] / 1.0e6, V_row[i125],
+                "it=%d  t=%9.4f yr  iter=%d  Vp_max=%.3e  dt=%.3e s  dt_rsf=%.3e s  dt_next=%.3e s  wall=%.2f s  12.5km τ=%.4f MPa V=%.3e\n",
+                it, t / YEAR, out.iter, out.Vp_max, dt, out.dt_rsf, dt_next, wall, τ_row[i125] / 1.0e6, V_row[i125],
             )
             flush(stdout)
             if !isnothing(hist)
