@@ -406,35 +406,42 @@ end
 @parallel_indices (I...) function compute_viscosity_kernel!(
         η, ν, ratios_center, Axx, Ayy, Axyv, args, rheology, air_phase::Integer, cutoff, fn_viscosity::F1, fn_args::F2
     ) where {F1, F2}
+    compute_viscosity_kernel_point!(
+        η, ν, ratios_center, Axx, Ayy, Axyv, args, rheology, air_phase, cutoff,
+        fn_viscosity, fn_args, I...,
+    )
+    return nothing
+end
 
-    # convenience closure
-    Base.@propagate_inbounds @inline gather(A) = _gather(A, I...)
-
+@inline function compute_viscosity_kernel_point!(
+        η, ν, ratios_center, Axx, Ayy, Axyv, args, rheology, air_phase::Integer,
+        cutoff, fn_viscosity::F1, fn_args::F2, I::Vararg{Integer, 2},
+    ) where {F1, F2}
     @inbounds begin
-        # cache
         A = Axx[I...], Ayy[I...], Axyv[I...]
-
-        # we need strain rate not to be zero, otherwise we get NaNs
-        AII_0 = allzero(A...) * eps()
 
         # argument fields at local index
         args_ij = fn_args(args, I...)
-        # args_ij = local_viscosity_args(args, I...)
 
         # local phase ratio, with the air dropped if requested
         ratio_ij = viscosity_phase_ratio(air_phase, @cell(ratios_center[I...]))
-
-        # compute second invariant of strain rate tensor
-        Aij = AII_0 + A[1], -AII_0 + A[2], A[3]
-        AII = second_invariant(Aij...)
-
-        # compute and update stress viscosity
-        ηi = compute_phase_viscosity(rheology, ratio_ij, AII, fn_viscosity, args_ij)
-        ηi = continuation_linear(ηi, η[I...], ν)
-        η[I...] = clamp(ηi, cutoff...)
+        η[I...] = compute_viscosity_value(
+            η[I...], A, ratio_ij, args_ij, rheology, ν, cutoff, fn_viscosity
+        )
     end
 
     return nothing
+end
+
+@inline function compute_viscosity_value(
+        η_old, A, ratio, args, rheology, relaxation, cutoff, fn_viscosity,
+    )
+    # A zero invariant is perturbed exactly as in the original forward kernel to avoid NaNs.
+    AII_0 = allzero(A...) * eps()
+    Aij = AII_0 + A[1], -AII_0 + A[2], A[3]
+    AII = second_invariant(Aij...)
+    η = compute_phase_viscosity(rheology, ratio, AII, fn_viscosity, args)
+    return clamp(continuation_linear(η, η_old, relaxation), cutoff...)
 end
 
 ## 3D KERNELS

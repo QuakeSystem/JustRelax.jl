@@ -193,6 +193,12 @@ directly and pass it as the component, e.g. `dirichlet = (; Vx = my_bc)`: the
 `(; constant, mask)` shorthand's array form infers its mask from the value
 array's non-zero entries, which cannot represent a prescribed value of exactly
 zero. See [`Dirichlet`](@ref).
+
+The prescribed nodes are imposed inside the velocity kernels of `solve_DYREL!` and
+`solve_VariationalDYREL!` (2D only): their momentum residual is set to zero and their
+velocity is held at the prescribed value. The adjoints of both solvers differentiate the same
+kernels and treat the prescribed velocities as constants; their observation must not overlap
+prescribed nodes.
 """
 struct VelocityBoundaryConditions{T, D, nD} <: AbstractFlowBoundaryConditions
     no_slip::T

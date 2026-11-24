@@ -4,6 +4,10 @@
         stokes, ρg, dyrel, flow_bcs, phase_ratios, rheology, args, grid, dt, igg;
         kwargs...,
     )
+    solve_DYREL!(
+        stokes, stokes_ad, ρg, dyrel, flow_bcs, phase_ratios, rheology, args, grid, dt, igg;
+        adjoint = true, observation, kwargs...,
+    )
 
 Solve the Stokes system with the self-tuned dynamic relaxation (DYREL) method.
 
@@ -38,6 +42,15 @@ Solve the Stokes system with the self-tuned dynamic relaxation (DYREL) method.
 - `free_surface`: Include the density-gradient free-surface stabilization term. Default: `false`.
 - `update_material`: Recompute viscosity and buoyancy from `rheology`. Set to `false` when
   those fields are prescribed by the caller. Default: `true`.
+- `adjoint`: Run `solve_DYREL_adjoint!` after convergence and before the stress history is
+  updated; needs `stokes_ad` (`AdjointStokesArrays`) as the second argument. 2D, single MPI
+  rank; an unconverged forward solve throws an error instead of returning sensitivities.
+  Internal velocity Dirichlet nodes (velocity boxes) are constants of the adjoint.
+  Default: `false`.
+- `observation`, `gradients`, `adjoint_kwargs`: objective, parameter buffers and iteration
+  controls of the adjoint solve, as for `solve_VariationalDYREL!`. Default: `nothing`, `(;)`, `(;)`.
+- `η_multiplier`: Optional cell-wise viscosity scaling `(; center, vertex)`, applied right after
+  the rheology-driven viscosity update, for gradient tests. Default: `nothing`.
 
 Options may be passed either as plain keywords or bundled as a single
 `kwargs = (; ...)` NamedTuple.
@@ -53,6 +66,8 @@ solve_DYREL!(::CPUBackendTrait, stokes, args...; kwargs) = _solve_DYREL!(stokes,
 """
     solve_VariationalDYREL!(stokes, ρg, dyrel, flow_bcs, phase_ratios, ϕ,
         rheology, args, grid, dt, igg; kwargs...)
+    solve_VariationalDYREL!(stokes, stokes_ad, ρg, dyrel, flow_bcs, phase_ratios, ϕ,
+        rheology, args, grid, dt, igg; adjoint = true, observation, kwargs...)
 
 Solve the 2D variational Stokes problem with DYREL relaxation and the
 `RockRatio` volume weights. This is a separate entry point from
@@ -64,6 +79,8 @@ fraction vanishes are eliminated rather than solved with air properties.
 
 # Arguments (in the following order)
 - `stokes`: `JustRelax.StokesArrays` containing the simulation fields.
+- `stokes_ad`: `JustRelax.AdjointStokesArrays` for the adjoint solve; only needed with
+  `adjoint = true`.
 - `ρg`: buoyancy forces arrays.
 - `dyrel`: DYREL-specific parameters and fields, built with the same `ϕ`.
 - `flow_bcs`: `AbstractFlowBoundaryConditions` defining velocity boundary conditions.
@@ -87,12 +104,62 @@ fraction vanishes are eliminated rather than solved with air properties.
 - `iterMax_DR`: Maximum number of iterations for each dynamic-relaxation solve. Default: `50.0e3`.
 - `iterMax`: Alias for `iterMax_DR`; used when `iterMax_DR` is not given.
 - `total_iterMax`: Maximum number of total dynamic-relaxation iterations. Default: `50.0e3`.
-- `nout`: Output frequency for residuals. Default: `100`.
+- `nout`: Frequency for residual checks and DYREL parameter updates. Default: `100`.
 - `rel_drop`: Relative residual drop tolerance. Default: `1.0e-2`.
+- `convergence`: Convergence test of the forward solve against `ϵ` (the `ϵ` of `dyrel`); the
+  residuals are taken over the rock cells only, and the two tests differ in the scale of the
+  momentum residual. `:force` (cs-adjoint2026) measures the momentum residuals against the force
+  density that drives the flow (the buoyancy anomaly, or the deviatoric stress over the domain
+  length), the continuity residual against the velocity, and, for nonlinear rheology, also
+  requires the viscosity to match the viscosity its stress implies. `:pressure` is the test of
+  this solver in JustRelax v0.8.1-QS: the momentum residuals are measured against the pressure
+  span over the domain length, the continuity residual against the velocity (it also passes when
+  `RP·dt` is below `ϵ`), and the viscosity is not tested. In a gravity-driven model the pressure
+  span is dominated by the hydrostatic pressure, so `:pressure` is looser and can accept a state
+  whose residuals are large against the force that drives the flow, which also limits the
+  accuracy of an adjoint computed from it. Each velocity solve targets a `rel_drop` drop of the
+  momentum residual on the same scale. The adjoint solve is not affected. Default: `:force`.
+  The penalty uses the mean viscosity of the rock cells only (cs-adjoint2026; v0.8.1-QS
+  included the air cells), so `:pressure` reproduces v0.8.1-QS variational results exactly only
+  in models without air (see `rock_mean_viscosity`).
 - `verbose_PH`: Print Powell-Hestenes iteration info. Default: `true`.
 - `verbose_DR`: Print Dynamic Relaxation iteration info. Default: `true`.
 - `linear_viscosity`: Whether to use linear viscosity. Default: `false`.
 - `free_surface`: Include the density-gradient free-surface stabilization term. Default: `false`.
+- `adjoint`: Run `solve_VariationalDYREL_adjoint!` after convergence and before updating
+  history-dependent state. `ϕ` and the validity masks are frozen for the adjoint. Single MPI
+  rank only; an unconverged forward or adjoint solve throws an error instead of returning
+  sensitivities. Every adjoint solve starts from `stokes_ad.λV = 0`, `stokes_ad.λP = 0`.
+  Default: `false`.
+  The adjoint keeps its own DYREL iteration state in `stokes_ad`: it rebuilds the
+  preconditioner from its own penalty at the current state, and carries its damping over from one
+  adjoint solve to the next; the forward DYREL state is not modified.
+- `adjoint_kwargs`: Iteration controls of the adjoint solve that differ from the forward's, as
+  a NamedTuple with any of `ϵ`, `rel_drop`, `iterMax_PH`, `iterMax_DR` (or `iterMax`),
+  `total_iterMax`, `nout`, `verbose_PH`, `verbose_DR`, `pressure_relaxation`,
+  `penalty_scaling`, `penalty_factor`, `inner_solver` and `deflation`, e.g.
+  `adjoint_kwargs = (; ϵ = 1.0e-6, total_iterMax = 100_000, verbose_PH = false)`. Options not
+  given are those of the forward solve, except `rel_drop` (default `0.1`). `ϵ` defaults to
+  the `ϵ` of `dyrel`. Default: `(;)`.
+  The default `penalty_scaling = :local` rebuilds the adjoint penalty and preconditioner from
+  the local converged viscosity, with `penalty_factor = 320.0` unless specified;
+  `penalty_scaling = :global` inherits the forward penalty unchanged and takes no
+  `penalty_factor`. The default `inner_solver = :bicgstab` solves the adjoint velocity system
+  of each pressure pass with BiCGStab, which needs no damping or eigenvalue estimates and
+  tolerates a non-symmetric Jacobian; `inner_solver = :dr` uses damped dynamic relaxation.
+  `deflation = k` lets BiCGStab deflate the last `k` solution increments of the pressure
+  passes, which helps when a few modes converge very slowly, e.g. a stiff body enclosed by a
+  weak layer. Default: `0`, no deflation.
+- `observation`: Objective `J` of the adjoint solve, required with `adjoint = true`: a box
+  `(; field, center, half_width)` with `J = Σ field` over the nodes inside it, or a weighted
+  field `(; field, weights)` with `J = Σ weights · field` and `weights` of the size of the
+  observed field (see `observation_mask`). `field` is `:Vx`, `:Vy` or `:P`. Default: `nothing`.
+- `gradients`: Optional phase-resolved buffers from `material_controls`, filled by the adjoint
+  solve with derivatives with respect to the requested density, stress-law, and viscosity-law
+  parameters. Linear and nonlinear viscosity are supported. Default: `(;)`.
+- `η_multiplier`: Optional cell-wise viscosity scaling `(; center, vertex)`, applied right after
+  the rheology-driven viscosity update, for gradient tests. Pair it with `linear_viscosity = true`.
+  Default: `nothing`.
 
 Options may be passed either as plain keywords or bundled as a single
 `kwargs = (; ...)` NamedTuple.
@@ -109,6 +176,7 @@ solve_VariationalDYREL!(::CPUBackendTrait, stokes, args...; kwargs) =
 
 function _solve_DYREL!(
         stokes::JustRelax.StokesArrays,
+        stokes_ad::Union{Nothing, JustRelax.AdjointStokesArrays},
         ρg,
         dyrel,
         flow_bcs::AbstractFlowBoundaryConditions,
@@ -134,8 +202,26 @@ function _solve_DYREL!(
         linear_viscosity = false,
         free_surface = false,
         update_material = true,
+        adjoint = false,
+        observation = nothing,
+        gradients = (;),
+        adjoint_kwargs = (;),
+        η_multiplier = nothing,
         kwargs...,
     ) where {N}
+
+    adjoint && isnothing(stokes_ad) &&
+        throw(ArgumentError("adjoint = true requires AdjointStokesArrays as the second argument"))
+    adjoint && check_adjoint_support(Val(N), igg)
+    if adjoint && !update_material
+        names = prescribed_field_parameters(rheology, keys(gradients), linear_viscosity)
+        isempty(names) || @warn(
+            "update_material = false: the gradients of $(join(names, ", ")) assume that ρg " *
+                "and η were computed from `rheology`; for fields prescribed otherwise, use " *
+                "the field sensitivities `stokes_ad.ρ` and `stokes_ad.viscosity`",
+            maxlog = 1,
+        )
+    end
 
     check_periodic_bcs(stokes, flow_bcs, igg, grid.di.center)
 
@@ -186,11 +272,18 @@ function _solve_DYREL!(
     # read (alongside the separately-differenced P) by the momentum kernel. Reuses the dyrel.P_num
     # scratch — P_num is no longer materialized separately.
     θc = dyrel.P_num
+    converged = false
 
     # recompute all the DYREL variables
     if update_material
         compute_viscosity!(stokes, phase_ratios, args, rheology, viscosity_cutoff)
         compute_ρg!(ρg[end], phase_ratios, rheology, args)
+    end
+    # cell-wise viscosity scaling (adjoint gradient tests), applied before `DYREL!` so that the
+    # preconditioner is built from the viscosity the solve uses
+    if !isnothing(η_multiplier)
+        stokes.viscosity.η .*= η_multiplier.center
+        stokes.viscosity.ηv .*= η_multiplier.vertex
     end
     DYREL!(dyrel, stokes, rheology, phase_ratios, grid.di, dt; CFL = dyrel.CFL)
     if free_surface
@@ -253,7 +346,10 @@ function _solve_DYREL!(
         end
         igg.me == 0 && isnan(err) && error("NaN detected in outer loop")
         igg.me == 0 && err > 1.0e10 && error("Kaboom! Error > 1e10 in outer loop")
-        err < ϵ && break
+        if err < ϵ
+            converged = true
+            break
+        end
 
         # Set tolerance of velocity solve proportional to residual
         if err > err_min * 1.05
@@ -349,6 +445,43 @@ function _solve_DYREL!(
         iter > total_iterMax && break
     end
 
+    # The adjoint linearizes around the converged state, so it runs before the plastic pressure
+    # correction is absorbed into P and before τ_o is overwritten.
+    adjoint && !converged && error(
+        "the adjoint needs a converged forward state, but the DYREL solve did not meet ϵ " *
+            "(err=$err, ϵ=$ϵ, iterations=$iter, total_iterMax=$total_iterMax)"
+    )
+    adjoint_out = if adjoint
+        solve_DYREL_adjoint!(
+            stokes,
+            stokes_ad,
+            ρg,
+            dyrel,
+            flow_bcs,
+            phase_ratios,
+            rheology,
+            args,
+            grid,
+            dt,
+            igg;
+            λ_relaxation_DR,
+            λ_relaxation_PH,
+            free_surface,
+            observation,
+            gradients,
+            viscosity_cutoff,
+            linear_viscosity,
+            update_material,
+            adjoint_solver_options(
+                (;
+                    pressure_relaxation, iterMax_PH, iterMax_DR, total_iterMax, nout,
+                    rel_drop = 0.1, verbose_PH, verbose_DR,
+                ),
+                adjoint_kwargs,
+            )...,
+        )
+    end
+
     # absorb plastic pressure correction into P (mirrors APT: stokes.P .= θ = P + ΔPψ)
     @. stokes.P += stokes.ΔPψ
 
@@ -372,8 +505,26 @@ function _solve_DYREL!(
     @parallel (@idx ni) multi_copy!(@tensor_center(stokes.τ_o), @tensor_center(stokes.τ))
     copy_stress_vertices!(stokes, dim)
 
-    return (; iter, err_evo_it, err_evo_V, err_evo_P, err_evo_tot)
+    out = (; iter, err_evo_it, err_evo_V, err_evo_P, err_evo_tot, err, converged)
+    return adjoint ? (; out..., adjoint = adjoint_out) : out
 
+end
+
+# forward-only entry point: no adjoint arrays
+function _solve_DYREL!(
+        stokes::JustRelax.StokesArrays,
+        ρg,
+        dyrel,
+        flow_bcs::AbstractFlowBoundaryConditions,
+        phase_ratios::JustPIC.PhaseRatios,
+        rheology,
+        args,
+        grid::Geometry,
+        dt,
+        igg::IGG;
+        kwargs...,
+    )
+    return _solve_DYREL!(stokes, nothing, ρg, dyrel, flow_bcs, phase_ratios, rheology, args, grid, dt, igg; kwargs...)
 end
 
 function _solve_DYREL!(
@@ -429,6 +580,31 @@ end
 @inline velocity_dirichlet_args(bcs, ::Val{2}) = ((bcs.dirichlet.Vx, bcs.dirichlet.Vy),)
 @inline velocity_dirichlet_args(_, ::Val{3}) = ()
 
+# Viscosity residual of a nonlinear rheology: the RMS of |h(τ) - η| / η over the selected points,
+# recovered from the relaxed update η_new = η + ν (h(τ) - η). The momentum and continuity
+# residuals use the stress of the previous viscosity, so they alone can be small while η is
+# still far from the viscosity its stress implies.
+function viscosity_residual(η_new, η_old, ν)
+    sum_sq = sum_mpi((a, b) -> abs2((a - b) / b), η_new, η_old)
+    return sqrt(sum_sq / sum_mpi(_ -> 1.0, η_old)) / ν
+end
+
+function viscosity_residual(η_new, η_old, ν, mask)
+    sum_sq = sum_mpi((m, a, b) -> m ? abs2((a - b) / b) : zero(a), mask, η_new, η_old)
+    return sqrt(sum_sq / max(sum_mpi(m -> m ? 1.0 : 0.0, mask), 1)) / ν
+end
+
+# The adjoint differentiates the 2D kernels point by point, and its reverse pass adds into
+# neighbouring cells, which would need a summing halo exchange across ranks.
+function check_adjoint_support(::Val{N}, igg) where {N}
+    N == 2 || throw(ArgumentError("the adjoint DYREL solver is implemented in 2D only"))
+    nprocs = hasproperty(igg, :nprocs) ? igg.nprocs : 1
+    nprocs == 1 || throw(
+        ArgumentError("the adjoint DYREL solver does not support MPI yet (nprocs = $nprocs)")
+    )
+    return nothing
+end
+
 function update_stress_halo!(stokes::JustRelax.StokesArrays, ::Val{2}, linear_viscosity)
     if linear_viscosity
         update_halo!(stokes.τ.xx_v, stokes.τ.yy_v, stokes.τ.xy)
@@ -454,6 +630,48 @@ end
 # norm is exactly zero for boundary-driven flow, the pressure span for pure shear. `errPt` has such
 # a fallback (see `_solve_VariationalDYREL!`); `errV` does not.
 @inline nonzero_span(s) = abs(s) ≤ sqrt(eps(typeof(s))) ? one(s) : s
+
+# Velocity scale of the continuity check `errPt = RP·lx/V`: the velocity magnitude, floored at a
+# small fraction of the velocity the pressure span could drive through the stiffest material,
+# `Vref = Pspan·lx/η_max`. A field at rest carries round-off noise only, `RP ≈ c·eps·Vref/lx` with
+# c ≲ 1, where `errPt` would otherwise compare noise with noise and never converge. Flooring at
+# `10·eps/ϵ·Vref` makes that noise read as `≈ 0.1·c·ϵ`, for any tolerance. A moving field is far
+# above the floor (2e-9·Vref at ϵ = 1e-6), and even one below it has its relative continuity
+# error off by only `floor/V`. The floor does not depend on `dt`, which in a viscous solve can be
+# an arbitrary placeholder.
+@inline function continuity_velocity_scale(Vscale, Pspan, lx, η_max, ϵ)
+    floor_fraction = min(one(Vscale), 10 * eps(typeof(Vscale)) / ϵ)
+    V = max(Vscale, floor_fraction * Pspan * lx / η_max)
+    return iszero(V) || !isfinite(V) ? one(V) : V
+end
+
+# Force density the momentum residuals are measured against: the force that drives the flow, i.e.
+# the buoyancy anomaly or, for boundary-driven flow, the deviatoric stress over the domain length.
+# The pressure gradient `Pspan/lx` is no such scale in a gravity-driven model: it is dominated by
+# the hydrostatic pressure, which balances the mean body force and drives nothing, so a residual
+# small against it can leave the driving force barely balanced. A field at rest has a residual of
+# hydrostatic round-off, `≈ eps·P/dx`; the floor makes that read as `≈ 0.1ϵ`.
+@inline function momentum_force_scale(ρg_anomaly, ρg_rms, τII_max, Pspan, lx, dx_min, ϵ)
+    floor_fraction = min(one(ϵ), 10 * eps(typeof(ϵ)) / ϵ * lx / dx_min)
+    F = max(ρg_anomaly, τII_max / lx, floor_fraction * max(Pspan / lx, ρg_rms))
+    return iszero(F) || !isfinite(F) ? one(F) : F
+end
+
+# RMS deviation of the body force from its mean, and its RMS, over the selected cells. A uniform
+# body force is balanced by a pressure gradient alone; only its deviation drives flow.
+function body_force_scales(ρg, mask = nothing)
+    n = max(masked_sum(_ -> 1.0, first(ρg), mask), 1)
+    anomaly = total = 0.0
+    for f in ρg
+        mean = masked_sum(identity, f, mask) / n
+        total += masked_sum(abs2, f, mask) / n
+        anomaly += masked_sum(x -> abs2(x - mean), f, mask) / n
+    end
+    return sqrt(anomaly), sqrt(total)
+end
+
+masked_sum(f, A, ::Nothing) = sum_mpi(f, A)
+masked_sum(f, A, mask) = sum_mpi((m, a) -> m ? f(a) : zero(f(a)), mask, A)
 @inline volumetric_compliance(ηb) = ηb > 0 ? inv(ηb) : zero(ηb)
 
 @inline function masked_extrema(mask, A)

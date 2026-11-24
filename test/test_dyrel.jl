@@ -19,6 +19,25 @@ else
 end
 
 @testset "DYREL" begin
+    @testset "Adjoint Stokes allocator" begin
+        adjoint2D = AdjointStokesArrays(CPUBackend, (3, 2))
+        @test adjoint2D isa JustRelax.AdjointStokesArrays
+        @test size(adjoint2D.P) == (3, 2)
+        @test size(adjoint2D.V.Vx) == (4, 4)
+        @test size(adjoint2D.λV.Vy) == (5, 3)
+        @test size(adjoint2D.τ.xy) == (4, 3)
+        @test size(adjoint2D.dρgx) == (3, 2)
+
+        adjoint3D = JustRelax.JustRelax3D.AdjointStokesArrays(CPUBackend, (3, 2, 4))
+        @test adjoint3D isa JustRelax.AdjointStokesArrays
+        @test size(adjoint3D.P) == (3, 2, 4)
+        @test size(adjoint3D.V.Vz) == (5, 4, 5)
+        @test size(adjoint3D.τ.yz) == (3, 3, 5)
+        @test size(adjoint3D.dρgx) == (3, 2, 4)
+
+        @test_throws ArgumentError AdjointStokesArrays(3.0, 2.0)
+    end
+
     @testset "DYREL 2D allocator" begin
         # NTuple constructor
         nx, ny = 8, 6

@@ -7,6 +7,7 @@
 
 function _solve_VariationalDYREL!(
         stokes::JustRelax.StokesArrays,
+        stokes_ad::Union{Nothing, JustRelax.AdjointStokesArrays},
         ρg,
         dyrel,
         flow_bcs::AbstractFlowBoundaryConditions,
@@ -33,14 +34,29 @@ function _solve_VariationalDYREL!(
         verbose_DR = true,
         linear_viscosity = false,
         free_surface = false,
+        adjoint = false,
+        observation = nothing,
+        gradients = (;),
+        adjoint_kwargs = (;),
+        η_multiplier = nothing,
+        convergence = :force,
         kwargs...,
     ) where {N}
+
+    convergence in (:force, :pressure) || throw(
+        ArgumentError("convergence must be :force or :pressure, got $(repr(convergence))")
+    )
+    pressure_convergence = convergence === :pressure
+    adjoint && isnothing(stokes_ad) &&
+        throw(ArgumentError("adjoint = true requires AdjointStokesArrays as the second argument"))
+    adjoint && check_adjoint_support(Val(N), igg)
 
     check_periodic_bcs(stokes, flow_bcs, igg, grid.di.center)
 
     dim = Val(N)
     _di = grid._di
     lx = grid.max_li
+    dx_min = minimum(minimum_mpi, grid.di.vertex)
     ni = size(stokes.P)
     periodic = periodic_dims(stokes)
 
@@ -100,6 +116,11 @@ function _solve_VariationalDYREL!(
         stokes.P, stokes.P0, stokes.ΔPψ, stokes.λ, @velocity(stokes)..., ϕ, maskV...
     )
     foreach(A -> fill!(A, zero(eltype(A))), (fields.dVdτ..., fields.dV..., fields.R0..., fields.cV...))
+    # Internal velocity Dirichlet nodes (velocity boxes): imposed by the velocity kernels, which
+    # zero their residual and hold their value; set the value once here so the first residual
+    # evaluation already sees it.
+    dirichlet_V = velocity_dirichlet(flow_bcs)
+    foreach(apply_dirichlet!, @velocity(stokes), dirichlet_V)
     flow_bcs!(stokes, flow_bcs)
     update_halo!(@velocity(stokes)...)
 
@@ -136,8 +157,20 @@ function _solve_VariationalDYREL!(
 
     # recompute all the DYREL variables
     compute_viscosity!(stokes, phase_ratios, ϕ, args, rheology, viscosity_cutoff; air_phase = air_phase)
-    compute_ρg!(ρg[end], phase_ratios, rheology, args; air_phase)
+    # impose a cell-wise viscosity scaling the per-phase rheology cannot express, before `DYREL!`
+    # so the Gershgorin bounds and the preconditioner see the viscosity the solve actually uses
+    if !isnothing(η_multiplier)
+        stokes.viscosity.η .*= η_multiplier.center
+        stokes.viscosity.ηv .*= η_multiplier.vertex
+    end
+    # `ρg` has one field per spatial component for directional gravity.  Recompute the
+    # complete tuple here; using only `ρg[end]` discards the horizontal component and
+    # fails when GeoParams returns a vector buoyancy.
+    compute_ρg!(ρg, phase_ratios, rheology, args; air_phase)
     DYREL!(dyrel, stokes, rheology, phase_ratios, ϕ, grid.di, dt, iszero(free_surface) ? nothing : ρg[end])
+
+    # viscosity before each outer update, for the viscosity residual
+    η_previous = linear_viscosity ? nothing : similar(stokes.viscosity.η)
 
     # Powell-Hestenes iterations
     for itPH in 1:Int(iterMax_PH)
@@ -146,13 +179,16 @@ function _solve_VariationalDYREL!(
 
         # compute divergence, deviatoric strain rate and pressure residual in one pass (masked)
         compute_∇V_strain_rate_RP!(stokes, dyrel, rheology, phase_ratios, ϕ, _di, ni, dt, true; args...)
-
-        # deviatoric stress, then a separate τII-viscosity refresh. The stress kernel derives the
-        # vertex viscosity as harm_clamped(η) — the same convention as the APT variational stress
-        # kernel; a stored ηv would disagree at the free-surface interface and under-move it.
         compute_stress_DYREL!(stokes, rheology, phase_ratios, ϕ, λ_relaxation_PH, dt; Pf = fluid_pressure(args, stokes.P))
+        errη = zero(ϵ)
         if !linear_viscosity
-            update_viscosity_τII!(stokes, phase_ratios, ϕ, args, rheology, viscosity_cutoff; relaxation = viscosity_relaxation, air_phase = air_phase)
+            copyto!(η_previous, stokes.viscosity.η)
+            update_viscosity_τII!(
+                stokes, phase_ratios, ϕ, args, rheology, viscosity_cutoff;
+                relaxation = viscosity_relaxation, air_phase = air_phase,
+            )
+            # only the rock viscosity is part of the solution
+            errη = viscosity_residual(stokes.viscosity.η, η_previous, viscosity_relaxation, maskP)
         end
 
         # compute velocity residuals (pressure residual stokes.R.RP already computed above;
@@ -168,6 +204,7 @@ function _solve_VariationalDYREL!(
             _di.center,
             _di.vertex,
             dt * free_surface,
+            dirichlet_V,
         )
 
         # Residual check, normalized as in the non-variational solver, but with the spans taken
@@ -175,18 +212,33 @@ function _solve_VariationalDYREL!(
         # otherwise set the scale. maskV[d] is shaped like the residuals, i.e. the interior of
         # the velocity arrays.
         Pspan = nonzero_span(masked_value_span(maskP, stokes.P))
-        Vspan = nonzero_span(maximum(map(masked_value_scale, maskV, Vi)))
-        errV = ntuple(d -> masked_norm_mpi(maskRi[d], Ri[d]) / Pspan * lx / √(nV[d]), dim)
+        # not `nonzero_span`: its absolute threshold (√eps) is far above a dimensional velocity
+        # (~1e-9 m/s), which it would replace by 1 and so deflate `errPt` by the velocity itself
+        Vscale = maximum(map(masked_value_scale, maskV, Vi))
+        η_max = maximum_mpi(ifelse.(maskP, stokes.viscosity.η, zero(eltype(stokes.viscosity.η))))
+        Vspan = continuity_velocity_scale(Vscale, Pspan, lx, η_max, ϵ)
+        τII_max = maximum_mpi(ifelse.(maskP, stokes.τ.II, zero(eltype(stokes.τ.II))))
+        Fscale = momentum_force_scale(
+            body_force_scales(ρg, maskP)..., τII_max, Pspan, lx, dx_min, ϵ
+        )
+        # Momentum residual scale: the driving force density (`:force`), or the pressure span over
+        # the domain length (`:pressure`, the test of this solver in JustRelax v0.8.1-QS).
+        Rscale = pressure_convergence ? Pspan / lx : Fscale
+        errV = ntuple(d -> masked_norm_mpi(maskRi[d], Ri[d]) / Rscale / √(nV[d]), dim)
         RP_rms = masked_norm_mpi(maskP, stokes.R.RP) / √(nP)
-        errPt = RP_rms * lx / Vspan
-        err = maximum((errV..., errPt))
-        # Convergence additionally accepts a continuity residual that is negligible in absolute
-        # terms: a field at rest has no velocity scale, so `Vspan` collapses to the residual-level
-        # noise and `errPt` stops carrying information. `RP` is a divergence, so `RP·dt` is the
-        # volumetric strain the step would accumulate — dimensionless and solution-independent.
-        # Only the convergence test uses it; `err` continues to drive the tolerance schedule below,
-        # which is tuned against the relative form.
-        err_converged = max(maximum(errV), min(errPt, RP_rms * dt))
+        if pressure_convergence
+            # v0.8.1-QS: continuity against the velocity magnitude, no viscosity residual.
+            # Convergence additionally accepts a continuity residual that is negligible in
+            # absolute terms: `RP·dt` is the volumetric strain the step would accumulate. Only the
+            # convergence test uses it; `err` drives the tolerance schedule below.
+            errPt = RP_rms * lx / nonzero_span(Vscale)
+            err = maximum((errV..., errPt))
+            err_converged = max(maximum(errV), min(errPt, RP_rms * dt))
+        else
+            errPt = RP_rms * lx / Vspan
+            err = maximum((errV..., errPt, errη))
+            err_converged = err
+        end
 
         if itPH ≤ 2
             errV0 = map(x -> x + eps(), errV)
@@ -198,7 +250,7 @@ function _solve_VariationalDYREL!(
                 ntuple(d -> @sprintf("R%d=%1.3e %1.3e", d, errV[d], errV[d] / errV0[d]), dim),
                 ", ",
             )
-            @printf("itPH = %02d iter = %06d iter/nx = %03d, err = %1.3e - norm[%s, Rp=%1.3e %1.3e] \n", itPH, iter, iter / ni[1], err, errV_msg, errPt, errPt / errPt0)
+            @printf("itPH = %02d iter = %06d iter/nx = %03d, err = %1.3e - norm[%s, Rp=%1.3e %1.3e, η=%1.3e] \n", itPH, iter, iter / ni[1], err, errV_msg, errPt, errPt / errPt0, errη)
         end
         igg.me == 0 && isnan(err) && error("NaN detected in outer loop")
         igg.me == 0 && err > 1.0e10 && itPH > 1 && error("Kaboom! Error > 1e10 in outer loop")
@@ -241,14 +293,17 @@ function _solve_VariationalDYREL!(
             # compute divergence, deviatoric strain rate and pressure residual in one pass (masked)
             compute_∇V_strain_rate_RP!(stokes, dyrel, rheology, phase_ratios, ϕ, _di, ni, dt, true; args...)
 
-            # deviatoric stress (vertex viscosity via harm_clamped(η)) + separate τII-viscosity
-            # refresh, then assemble the small pressure correction θc = γ_eff·RP + ΔPψ
+            # Deviatoric stress uses the current viscosity; its invariant then updates viscosity
+            # for the next pass, matching the non-variational DYREL solver.
             compute_stress_DYREL!(stokes, rheology, phase_ratios, ϕ, λ_relaxation_DR, dt; Pf = fluid_pressure(args, stokes.P))
             if !linear_viscosity
-                update_viscosity_τII!(stokes, phase_ratios, ϕ, args, rheology, viscosity_cutoff; relaxation = viscosity_relaxation, air_phase = air_phase)
+                update_viscosity_τII!(
+                    stokes, phase_ratios, ϕ, args, rheology, viscosity_cutoff;
+                    relaxation = viscosity_relaxation, air_phase = air_phase,
+                )
             end
-            # exchange vertex-stress halos (+ vertex viscosity, refreshed above) before the momentum
-            # kernel reads them, matching the non-variational solver
+
+            # Exchange vertex-stress halos before the momentum kernel reads them.
             if linear_viscosity
                 update_halo!(stokes.τ.xx_v, stokes.τ.yy_v, stokes.τ.xy)
             else
@@ -275,6 +330,7 @@ function _solve_VariationalDYREL!(
                 _di.center,
                 _di.vertex,
                 dt * free_surface,
+                dirichlet_V,
             )
             flow_bcs!(stokes, flow_bcs)
             update_halo!(@velocity(stokes)...)
@@ -283,10 +339,10 @@ function _solve_VariationalDYREL!(
             if iszero(iter % nout)
 
                 # D·(stored residual) is the raw momentum residual; normalize it exactly
-                # like the outer check so ϵ_vel = err_vel·rel_drop compares like with like.
-                # P is fixed within a pass, so the outer Pspan is still current here.
-                errV = ntuple(d -> masked_norm_mpi(maskRi[d], Di[d], Ri[d]) / Pspan * lx / √(nV[d]), dim)
-                err_vel = maximum(errV)
+                # like the outer check so ϵ_vel = err_vel·rel_drop compares like with like
+                # (P is fixed within a pass, so the outer scale is still current here).
+                errV_in = ntuple(d -> masked_norm_mpi(maskRi[d], Di[d], Ri[d]) / Rscale / √(nV[d]), dim)
+                err_vel = maximum(errV_in)
                 isnan(err_vel) && igg.me == 0 && error("NaN detected in inner loop")
 
                 push!(err_evo_tot, err_vel)
@@ -334,6 +390,46 @@ function _solve_VariationalDYREL!(
         @warn "DYREL returned without meeting ϵ — the velocity/pressure fields are not converged" err ϵ iter total_iterMax
     end
 
+    # The adjoint linearizes around the converged state, so it runs before the plastic pressure
+    # correction is absorbed into P and before τ_o is overwritten. ϕ and the masks stay frozen.
+    adjoint && !converged && error(
+        "the adjoint needs a converged forward state, but the variational DYREL solve did not meet ϵ " *
+            "(err=$err, ϵ=$ϵ, iterations=$iter, total_iterMax=$total_iterMax)"
+    )
+    adjoint_out = if adjoint
+        solve_VariationalDYREL_adjoint!(
+            stokes,
+            stokes_ad,
+            ρg,
+            dyrel,
+            flow_bcs,
+            phase_ratios,
+            ϕ,
+            rheology,
+            args,
+            grid,
+            dt,
+            igg;
+            maskV,
+            maskP,
+            air_phase,
+            λ_relaxation_DR,
+            λ_relaxation_PH,
+            free_surface,
+            observation,
+            gradients,
+            viscosity_cutoff,
+            linear_viscosity,
+            adjoint_solver_options(
+                (;
+                    pressure_relaxation, iterMax_PH, iterMax_DR, total_iterMax, nout,
+                    rel_drop = 0.1, verbose_PH, verbose_DR,
+                ),
+                adjoint_kwargs,
+            )...,
+        )
+    end
+
     # absorb plastic pressure correction into P (mirrors APT: stokes.P .= θ = P + ΔPψ)
     @. stokes.P += stokes.ΔPψ
 
@@ -357,8 +453,27 @@ function _solve_VariationalDYREL!(
     @parallel (@idx ni) multi_copy!(@tensor_center(stokes.τ_o), @tensor_center(stokes.τ))
     copy_stress_vertices!(stokes, dim)
 
-    return (; err_evo_it, err_evo_V, err_evo_P, err_evo_tot, err, iter, converged)
+    out = (; err_evo_it, err_evo_V, err_evo_P, err_evo_tot, err, iter, converged)
+    return adjoint ? (; out..., adjoint = adjoint_out) : out
 
+end
+
+# forward-only entry point: no adjoint arrays
+function _solve_VariationalDYREL!(
+        stokes::JustRelax.StokesArrays,
+        ρg,
+        dyrel,
+        flow_bcs::AbstractFlowBoundaryConditions,
+        phase_ratios::JustPIC.PhaseRatios,
+        ϕ::JustRelax.RockRatio,
+        rheology,
+        args,
+        grid::Geometry,
+        dt,
+        igg::IGG;
+        kwargs...,
+    )
+    return _solve_VariationalDYREL!(stokes, nothing, ρg, dyrel, flow_bcs, phase_ratios, ϕ, rheology, args, grid, dt, igg; kwargs...)
 end
 
 # legacy uniform-grid wrapper (di as a spacing tuple / named tuple)

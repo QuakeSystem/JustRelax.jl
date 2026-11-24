@@ -109,8 +109,17 @@ end
     return nothing
 end
 
-@inline _compute_RP!(P, P0, ∇V, Q, ηb, dt) = -∇V - (P - P0) / ηb + (Q / dt)
-@inline _compute_RP!(P, P0, ∇V, Q, ΔT, α, ηb, dt) = -∇V - (P - P0) / ηb + α * (ΔT / dt) + (Q / dt)
+# Keep the compliance constant in the pullback: differentiating GPU division by
+# ηb == Inf can produce NaNs even though the pressure derivative is exactly zero.
+@inline _compute_RP!(P, P0, ∇V, Q, ηb, dt) = -∇V - (P - P0) * inv(ηb) + (Q / dt)
+@inline _compute_RP!(P, P0, ∇V, Q, ΔT, α, ηb, dt) = -∇V - (P - P0) * inv(ηb) + α * (ΔT / dt) + (Q / dt)
+
+# Bulk viscosity `Kb * dt` of a cell. The forward solver reads the field filled by
+# `compute_bulk_viscosity_and_penalty!`; material sensitivities pass `ηb = nothing` so the bulk
+# modulus is recomputed, with the same phase average, from the differentiated rheology.
+@inline bulk_viscosity(ηb, rheology, phase_ratio, dt, I::Vararg{Int}) = @inbounds ηb[I...]
+@inline bulk_viscosity(::Nothing, rheology, phase_ratio, dt, I::Vararg{Int}) =
+    fn_ratio(get_bulk_modulus, rheology, @cell(phase_ratio[I...])) * dt
 
 # Per-cell pressure residual, dispatching on the presence of ΔT / melt_fraction exactly as
 # `compute_RP_kernel!` does. Used to fold the RP computation into the strain-rate kernel while

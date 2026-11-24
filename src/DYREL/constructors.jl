@@ -10,7 +10,7 @@ Creates a new `DYREL` struct with fields initialized to zero.
   off the containers instead, so the two cannot disagree.
 
 # Keyword arguments
-- `ϵ`: General convergence tolerance. Default: `1.0e-6`.
+- `ϵ`: General convergence tolerance. Momentum residuals are measured against the force density that drives the flow (the buoyancy anomaly, or the deviatoric stress over the domain length), continuity against the velocity scale, and a nonlinear viscosity against the viscosity its stress implies. Default: `1.0e-6`.
 - `ϵ_vel`: Velocity convergence tolerance. Default: `1.0e-6`.
 - `CFL`: Courant-Friedrichs-Lewy number. Default: `0.99`.
 - `c_fact`: Damping scaling factor. Default: `0.5`.
@@ -155,7 +155,7 @@ This function:
 - `dt`: Time step.
 
 # Keyword arguments
-- `ϵ`: General convergence tolerance. Default: `1.0e-6`.
+- `ϵ`: General convergence tolerance. Momentum residuals are measured against the force density that drives the flow (the buoyancy anomaly, or the deviatoric stress over the domain length), continuity against the velocity scale, and a nonlinear viscosity against the viscosity its stress implies. Default: `1.0e-6`.
 - `ϵ_vel`: Velocity convergence tolerance. Default: `1.0e-6`.
 - `CFL`: Courant-Friedrichs-Lewy number. Default: `0.99`.
 - `c_fact`: Damping scaling factor. Default: `0.5`.
@@ -306,9 +306,28 @@ end
 function compute_bulk_viscosity_and_penalty!(dyrel, stokes, rheology, phase_ratios, ϕ, γfact, dt)
     ni = size(stokes.P)
     η = stokes.viscosity.η
-    η_mean = mean_penalty_viscosity(η)
-    @parallel (@idx ni) compute_bulk_viscosity_and_penalty!(dyrel.ηb, dyrel.γ_eff, rheology, phase_ratios.center, η, ϕ, η_mean, γfact, dt, dyrel.global_penalty)
+    @parallel (@idx ni) compute_bulk_viscosity_and_penalty!(dyrel.ηb, dyrel.γ_eff, rheology, phase_ratios.center, η, ϕ, rock_mean_viscosity(η, ϕ), γfact, dt, dyrel.global_penalty)
     return nothing
+end
+
+# Mean of the finite viscosities over the rock cells, across all ranks. Eliminated (air) cells
+# are left out: they are not part of the solve, and their weak viscosity would shrink the
+# penalty of the whole domain.
+#
+# This is the cs-adjoint2026 choice. JustRelax v0.8.1-QS took the mean over all cells, air
+# included (`mean_penalty_viscosity`), which gives a somewhat smaller penalty in models with air.
+# The penalty is only the step size of the pressure update `P += γ_eff * RP`: it changes how the
+# solver reaches the solution, not the converged solution. With `convergence = :force` the
+# result does not depend on it (PlumeFreeSurface test, ϵ = 1e-6: max Vy agrees to 5e-9 relative
+# with either mean). With the looser `convergence = :pressure` the solve stops further from the
+# solution, and where it stops depends on the penalty (same test: max Vy 7.85e-9 with this mean,
+# 9.28e-9 with the v0.8.1-QS mean, converged value 6.20e-9). `:pressure` therefore reproduces
+# v0.8.1-QS variational results exactly only in models without air.
+function rock_mean_viscosity(η, ϕ::JustRelax.RockRatio)
+    in_rock(ηᵢ, ϕᵢ) = ϕᵢ > 0 && isfinite(ηᵢ)
+    total = sum_mpi((ηᵢ, ϕᵢ) -> in_rock(ηᵢ, ϕᵢ) ? ηᵢ : zero(ηᵢ), η, ϕ.center)
+    count = sum_mpi((ηᵢ, ϕᵢ) -> in_rock(ηᵢ, ϕᵢ) ? one(ηᵢ) : zero(ηᵢ), η, ϕ.center)
+    return iszero(count) ? one(total) : total / count
 end
 
 # `ηb` holds the same material quantity as the full-volume solver: the rock fraction
@@ -325,6 +344,11 @@ end
 # fraction back in (`γ_eff * RP` and the single center-fraction factor used by the
 # Gershgorin bound), so no second volume-fraction factor is introduced; `isvalid_c`
 # guarantees the divisor is positive.
+#
+# As in the full-volume solver, the penalty is scaled by a single global viscosity (the mean over
+# the rock cells), not the local one: a local penalty cannot relax the pressure of a weak body
+# enclosed by strong material, e.g. a plume in the mantle, whose pressure mode is resisted by the
+# strong surroundings. `global_penalty = false` falls back to the local viscosity.
 @parallel_indices (I...) function compute_bulk_viscosity_and_penalty!(ηb, γ_eff, rheology, phase_ratios_center, η, ϕ::JustRelax.RockRatio, η_mean, γfact, dt, global_penalty)
 
     if isvalid_c(ϕ, I...)

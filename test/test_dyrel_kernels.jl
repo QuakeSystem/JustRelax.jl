@@ -272,5 +272,344 @@ end
         ∂ρg∂y = -inv(grid.di.center[2])
         expected_correction = Array(stokes.V.Vy[2:(end - 1), 2:(end - 1)]) .* (0.5 * ∂ρg∂y)
         @test Array(stokes.R.Ry) .- Array(Ry_without_fs) ≈ expected_correction
+
+        # --- fused adjoint Schur correction + preconditioning + update ---
+        adjoint = JustRelax2D.AdjointStokesArrays(backend, ni)
+        adjoint.P .= 1.0
+        adjoint.V.Vx .= 1.0
+        adjoint.V.Vy .= 1.0
+        adjoint.ε.xx .= 1.0
+        adjoint.ε.yy .= 1.0
+        adjoint.ε.xy .= 1.0
+        adjoint.τ.xx .= 1.0
+        adjoint.τ.yy .= 1.0
+        adjoint.τ.xy .= 1.0
+        adjoint.λV.Vx .= 2.0
+        adjoint.λV.Vy .= 3.0
+        adjoint.λP .= 4.0
+        JR2K.initialize_adjoint_iteration!(adjoint, ni)
+        @test all(iszero, Array(adjoint.P))
+        @test all(iszero, Array(adjoint.V.Vx))
+        @test all(iszero, Array(adjoint.V.Vy))
+        @test all(iszero, Array(adjoint.ε.xx))
+        @test all(iszero, Array(adjoint.ε.yy))
+        @test all(iszero, Array(adjoint.ε.xy))
+        @test all(iszero, Array(adjoint.τ.xx))
+        @test all(iszero, Array(adjoint.τ.yy))
+        @test all(iszero, Array(adjoint.τ.xy))
+        @test all(==(2.0), Array(adjoint.R.Rx))
+        @test all(==(3.0), Array(adjoint.R.Ry))
+        @test all(==(4.0), Array(adjoint.R.RP))
+
+        adjoint.V.Vx .= 4.0
+        adjoint.V.Vy .= 5.0
+        adjoint.P .= PTArray(backend)([i + 2j for i in 1:nx, j in 1:ny])
+        adjoint.λV.Vx .= 0.0
+        adjoint.λV.Vy .= 0.0
+        dyrel.γ_eff .= 2.0
+        dyrel.Dx .= 2.0
+        dyrel.Dy .= 4.0
+        dyrel.αVx .= 0.0
+        dyrel.αVy .= 0.0
+        dyrel.βVx .= 0.5
+        dyrel.βVy .= 0.5
+        dyrel.dτVx .= 0.25
+        dyrel.dτVy .= 0.25
+        dyrel.dVxdτ .= 0.0
+        dyrel.dVydτ .= 0.0
+
+        Rx0 = Array(adjoint.V.Vx)
+        Ry0 = Array(adjoint.V.Vy)
+        P = Array(adjoint.P)
+        γ = Array(dyrel.γ_eff)
+        expected_Rx = @views Rx0[2:(end - 1), 2:(end - 1)] .-
+            (γ[1:(end - 1), :] .* P[1:(end - 1), :] .- γ[2:end, :] .* P[2:end, :]) .* _di.center[1]
+        expected_Ry = @views Ry0[2:(end - 1), 2:(end - 1)] .-
+            (γ[:, 1:(end - 1)] .* P[:, 1:(end - 1)] .- γ[:, 2:end] .* P[:, 2:end]) .* _di.center[2]
+
+        @parallel (@idx ni) JR2K.update_adjoint_V_damping_DR!(
+            adjoint.λV.Vx, adjoint.λV.Vy,
+            dyrel.dVxdτ, dyrel.dVydτ,
+            adjoint.V.Vx, adjoint.V.Vy,
+            adjoint.P, dyrel.γ_eff,
+            dyrel.Dx, dyrel.Dy,
+            dyrel.αVx, dyrel.αVy,
+            dyrel.βVx, dyrel.βVy,
+            dyrel.dτVx, dyrel.dτVy,
+            _di.center,
+        )
+
+        @test Array(adjoint.V.Vx[2:(end - 1), 2:(end - 1)]) ≈ expected_Rx
+        @test Array(adjoint.V.Vy[2:(end - 1), 2:(end - 1)]) ≈ expected_Ry
+        @test Array(dyrel.dVxdτ) ≈ expected_Rx ./ 2
+        @test Array(dyrel.dVydτ) ≈ expected_Ry ./ 4
+        @test Array(adjoint.λV.Vx[2:(end - 1), 2:(end - 1)]) ≈ expected_Rx ./ 16
+        @test Array(adjoint.λV.Vy[2:(end - 1), 2:(end - 1)]) ≈ expected_Ry ./ 32
+
+        # The adjoint penalty uses the local center spacing on a nonuniform grid.
+        _di_nonuniform = (
+            PTArray(backend)([1.0, 2.0, 3.0, 4.0, 5.0]),
+            PTArray(backend)([2.0, 3.0, 4.0, 5.0]),
+        )
+        adjoint.V.Vx .= 4.0
+        adjoint.V.Vy .= 5.0
+        adjoint.λV.Vx .= 0.0
+        adjoint.λV.Vy .= 0.0
+        dyrel.dVxdτ .= 0.0
+        dyrel.dVydτ .= 0.0
+        expected_Rx = @views Rx0[2:(end - 1), 2:(end - 1)] .-
+            (γ[1:(end - 1), :] .* P[1:(end - 1), :] .- γ[2:end, :] .* P[2:end, :]) .*
+            reshape(Array(_di_nonuniform[1]), :, 1)
+        expected_Ry = @views Ry0[2:(end - 1), 2:(end - 1)] .-
+            (γ[:, 1:(end - 1)] .* P[:, 1:(end - 1)] .- γ[:, 2:end] .* P[:, 2:end]) .*
+            reshape(Array(_di_nonuniform[2]), 1, :)
+
+        @parallel (@idx ni) JR2K.update_adjoint_V_damping_DR!(
+            adjoint.λV.Vx, adjoint.λV.Vy,
+            dyrel.dVxdτ, dyrel.dVydτ,
+            adjoint.V.Vx, adjoint.V.Vy,
+            adjoint.P, dyrel.γ_eff,
+            dyrel.Dx, dyrel.Dy,
+            dyrel.αVx, dyrel.αVy,
+            dyrel.βVx, dyrel.βVy,
+            dyrel.dτVx, dyrel.dτVy,
+            _di_nonuniform,
+        )
+
+        @test Array(adjoint.V.Vx[2:(end - 1), 2:(end - 1)]) ≈ expected_Rx
+        @test Array(adjoint.V.Vy[2:(end - 1), 2:(end - 1)]) ≈ expected_Ry
     end
+end
+
+@testset "Adjoint backend allocation and pullback" begin
+    ni = (5, 4)
+    TA = PTArray(backend)
+    stokes = StokesArrays(backend, ni)
+    adjoint = AdjointStokesArrays(backend, ni, (true, false))
+    @test adjoint.P isa TA
+    @test adjoint.λV.Vx isa TA
+    @test size(adjoint.R.Rx) == (ni[1], ni[2])
+    @test AdjointStokesArrays(backend, ni...).ρ isa TA
+    controls = material_controls(backend, ni, (:ρ0,); nphases = 2)
+    @test controls.ρ0.center isa TA
+    @test controls.ρ0.vertex isa TA
+    @test size(controls.ρ0.center) == (2, ni...)
+    @test size(controls.ρ0.vertex) == (2, (ni .+ 1)...)
+    @test_throws ArgumentError material_controls(backend, ni, (:ρ0,))
+
+    adjoint = AdjointStokesArrays(backend, ni)
+    grid = Geometry(ni, (1.0, 1.0))
+    observation = JR2K.observation_mask(
+        adjoint, grid, (; field = :P, center = (0.5, 0.5), half_width = (0.5, 0.5))
+    )
+    JR2K.seed_observation!(observation)
+    @test all(==(-1.0), Array(adjoint.P))
+
+    # Exercise deferred Enzyme differentiation inside the selected device kernel.
+    adjoint.R.Rx .= 1.0
+    adjoint.R.Ry .= 1.0
+    ρg = (TA(zeros(ni)), TA(ones(ni)))
+    JR2K.enzyme_compute_PH_residual_V!(stokes, adjoint, ρg, grid._di, ni)
+    @test any(!iszero, Array(adjoint.τ.xy))
+    @test any(!iszero, Array(adjoint.ρ))
+    @test all(isfinite, Array(adjoint.P))
+    expected_density = fill(-1.0, ni)
+    expected_density[:, [1, end]] .= -0.5
+    @test Array(adjoint.ρ) ≈ expected_density
+
+    # With all rows in rock, the variational pullback agrees with the standard one.
+    ϕ = RockRatio(backend, ni)
+    for field in (ϕ.center, ϕ.vertex, ϕ.Vx, ϕ.Vy)
+        fill!(field, 1.0)
+    end
+    masked_adjoint = AdjointStokesArrays(backend, ni)
+    masked_adjoint.R.Rx .= 1.0
+    masked_adjoint.R.Ry .= 1.0
+    JR2K.enzyme_compute_PH_residual_V!(stokes, masked_adjoint, ρg, ϕ, grid._di, ni)
+    @test Array(masked_adjoint.ρ) ≈ expected_density
+    @test Array(masked_adjoint.τ.xy) ≈ Array(adjoint.τ.xy)
+end
+
+
+@testset "Continuity pressure pullback with infinite bulk viscosity" begin
+    ni = (3, 2)
+    stokes = StokesArrays(backend, ni)
+    stokes.P .= 2.0
+    phases = PhaseRatios(backend_JP, 1, ni)
+    ϕ = RockRatio(backend, ni)
+    foreach(A -> fill!(A, 1.0), (ϕ.center, ϕ.vertex, ϕ.Vx, ϕ.Vy))
+    grid = Geometry(ni, (1.0, 1.0))
+    ηb = similar(stokes.P)
+    for bulk in (5.0, Inf), seed in (1.0, 1.0e15), variational in (false, true)
+        fill!(ηb, bulk)
+        adjoint = AdjointStokesArrays(backend, ni)
+        adjoint.R.RP .= seed
+        if variational
+            JR2K.enzyme_compute_∇V_strain_rate_RP!(
+                stokes, adjoint, (; ηb), (), phases, ϕ, grid._di, ni, 3.0e11, (;)
+            )
+        else
+            JR2K.enzyme_compute_∇V_strain_rate_RP!(
+                stokes, adjoint, (; ηb), (), phases, grid._di, ni, 3.0e11, (;)
+            )
+        end
+        @test Array(adjoint.P) ≈ fill(-seed / bulk, ni)
+        @test all(isfinite, Array(adjoint.V.Vx))
+        @test all(isfinite, Array(adjoint.V.Vy))
+    end
+end
+
+@inline function material_gradient_test_point!(out, rheology, i, j)
+    out[i, j] = rheology[1].a^2
+    return nothing
+end
+
+@testset "Material-gradient annotations on the selected backend" begin
+    ni = (3, 2)
+    TA = PTArray(backend)
+    out = TA(zeros(ni))
+    seed = TA(ones(ni))
+    fields = (; a = TA(zeros(1, ni...)))
+    paths = ((; a = (Val((:a,)),)),)
+    JR2K.differentiate_pointwise_material_kernel!(
+        material_gradient_test_point!, ni, fields, paths,
+        (out => seed, ((; a = 2.0),) => JR2K.Enzyme.Active),
+    )
+    @test Array(fields.a) == fill(4.0, 1, ni...)
+    @test all(iszero, Array(seed))
+end
+
+@inline cap_test_λ(rheology, s, p) =
+    JR2K.cap_return_mapping(rheology, 1, s, p, 0.0, 0.5, 4.0, 0.1)[1][3]
+
+# Material derivative through the cap return map, whose Newton solve Enzyme skips. With an
+# Active rheology handed to that solve, CUDA failed with an invalid address space (error 717).
+@parallel_indices (i, j) function cap_rheology_gradient!(out, rheology, s, p)
+    Enzyme = JR2K.Enzyme
+    d = Enzyme.autodiff_deferred(
+        Enzyme.Reverse, Enzyme.Const(cap_test_λ), Enzyme.Active,
+        Enzyme.Active(rheology), Enzyme.Active(s), Enzyme.Active(p),
+    )[1]
+    out[1] = d[2]
+    out[2] = d[3]
+    out[3] = d[1][1].CompositeRheology[1].elements[3].C.val
+    return nothing
+end
+
+@testset "Cap return-map material derivative on the selected backend" begin
+    el = ConstantElasticity(; G = 1.0, Kb = 4.0)
+    cap = DruckerPragerCap(; C = 1.0, ϕ = 30.0, Ψ = 0.0, η_vp = 0.1, pT = -0.5)
+    rheology = (
+        SetMaterialParams(;
+            Phase = 1, Elasticity = el,
+            CompositeRheology = CompositeRheology((LinearViscous(; η = 1.0), el, cap)),
+        ),
+    )
+    s, p = 1.0, -0.8 # yields on the cap
+    out = PTArray(backend)(zeros(3))
+    @parallel (1:1, 1:1) cap_rheology_gradient!(out, rheology, s, p)
+    Enzyme = JR2K.Enzyme
+    host = Enzyme.autodiff(
+        Enzyme.Reverse, Enzyme.Const(cap_test_λ), Enzyme.Active,
+        Enzyme.Active(rheology), Enzyme.Active(s), Enzyme.Active(p),
+    )[1]
+    expected = [host[2], host[3], host[1][1].CompositeRheology[1].elements[3].C.val]
+    @test !iszero(expected[3])
+    @test Array(out) ≈ expected
+end
+
+@inline function periodic_neighbor_sum_point!(out, input, i, j)
+    ip = i == size(out, 1) ? 1 : i + 1
+    jp = j == size(out, 2) ? 1 : j + 1
+    out[i, j] = input[i, j] + input[ip, j] + input[i, jp]
+    return nothing
+end
+
+@inline function periodic_vertex_sum_point!(out, input, i, j)
+    nx, ny = size(input)
+    i0, ic = mod1(i - 1, nx), mod1(i, nx)
+    j0, jc = mod1(j - 1, ny), mod1(j, ny)
+    out[i, j] = input[i0, j0] + input[ic, j0] + input[i0, jc] + input[ic, jc]
+    return nothing
+end
+
+@testset "Adjoint support guard" begin
+    single_rank = (; me = 0, nprocs = 1)
+    @test isnothing(JR2K.check_adjoint_support(Val(2), single_rank))
+    @test isnothing(JR2K.check_adjoint_support(Val(2), (; me = 0)))
+    @test_throws "2D only" JR2K.check_adjoint_support(Val(3), single_rank)
+    @test_throws "does not support MPI" JR2K.check_adjoint_support(Val(2), (; me = 0, nprocs = 2))
+end
+
+@testset "Race-free point coloring on the selected backend" begin
+    TA = PTArray(backend)
+    for ni in ((6, 4), (5, 3))
+        input = TA(zeros(ni))
+        input_ad = TA(zeros(ni))
+        out = TA(zeros(ni))
+        out_ad = TA(ones(ni))
+        JR2K.enzyme_reverse_pointwise!(
+            periodic_neighbor_sum_point!, ni, (out => out_ad, input => input_ad)
+        )
+        @test Array(input_ad) == fill(3.0, ni)
+        @test all(iszero, Array(out_ad))
+    end
+
+    # Vertex points with the periodic `clamped_indices` stencil of the stress kernel: vertices
+    # 1 and nx + 1 both read cells nx and 1. Odd cell counts used to put two of them in one color.
+    for ni in ((6, 4), (5, 3), (5, 6))
+        input = TA(zeros(ni))
+        input_ad = TA(zeros(ni))
+        out = TA(zeros(ni .+ 1))
+        out_ad = TA(ones(ni .+ 1))
+        JR2K.enzyme_reverse_pointwise!(
+            periodic_vertex_sum_point!, ni .+ 1, (out => out_ad, input => input_ad);
+            periodic = (true, true),
+        )
+        readers(n) = [count(v -> c in mod1.((v - 1, v), n), 1:(n + 1)) for c in 1:n]
+        @test Array(input_ad) == readers(ni[1]) * readers(ni[2])'
+        @test all(iszero, Array(out_ad))
+    end
+
+    # No two points of one color may read the same cell: vertex points read cells i - 1 and i,
+    # cell points i and i + 1, wrapped across a periodic seam.
+    for ncells in 2:9, periodic in (false, true), (extent, offset) in ((ncells + 1, -1), (ncells, 0))
+        cells(i) = unique(
+            periodic ? mod1.((i + offset, i + offset + 1), ncells) :
+                clamp.((i + offset, i + offset + 1), 1, ncells)
+        )
+        groups = JR2K.color_groups(extent, periodic)
+        points = [first + stride * k for (first, stride, count) in groups for k in 0:(count - 1)]
+        @test sort(points) == 1:extent
+        @test all(groups) do (first, stride, count)
+            allunique(reduce(vcat, (cells(first + stride * k) for k in 0:(count - 1)); init = Int[]))
+        end
+    end
+end
+
+@testset "DYREL momentum residual scale" begin
+    JustRelax.MPI.Initialized() || JustRelax.MPI.Init()
+    TA = PTArray(backend)
+    ρgx = zeros(4, 4)
+    ρgy = fill(3.0, 4, 4)
+    ρgy[2, 2] = 7.0
+    ρg = TA(ρgx), TA(ρgy)
+    # uniform part 3 + one anomalous cell of +4: mean 3.25, variance 4²·(1/16)·(15/16)
+    anomaly, rms = JR2K.body_force_scales(ρg)
+    @test anomaly ≈ 4 * sqrt(15) / 16
+    @test rms ≈ sqrt((15 * 9 + 49) / 16)
+    # masked cells are excluded: without the anomalous cell the body force is uniform
+    mask = trues(4, 4)
+    mask[2, 2] = false
+    anomaly_masked, rms_masked = JR2K.body_force_scales(ρg, TA(mask))
+    @test anomaly_masked ≈ 0 atol = 1.0e-14
+    @test rms_masked ≈ 3
+
+    lx, dx_min, ϵ, Pspan = 2.0, 0.1, 1.0e-6, 100.0
+    floor = 10 * eps() / ϵ * lx / dx_min * Pspan / lx
+    # the driving force, not the hydrostatic gradient Pspan/lx = 50, sets the scale
+    @test JR2K.momentum_force_scale(0.5, 0.0, 0.2, Pspan, lx, dx_min, ϵ) == 0.5
+    @test JR2K.momentum_force_scale(0.0, 0.0, 3.0, Pspan, lx, dx_min, ϵ) == 1.5
+    # a field at rest falls back to the round-off floor of the hydrostatic balance
+    @test JR2K.momentum_force_scale(0.0, 0.0, 0.0, Pspan, lx, dx_min, ϵ) ≈ floor
 end

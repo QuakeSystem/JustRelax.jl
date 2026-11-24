@@ -50,7 +50,12 @@ module JustRelax2D
     # `@index` there is KernelAbstractions' kernel index macro -- so it is re-exported here.
     export @index
 
-    __init__() = @init_parallel_stencil(Threads, Float64, 2)
+    function __init__()
+        @init_parallel_stencil(Threads, Float64, 2)
+        # Multiphase rheology closures exceed Enzyme's default type-offset limit.
+        Enzyme.API.maxtypeoffset!(4096) # 1024
+        return nothing
+    end
 
     include("common.jl")
 
@@ -60,6 +65,20 @@ module JustRelax2D
     include("DYREL/solver.jl")
     include("DYREL/solver_VS.jl")
     export solve_DYREL!, solve_VariationalDYREL!, DYREL
+
+    include("DYREL/adjoint/adjoint_solver_utils.jl")
+    include("DYREL/adjoint/adjoint_inner_solvers.jl")
+    include("DYREL/adjoint/Enzyme_pointwise.jl")
+    include("DYREL/adjoint/Enzyme_kernels.jl")
+    include("DYREL/adjoint/Enzyme_boundary_kernel.jl")
+    include("DYREL/adjoint/Enzyme_kernels_VS.jl")
+    include("DYREL/adjoint/Enzyme_gradients_kernels.jl")
+    include("DYREL/adjoint/sensitivity_utils.jl")
+    include("DYREL/adjoint/sensitivities_adjoint.jl")
+    include("DYREL/adjoint/sensitivities_adjoint_VS.jl")
+    include("DYREL/adjoint/objective_function.jl")
+    include("DYREL/adjoint/solver_adjoint.jl")
+    include("DYREL/adjoint/solver_adjoint_VS.jl")
 
     include("variational_stokes/Stokes2D.jl")
     export solve_VariationalStokes!

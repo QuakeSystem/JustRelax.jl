@@ -61,3 +61,42 @@ struct DYREL{T, F}
     ϵ_vel::F  # convergence criterion
     c_fact::F # damping factor
 end
+
+# Iteration state the adjoint solver keeps between solves: its own `DYREL`, set by the first
+# adjoint solve. Not device data, so `adapt` leaves it as is.
+mutable struct AdjointSolverState
+    dyrel::Any
+end
+
+Adapt.adapt_structure(_, state::AdjointSolverState) = state
+
+"""
+    AdjointStokesArrays
+
+State arrays used by the adjoint Stokes solver. They also keep the adjoint's own DYREL
+iteration state, so the adjoint damping carries over from one adjoint solve to the next.
+"""
+struct AdjointStokesArrays{A, B, RType, D, E, F, T}
+    P::T
+    θ::T
+    λP::T
+    P0::T
+    V::A
+    λV::A
+    ∇V::T
+    τ::B
+    ε::B
+    ε_pl::B
+    EII_pl::T
+    viscosity::D
+    τ_o::Union{B, Nothing}
+    R::RType
+    U::E
+    ω::F
+    η::T
+    ρ::T
+    dρgx::T
+    solver::AdjointSolverState
+end
+
+Adapt.@adapt_structure AdjointStokesArrays
