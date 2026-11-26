@@ -119,6 +119,10 @@ end
     return Int(argmax(@inbounds phase_ratio[i, j]))
 end
 
+@inline function _dominant_phase(phase_ratio, i, j, k)
+    return Int(argmax(@inbounds phase_ratio[i, j, k]))
+end
+
 """
     apply_rsf_viscosity!(stokes, rsf_arr, ctrl, phase_ratios, dt; kwargs...)
 

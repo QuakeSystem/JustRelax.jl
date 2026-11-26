@@ -154,6 +154,31 @@ end
 RateStateArrays(backend, ni::NTuple{N, Integer}; kwargs...) where {N} =
     RateStateArrays(ni; kwargs...)
 
+"""
+    RateStateXY(ni; skip_vs=false)
+
+Allocate xy-edge rate-and-state arrays and a `Vx` Dirichlet pair for a 3D grid
+of `ni` cells. `skip_vs` drops `a ≥ b` edges from the stable timestep.
+"""
+function RateStateXY(ni::NTuple{3, Integer}; skip_vs::Bool = false)
+    nx, ny, nz = ni
+    Ω = @zeros(nx + 1, ny + 1, nz)
+    vx_fixed = @zeros(nx + 1, ny + 2, nz + 2)
+    return JustRelax.RateStateXY(
+        Ω,
+        @zeros(nx + 1, ny + 1, nz),
+        @zeros(nx + 1, ny + 1, nz),
+        @zeros(nx + 1, ny + 1, nz),
+        @zeros(nx + 1, ny + 1, nz),
+        @zeros(nx + 1, ny + 1, nz),
+        @zeros(nx + 1, ny + 1, nz),
+        @zeros(nx + 1, ny + 1, nz),
+        vx_fixed,
+        @zeros(nx + 1, ny + 2, nz + 2),
+        skip_vs,
+    )
+end
+
 include("rheology/RateStateAdapter.jl")
 export rsf_viscosity_from_stress,
     rsf_cons_eq_residual,
@@ -204,6 +229,17 @@ export init_rate_state_fields!,
     enforce_rsf_stress!,
     update_rate_state!,
     compute_dt_ratestate_grid
+
+include("rheology/GeoParamsRateState.jl")
+export init_geoparams_rate_state!,
+    apply_geoparams_rsf_viscosity!,
+    update_geoparams_rate_state!,
+    compute_dt_geoparams_rsf,
+    RateStateXY,
+    seas_bp1_tau0,
+    seas_bp1_omega,
+    init_antiplane_fault!,
+    apply_geoparams_rsf_dirichlet!
 
 include("stokes/PrincipalStresses.jl")
 export compute_principal_stresses, compute_principal_stresses!, PrincipalStress

@@ -2,11 +2,30 @@ compute_stress_DRYEL!(stokes, rheology, phase_ratios, λ_relaxation, dt; Pf = no
     compute_stress_DRYEL!(Val(ndims(stokes.P)), stokes, rheology, phase_ratios, λ_relaxation, dt; Pf)
 
 compute_stress_viscosity_DRYEL!(
-    stokes, θc, γ_eff, rheology, phase_ratios, λ_relaxation, dt, viscosity_relaxation, args, viscosity_cutoff, linear_viscosity
+    stokes, θc, γ_eff, rheology, phase_ratios, λ_relaxation, dt, viscosity_relaxation, args, viscosity_cutoff, linear_viscosity;
+    η_xy = nothing, mask_xy = nothing,
 ) =
     compute_stress_viscosity_DRYEL!(
-    Val(ndims(stokes.P)), stokes, θc, γ_eff, rheology, phase_ratios, λ_relaxation, dt, viscosity_relaxation, args, viscosity_cutoff, linear_viscosity
+    Val(ndims(stokes.P)), stokes, θc, γ_eff, rheology, phase_ratios, λ_relaxation, dt, viscosity_relaxation, args, viscosity_cutoff, linear_viscosity;
+    η_xy = η_xy, mask_xy = mask_xy,
 )
+
+"""Sentinel: the xy shear keeps the harmonic mean of the surrounding cell viscosities."""
+struct HarmonicEdgeViscosity end
+
+@inline function η_on_xy(η, ::HarmonicEdgeViscosity, ::HarmonicEdgeViscosity, Ic, ::Integer, ::Integer, ::Integer)
+    return harm_clamped_xy(η, Ic...)
+end
+@inline function η_on_xy(η, η_xy, mask_xy, Ic, i, j, k)
+    @inbounds if mask_xy[i, j, k] > 0.5
+        return η_xy[i, j, k]
+    end
+    return harm_clamped_xy(η, Ic...)
+end
+
+@inline function _edge_viscosity_args(η_xy, mask_xy)
+    return something(η_xy, HarmonicEdgeViscosity()), something(mask_xy, HarmonicEdgeViscosity())
+end
 
 @inline dyrel_vertex_λ(stokes, ::Val{2}) = stokes.λv
 @inline dyrel_vertex_λ(stokes, ::Val{3}) = (stokes.λv_yz, stokes.λv_xz, stokes.λv_xy)
@@ -131,8 +150,10 @@ end
 # is purely local (same cell), so this is race-free and needs no halo.
 function compute_stress_viscosity_DRYEL!(
         ::Val{2},
-        stokes, θc, γ_eff, rheology, phase_ratios, λ_relaxation, dt, viscosity_relaxation, args, viscosity_cutoff, linear_viscosity
+        stokes, θc, γ_eff, rheology, phase_ratios, λ_relaxation, dt, viscosity_relaxation, args, viscosity_cutoff, linear_viscosity;
+        η_xy = nothing, mask_xy = nothing,
     )
+    η_xy === mask_xy || nothing
     ni = size(phase_ratios.vertex)
     @parallel (@idx ni) compute_stress_viscosity_DRYEL!(
         (stokes.τ.xx, stokes.τ.yy, stokes.τ.xy_c),          # centers
@@ -279,7 +300,10 @@ function compute_stress_DRYEL!(
         λ_relaxation,
         dt;
         Pf = nothing,
+        η_xy = nothing,
+        mask_xy = nothing,
     )
+    η_xy_k, mask_xy_k = _edge_viscosity_args(η_xy, mask_xy)
 
     ni = size(phase_ratios.vertex)
     @parallel (@idx ni) compute_stress_DRYEL!(
@@ -309,6 +333,8 @@ function compute_stress_DRYEL!(
         λ_relaxation,
         dt,
         periodic_dims(stokes),
+        η_xy_k,
+        mask_xy_k,
     )
     return nothing
 end
@@ -340,6 +366,8 @@ end
         λ_relaxation,
         dt,
         periodic,
+        η_xy,
+        mask_xy,
     )
 
     ni = size(P)
@@ -419,7 +447,7 @@ end
 
     ## xy
     if all(I .≤ size(εij[3]))
-        ηij = harm_clamped_xy(η, Ic...)
+        ηij = η_on_xy(η, η_xy, mask_xy, Ic, I...)
         Pij = av_clamped_xy(P, Ic...)
         Pfij = sample_Pf(Pf, av_clamped_xy, Pij, Ic...)
         EIIv_ij = av_clamped_xy(EII_pl, Ic...)
@@ -502,8 +530,11 @@ function compute_stress_viscosity_DRYEL!(
         viscosity_relaxation,
         args,
         viscosity_cutoff,
-        linear_viscosity,
+        linear_viscosity;
+        η_xy = nothing,
+        mask_xy = nothing,
     )
+    η_xy_k, mask_xy_k = _edge_viscosity_args(η_xy, mask_xy)
 
     ni = size(phase_ratios.vertex)
     @parallel (@idx ni) compute_stress_viscosity_DRYEL!(
@@ -540,6 +571,8 @@ function compute_stress_viscosity_DRYEL!(
         viscosity_cutoff,
         linear_viscosity,
         periodic_dims(stokes),
+        η_xy_k,
+        mask_xy_k,
     )
     return nothing
 end
@@ -578,6 +611,8 @@ end
         cutoff,
         linear_viscosity,
         periodic,
+        η_xy,
+        mask_xy,
     )
 
     ni = size(P)
@@ -654,7 +689,7 @@ end
 
     ## xy
     if all(I .≤ size(εij[3]))
-        ηij = harm_clamped_xy(η, Ic...)
+        ηij = η_on_xy(η, η_xy, mask_xy, Ic, I...)
         Pij = av_clamped_xy(P, Ic...)
         Pfij = sample_Pf(Pf, av_clamped_xy, Pij, Ic...)
         EIIv_ij = av_clamped_xy(EII_pl, Ic...)
