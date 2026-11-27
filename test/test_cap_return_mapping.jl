@@ -47,14 +47,16 @@ end
         for phase in (1, (1.0,), SVector(1.0))
             λ, _, _ = @inferred JRCap.plastic_correction(rheology, phase, τ, 1.0, 0.0, 0.5, 4.0, 0.1, 2.0, 0.2, true)
             @test iszero(λ)
-            x, ok = @inferred JRCap.cap_return_mapping(rheology, phase, 1.0, -0.8, 0.0, 0.5, 4.0, 0.1)
+            geometry = JRCap.cap_geometry(rheology, phase, 0.0)
+            x, ok = @inferred JRCap.cap_return_mapping(rheology, phase, geometry, 1.0, -0.8, 0.0, 0.5, 4.0, 0.1)
             @test ok
             @test x isa SVector{3, Float64}
         end
     end
     @testset "AD Jacobian and state forwarding" begin
         x = SVector(0.4, -0.3, 0.2)
-        f = y -> JRCap.cap_residual(y, rheology, 1, 0.0, SVector(1.0, -0.8), 0.5, 4.0, 0.1, 0.0)
+        geometry = JRCap.cap_geometry(rheology, 1, 0.0)
+        f = y -> JRCap.cap_residual(y, rheology, 1, geometry, 0.0, SVector(1.0, -0.8), 0.5, 4.0, 0.1, 0.0)
         J = @inferred ForwardDiff.jacobian(f, x)
         @test J isa SMatrix{3, 3, Float64, 9}
         h = 1.0e-6
@@ -66,8 +68,30 @@ end
         @test g[3] ≈ GeoParams.∂Q∂τII(pl, 1.0; P = -0.8)
         @test Qp ≈ GeoParams.∂Q∂P(pl, -0.8; τII = 1.0)
     end
+    @testset "Precomputed cap geometry matches GeoParams" begin
+        dilatant, _ = cap_material(; Ψ = 10.0)
+        softening = DruckerPragerCap(;
+            C = 1.0, ϕ = 30.0, Ψ = 10.0, η_vp = 0.1, pT = -0.5,
+            softening_ϕ = LinearSoftening(20.0, 30.0, 0.0, 1.0), softening_C = LinearSoftening(0.5, 1.0, 0.0, 1.0),
+        )
+        el = ConstantElasticity(; G = 1.0, Kb = 4.0)
+        softened = SetMaterialParams(;
+            Phase = 1, Elasticity = el,
+            CompositeRheology = CompositeRheology((LinearViscous(; η = 1.0), el, softening)),
+        )
+        for material in (rheology, (dilatant,), (softened,)), phase in (1, SVector(1.0)), EII in (0.0, 0.3)
+            geometry = JRCap.cap_geometry(material, phase, EII)
+            for τII in (0.0, 0.3, 2.0), P in (-0.6, 0.2, 3.0)
+                reference = y -> JRCap.cap_invariants(material, phase, y[1], y[2], EII, 0.1)
+                precomputed = y -> JRCap.cap_invariants(material, phase, geometry, y[1], y[2], EII, 0.1)
+                x = SVector(τII, P)
+                @test precomputed(x) == reference(x)
+                @test ForwardDiff.jacobian(precomputed, x) == ForwardDiff.jacobian(reference, x)
+            end
+        end
+    end
     @testset "Failure is not an admissible stress" begin
-        _, ok = JRCap.cap_return_mapping(rheology, 1, 1.0, -0.8, 0.0, 0.5, 4.0, 0.1; maxiter = 0)
+        _, ok = JRCap.cap_return_mapping(rheology, 1, JRCap.cap_geometry(rheology, 1, 0.0), 1.0, -0.8, 0.0, 0.5, 4.0, 0.1; maxiter = 0)
         @test !ok
         λ, _, _ = JRCap.plastic_correction(rheology, 1, (0.0, 0.0, 1.0), -0.8, 0.0, 0.5, Inf, 0.1, 0.0, 1.0, true)
         @test isnan(λ)
@@ -214,6 +238,31 @@ end
             xy = JustRelax.JustRelax3D._compute_local_stress((0.0, 0.0, 0.0, 0.0, 0.0, 1.0), old3, 1.0, P, 1.0, 4.0, 0.0, 1.0, material, 1.0, 0.0)
             for k in 13:17
                 @test yz[k] ≈ xy[k] atol = 1.0e-12
+            end
+        end
+    end
+end
+
+@testset "Drucker-Prager cone truncated at its apex" begin
+    material, _ = dp_material(; Ψ = 5.0)
+    for JR in (JustRelax.JustRelax2D, JustRelax.JustRelax3D)
+        N = JR === JustRelax.JustRelax2D ? 3 : 6
+        old = ntuple(_ -> 0.0, N)
+        for shear in (0.01, 0.5)
+            strain = ntuple(i -> i == N ? shear : 0.0, N)
+            # the apex sits at P = -C cot(ϕ) ≈ -1.73: both pressures are beyond it
+            outs = map((-3.0, -10.0)) do P
+                JR._compute_local_stress(strain, old, 1.0, P, 1.0, 4.0, 0.0, 1.0, material, 1.0, 0.0)
+            end
+            for out in outs
+                @test all(isfinite, out)
+                @test 0 ≤ out[N] ≤ shear     # the return does not reverse the shear stress
+                @test 0 ≤ out[2N + 1] ≤ shear
+                @test out[2N + 3] ≥ 0        # nor pull P further into tension
+            end
+            # beyond the apex the yield stress is zero, independent of pressure
+            for k in eachindex(outs...)
+                @test outs[1][k] ≈ outs[2][k]
             end
         end
     end

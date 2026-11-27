@@ -35,6 +35,9 @@ connectivity rule the weights encode.
 - `verbose`: Print iteration info. Default: `true`.
 - `b_width`: Halo width used to overlap communication with computation. Default: `(4, 4, 4)`.
 - `free_surface`: Include the density-gradient free-surface stabilization term. Default: `false`.
+- `surface_pressure`: Prescribed compressive pressure on the embedded rock–air interface;
+  `nothing` (default), a real scalar, or a cell-centered field shaped like `stokes.P`.
+  Extend fields smoothly through the interface stencil. Requires `flow_bcs.free_surface = false`.
 
 Options may be passed either as plain keywords or bundled as a single
 `kwargs = (; ...)` NamedTuple.
@@ -73,6 +76,7 @@ function _solve_VS!(
         viscosity_relaxation = 1.0e-2,
         viscosity_cutoff = (-Inf, Inf),
         free_surface = false,
+        surface_pressure = nothing,
         kwargs...,
     ) where {N}
 
@@ -88,9 +92,13 @@ function _solve_VS!(
     require_uniform_spacing(grid, "`solve_VariationalStokes!`")
     _di = _di isa NamedTuple ? _di.center : _di
     ni = size(stokes.P)
+    momentum_pressure = prepare_surface_pressure(stokes.P, surface_pressure, ϕ, flow_bcs)
     (; η, η_vep) = stokes.viscosity
 
     # errors
+    # the residual norms count each overlap entry on its owner only
+    weightRx, weightRy, weightRz = map(R -> owned_cells(R, (1, 1, 1)), @residuals(stokes.R))
+    weightRP = owned_cells(stokes.R.RP)
     err_it1 = 1.0
     err = Inf
     iter = 0
@@ -119,7 +127,7 @@ function _solve_VS!(
 
     # compute buoyancy forces and viscosity
     compute_ρg!(ρg, phase_ratios, rheology, args; air_phase)
-    compute_viscosity!(stokes, phase_ratios, args, rheology, viscosity_cutoff; air_phase = air_phase)
+    compute_viscosity!(stokes, phase_ratios, args, rheology, viscosity_cutoff; air_phase)
 
     # convert displacement to velocity
     displacement2velocity!(stokes, dt, flow_bcs)
@@ -148,7 +156,7 @@ function _solve_VS!(
             )
 
             @parallel (@idx ni .+ 1) compute_strain_rate!(
-                stokes.∇V, @strain(stokes)..., @velocity(stokes)..., ϕ, _di
+                stokes.∇V, @strain(stokes)..., @velocity(stokes)..., ϕ, _di, _di, _di, _di
             )
 
             # Update buoyancy
@@ -164,7 +172,6 @@ function _solve_VS!(
                 air_phase = air_phase,
                 relaxation = viscosity_relaxation,
             )
-            # update_stress!(stokes, θ, λ, phase_ratios, rheology, dt, pt_stokes.θ_dτ)
 
             # Fixed 256-thread blocks avoid heuristic rounding above the GPU kernel limit.
             @parallel (@idx ni .+ 1) cld.(ni .+ 1, (32, 8, 1)) (32, 8, 1) update_stresses_center_vertex!(
@@ -204,7 +211,7 @@ function _solve_VS!(
             @parallel (@idx ni .+ 1) nblocks_V nthreads_V compute_V!(
                 @velocity(stokes)...,
                 @residuals(stokes.R)...,
-                stokes.P,
+                momentum_pressure,
                 ρg...,
                 @stress(stokes)...,
                 ητ,
@@ -223,13 +230,13 @@ function _solve_VS!(
         iter += 1
         if iter % nout == 0 && iter > 1
             cont += 1
-            for (norm_Ri, Ri) in zip((norm_Rx, norm_Ry, norm_Rz), @residuals(stokes.R))
+            for (norm_Ri, Ri, weightRi) in zip((norm_Rx, norm_Ry, norm_Rz), @residuals(stokes.R), (weightRx, weightRy, weightRz))
                 push!(
                     norm_Ri,
-                    norm_mpi(Ri[2:(end - 1), 2:(end - 1), 2:(end - 1)]) / √((nx_g() - 1) * (ny_g() - 1) * (nz_g() - 1)),
+                    masked_norm_mpi(weightRi, Ri) / √((nx_g() - 1) * (ny_g() - 1) * (nz_g() - 1)),
                 )
             end
-            push!(norm_∇V, norm_mpi(stokes.R.RP) / length(stokes.R.RP))
+            push!(norm_∇V, masked_norm_mpi(weightRP, stokes.R.RP) / (nx_g() * ny_g() * nz_g()))
             err = max(norm_Rx[cont], norm_Ry[cont], norm_Rz[cont], norm_∇V[cont])
             push!(err_evo1, err)
             push!(err_evo2, iter)
@@ -260,8 +267,10 @@ function _solve_VS!(
 
     # compute vorticity
     @parallel (@idx ni .+ 1) compute_vorticity!(
-        stokes.ω.yz, stokes.ω.xz, stokes.ω.xy, @velocity(stokes)..., _di
+        stokes.ω.yz, stokes.ω.xz, stokes.ω.xy, @velocity(stokes)..., grid._di.velocity...
     )
+
+    update_shear_halo!(stokes.ε, stokes.ε_pl, stokes.Δε)
 
     # Interpolate shear components to cell center arrays
     shear2center!(stokes.ε)

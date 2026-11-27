@@ -30,7 +30,7 @@ else
 end
 
 # Load script dependencies
-using GeoParams, CairoMakie
+using GeoParams, GLMakie
 
 
 # Load file with all the rheology configurations
@@ -175,6 +175,7 @@ function main(li, origin, phases_GMG, igg; nx = 16, ny = 16, figdir = "figs2D", 
                 dt,
                 igg;
                 kwargs = (;
+                    anderson_PH = 3,
                     verbose_PH = false,
                     verbose_DR = false,
                     iterMax = 50.0e3,

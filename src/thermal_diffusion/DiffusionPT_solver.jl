@@ -54,6 +54,8 @@ function _heatdiffusion_PT!(
     ϵ = pt_thermal.ϵ
     ni = size(thermal.H)
     _sq_len_RT = inv(sqrt(prod(global_grid_size(Val(length(ni))))))
+    # the residual norm counts each overlap cell on its owner only
+    weightT = owned_cells(thermal.ResT)
     @copy thermal.Told thermal.T
 
     # errors
@@ -68,8 +70,8 @@ function _heatdiffusion_PT!(
     err = 2 * ϵ
 
     if isnothing(igg) || igg.me == 0
-        println("\n====================================\n")
-        println("Starting thermal diffusion solver...\n")
+        verbose && println("\n====================================\n")
+        verbose && println("Starting thermal diffusion solver...\n")
     end
 
     while err > ϵ && iter < iterMax
@@ -81,7 +83,7 @@ function _heatdiffusion_PT!(
                     thermal.T,
                     K,
                     pt_thermal.θr_dτ,
-                    _di.center,
+                    _di,
                     thermal_bc.constant_flux,
                 )
             else
@@ -91,7 +93,7 @@ function _heatdiffusion_PT!(
                     thermal.T,
                     K,
                     pt_thermal.θr_dτ,
-                    _di.center,
+                    _di,
                     thermal_bc.constant_flux,
                 )
             end
@@ -107,7 +109,8 @@ function _heatdiffusion_PT!(
                 ni,
             )
             thermal_bcs!(thermal, thermal_bc)
-            update_halo!(thermal.T)
+            # the flux kernel treats each rank edge as a domain boundary
+            update_overlap_halo!(thermal.T)
         end
 
         iter += 1
@@ -128,7 +131,7 @@ function _heatdiffusion_PT!(
                 )
             end
 
-            err = norm_mpi(thermal.ResT) * _sq_len_RT
+            err = masked_norm_mpi(weightT, thermal.ResT) * _sq_len_RT
 
             push!(norm_ResT, err)
             push!(iter_count, iter)
@@ -143,8 +146,8 @@ function _heatdiffusion_PT!(
         if !(err ≤ ϵ)
             @warn "heatdiffusion_PT! did not converge: err = $err > ϵ = $ϵ after $iter iterations"
         end
-        println("\n ...solver finished in $(round(wtime0, sigdigits = 5)) seconds \n")
-        println("====================================\n")
+        verbose && println("\n ...solver finished in $(round(wtime0, sigdigits = 5)) seconds \n")
+        verbose && println("====================================\n")
     end
 
     @parallel update_ΔT!(thermal.ΔT, thermal.T, thermal.Told)
@@ -207,6 +210,8 @@ function _heatdiffusion_PT!(
     ϵ = pt_thermal.ϵ
     ni = size(thermal.H)
     _sq_len_RT = inv(sqrt(prod(global_grid_size(Val(length(ni))))))
+    # the residual norm counts each overlap cell on its owner only
+    weightT = owned_cells(thermal.ResT)
     @copy thermal.Told thermal.T
 
     phases = get_phase(phase)
@@ -228,8 +233,8 @@ function _heatdiffusion_PT!(
     err = 2 * ϵ
 
     if isnothing(igg) || igg.me == 0
-        println("\n====================================\n")
-        println("Starting thermal diffusion solver...\n")
+        verbose && println("\n====================================\n")
+        verbose && println("Starting thermal diffusion solver...\n")
     end
 
     while err > ϵ && iter < iterMax
@@ -244,7 +249,7 @@ function _heatdiffusion_PT!(
                 rheology,
                 phase_flux...,
                 pt_thermal.θr_dτ,
-                grid._di.center,
+                grid._di,
                 args,
                 thermal_bc.constant_flux,
             )
@@ -262,7 +267,8 @@ function _heatdiffusion_PT!(
                 args,
             )
             thermal_bcs!(thermal, thermal_bc)
-            update_halo!(thermal.T)
+            # the flux kernel treats each rank edge as a domain boundary
+            update_overlap_halo!(thermal.T)
 
 
         end
@@ -288,7 +294,7 @@ function _heatdiffusion_PT!(
                 )
             end
 
-            err = norm_mpi(thermal.ResT) * _sq_len_RT
+            err = masked_norm_mpi(weightT, thermal.ResT) * _sq_len_RT
 
             push!(norm_ResT, err)
             push!(iter_count, iter)
@@ -303,8 +309,8 @@ function _heatdiffusion_PT!(
         if !(err ≤ ϵ)
             @warn "heatdiffusion_PT! did not converge: err = $err > ϵ = $ϵ after $iter iterations"
         end
-        println("\n ...solver finished in $(round(wtime0, sigdigits = 5)) seconds \n")
-        println("====================================\n")
+        verbose && println("\n ...solver finished in $(round(wtime0, sigdigits = 5)) seconds \n")
+        verbose && println("====================================\n")
     end
 
     @parallel update_ΔT!(thermal.ΔT, thermal.T, thermal.Told)

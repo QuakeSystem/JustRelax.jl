@@ -203,11 +203,14 @@ end
         )
         @test all(A -> all(isfinite, Array(A)), (stokes.R.Rx, stokes.R.Ry, stokes.R.Rz))
 
+        faces = (left = true, right = true, front = true, back = true, top = true, bot = true)
+        no_dirichlet = VelocityBoundaryConditions(; free_slip = faces, no_slip = map(!, faces)).dirichlet
+
         @parallel (@idx local_ni) JR3K.compute_PH_residual_V!(
             stokes.R.Rx, stokes.R.Ry, stokes.R.Rz,
             stokes.V.Vx, stokes.V.Vy, stokes.V.Vz,
             stokes.P, stokes.ΔPψ, @stress(stokes)..., ρg...,
-            grid._di.center, grid._di.vertex, 0.0,
+            grid._di.center, grid._di.vertex, 0.0, no_dirichlet,
         )
         @test all(A -> all(isfinite, Array(A)), (stokes.R.Rx, stokes.R.Ry, stokes.R.Rz))
 
@@ -240,7 +243,7 @@ end
             dyrel.αVx, dyrel.αVy, dyrel.αVz,
             dyrel.βVx, dyrel.βVy, dyrel.βVz,
             dyrel.dτVx, dyrel.dτVy, dyrel.dτVz,
-            grid._di.center, grid._di.vertex, 0.0,
+            grid._di.center, grid._di.vertex, 0.0, no_dirichlet,
         )
         @test all(A -> all(Array(A) .≈ -1.0), residuals)
         @test all(A -> all(Array(A) .≈ -1.0), dVdτ)
@@ -263,7 +266,7 @@ end
             stokes.R.Rx, stokes.R.Ry, stokes.R.Rz,
             stokes.V.Vx, stokes.V.Vy, stokes.V.Vz,
             stokes.P, stokes.ΔPψ, @stress(stokes)..., ρg...,
-            grid._di.center, grid._di.vertex, 0.5,
+            grid._di.center, grid._di.vertex, 0.5, no_dirichlet,
         )
         expected_correction = 2.0 * grid._di.center[3] * 0.5
         @test Array(stokes.R.Rx) ≈ Array(PH_unstabilized[1])
@@ -281,7 +284,7 @@ end
             dyrel.αVx, dyrel.αVy, dyrel.αVz,
             dyrel.βVx, dyrel.βVy, dyrel.βVz,
             dyrel.dτVx, dyrel.dτVy, dyrel.dτVz,
-            grid._di.center, grid._di.vertex, 0.0,
+            grid._di.center, grid._di.vertex, 0.0, no_dirichlet,
         )
         DR_unstabilized = map(copy, residuals)
         @parallel (@idx local_ni) JR3K.compute_DR_residual_update_V!(
@@ -293,7 +296,7 @@ end
             dyrel.αVx, dyrel.αVy, dyrel.αVz,
             dyrel.βVx, dyrel.βVy, dyrel.βVz,
             dyrel.dτVx, dyrel.dτVy, dyrel.dτVz,
-            grid._di.center, grid._di.vertex, 0.5,
+            grid._di.center, grid._di.vertex, 0.5, no_dirichlet,
         )
         @test Array(stokes.R.Rx) ≈ Array(DR_unstabilized[1])
         @test Array(stokes.R.Ry) ≈ Array(DR_unstabilized[2])
@@ -431,7 +434,7 @@ end
         @test iszero(out[17])
     end
 
-    @testset "Gershgorin shear staggering" begin
+    @testset "Gershgorin shear staggering G=$G" for G in (Inf, 0.2, 5.0)
         η_host = [10.0^mod(i + 2j + 3k, 4) for i in 1:ni[1], j in 1:ni[2], k in 1:ni[3]]
         γ_host = [isodd(i + j + k) ? 0.01 : 1000.0 for i in 1:ni[1], j in 1:ni[2], k in 1:ni[3]]
         copyto!(stokes.viscosity.η, η_host)
@@ -442,6 +445,7 @@ end
             SetMaterialParams(;
                 Phase = 1,
                 CompositeRheology = CompositeRheology((LinearViscous(; η = 1.0),)),
+                Elasticity = ConstantElasticity(; G, Kb = Inf),
             ),
         )
         JR3K.Gershgorin_Stokes3D_SchurComplement!(
@@ -518,6 +522,8 @@ end
                 stokes.P .= 0.0
                 stokes.P0 .= 0.0
                 stokes.Q .= 0.0
+                # Stress memory is an affine forcing, not part of the velocity operator.
+                foreach(A -> fill!(A, 0.0), (@tensor_center(stokes.τ_o)..., stokes.τ_o.yz, stokes.τ_o.xz, stokes.τ_o.xy))
                 θc = dyrel.P_num
                 ρg = ntuple(_ -> zeros(ni), 3)
                 linear_args = (; T = zeros(ni .+ 2), P = stokes.P, dt = dt)

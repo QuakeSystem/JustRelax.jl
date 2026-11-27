@@ -438,6 +438,10 @@ distinct from `EII_pl` (which integrates the second invariant of the deviatoric 
 strain rate via [`accumulate_tensor!`](@ref)).
 """
 function accumulate_vol!(EVol_pl::AbstractArray, ε_vol_pl::AbstractArray, dt)
+    return accumulate_vol!(backend(EVol_pl), EVol_pl, ε_vol_pl, dt)
+end
+
+function accumulate_vol!(::CPUBackendTrait, EVol_pl, ε_vol_pl, dt)
     _accumulate_vol!(EVol_pl, ε_vol_pl, dt)
     return nothing
 end
@@ -512,114 +516,6 @@ end
     return nothing
 end
 
-####
-
-function update_stress!(stokes, θ, λ, phase_ratios, rheology, dt, θ_dτ, args)
-    return update_stress!(
-        islinear(rheology), stokes, θ, λ, phase_ratios, rheology, dt, θ_dτ, args
-    )
-end
-
-function update_stress!(
-        ::LinearRheologyTrait, stokes, ::Any, ::Any, phase_ratios, rheology, dt, θ_dτ, args
-    )
-    dim(::AbstractArray{T, N}) where {T, N} = Val(N)
-
-    function f!(stokes, ::Val{2})
-        center2vertex!(stokes.τ.xy, stokes.τ.xy_c)
-        update_halo!(stokes.τ.xy)
-        return nothing
-    end
-
-    function f!(stokes, ::Val{3})
-        center2vertex!(
-            stokes.τ.yz,
-            stokes.τ.xz,
-            stokes.τ.xy,
-            stokes.τ.yz_c,
-            stokes.τ.xz_c,
-            stokes.τ.xy_c,
-        )
-        update_halo!(stokes.τ.yz, stokes.τ.xz, stokes.τ.xy)
-        return nothing
-    end
-
-    ni = size(phase_ratios.center)
-    nDim = dim(stokes.viscosity.η)
-
-    @parallel (@idx ni) compute_τ!(
-        @tensor_center(stokes.τ)...,
-        @tensor_center(stokes.τ_o)...,
-        @strain(stokes)...,
-        stokes.viscosity.η,
-        θ_dτ,
-        dt,
-        phase_ratios.center,
-        tupleize(rheology), # needs to be a tuple
-    )
-
-    f!(stokes, nDim)
-
-    return nothing
-end
-
-function update_stress!(
-        ::NonLinearRheologyTrait,
-        stokes,
-        θ,
-        λ::AbstractArray{T, N},
-        phase_ratios,
-        rheology,
-        dt,
-        θ_dτ,
-        args,
-    ) where {N, T}
-    ni = size(phase_ratios.center)
-    nDim = Val(N)
-
-    function f!(stokes, ::Val{2})
-        center2vertex!(stokes.τ.xy, stokes.τ.xy_c)
-        update_halo!(stokes.τ.xy)
-        return nothing
-    end
-
-    function f!(stokes, ::Val{3})
-        center2vertex!(
-            stokes.τ.yz,
-            stokes.τ.xz,
-            stokes.τ.xy,
-            stokes.τ.yz_c,
-            stokes.τ.xz_c,
-            stokes.τ.xy_c,
-        )
-        update_halo!(stokes.τ.yz, stokes.τ.xz, stokes.τ.xy)
-        return nothing
-    end
-
-    @parallel (@idx ni) compute_τ_nonlinear!(
-        @tensor_center(stokes.τ),
-        stokes.τ.II,
-        @tensor_center(stokes.τ_o),
-        @strain(stokes),
-        @plastic_strain(stokes.ε_pl),
-        stokes.EII_pl,
-        stokes.P,
-        fluid_pressure(args, stokes.P),
-        θ,
-        stokes.viscosity.η,
-        stokes.viscosity.η_vep,
-        λ,
-        phase_ratios.center,
-        tupleize(rheology), # needs to be a tuple
-        dt,
-        θ_dτ,
-    )
-
-    f!(stokes, nDim)
-
-    return nothing
-end
-
 #####
 
 """
@@ -681,6 +577,20 @@ end
 
 Base.@propagate_inbounds @inline function harm_clamped_xy(A, i0, j0, k0, ic, jc, kc, ::Vararg{Integer, N}) where {N}
     return 4 / (1 / A[i0, j0, kc] + 1 / A[ic, j0, kc] + 1 / A[i0, jc, kc] + 1 / A[ic, jc, kc])
+end
+
+# The same harmonic means from stored reciprocals `A_inv = 1 ./ A`: one division instead of five,
+# and bitwise equal to the above because the reciprocals and the summation order are the same.
+Base.@propagate_inbounds @inline function harm_inv_clamped_yz(A_inv, i0, j0, k0, ic, jc, kc, ::Vararg{Integer, N}) where {N}
+    return 4 / (A_inv[ic, j0, k0] + A_inv[ic, jc, k0] + A_inv[ic, j0, kc] + A_inv[ic, jc, kc])
+end
+
+Base.@propagate_inbounds @inline function harm_inv_clamped_xz(A_inv, i0, j0, k0, ic, jc, kc, ::Vararg{Integer, N}) where {N}
+    return 4 / (A_inv[i0, jc, k0] + A_inv[ic, jc, k0] + A_inv[i0, jc, kc] + A_inv[ic, jc, kc])
+end
+
+Base.@propagate_inbounds @inline function harm_inv_clamped_xy(A_inv, i0, j0, k0, ic, jc, kc, ::Vararg{Integer, N}) where {N}
+    return 4 / (A_inv[i0, j0, kc] + A_inv[ic, j0, kc] + A_inv[i0, jc, kc] + A_inv[ic, jc, kc])
 end
 
 # Averages of one shear component onto the edge of another. Along the directions in which
@@ -1263,7 +1173,8 @@ end
 
         τII_ij = @inbounds if !iszero(λ[I...])
             εij_pl = λ[I...] .* dQdτij
-            dτij = @muladd @. dτij - 2.0 * ηij * dt * εij_pl * dτ_r
+            c_pl = 2.0 * ηij * dt * dτ_r
+            dτij = @muladd @. dτij - c_pl * εij_pl
             τij = dτij .+ τij
 
             # volumetric plastic strain rate (accumulated by accumulate_vol!)
@@ -1316,4 +1227,9 @@ end
 
 Base.@propagate_inbounds @inline function harm_clamped(A, i0, j0, ic, jc)
     return 4 / (1 / A[i0, j0] + 1 / A[ic, jc] + 1 / A[i0, jc] + 1 / A[ic, j0])
+end
+
+# `harm_clamped` from stored reciprocals `A_inv = 1 ./ A` (see `harm_inv_clamped_yz`)
+Base.@propagate_inbounds @inline function harm_inv_clamped(A_inv, i0, j0, ic, jc)
+    return 4 / (A_inv[i0, j0] + A_inv[ic, jc] + A_inv[i0, jc] + A_inv[ic, j0])
 end

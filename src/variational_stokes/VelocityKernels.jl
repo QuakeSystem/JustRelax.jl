@@ -112,9 +112,14 @@ rock fraction is applied once, in the stress divergence.
 end
 
 """
-    compute_strain_rate!(εxx, εyy, εzz, εyz, εxz, εxy, ∇V, Vx, Vy, Vz, ϕ, _dx, _dy, _dz)
+    compute_strain_rate!(∇V, εxx, εyy, εzz, εyz, εxz, εxy, Vx, Vy, Vz, ϕ, _di_vertex, _di_vx, _di_vy, _di_vz)
 
-Compute the 3D components of the strain rate tensor `ε` from the velocity field `V` and its divergence `∇V`, taking into account the rock ratio `ϕ` and grid spacing `_dx`, `_dy`, `_dz`.
+Compute the 3D components of the strain rate tensor `ε` from the velocity field `V` and its divergence `∇V`, taking into account the rock ratio `ϕ`.
+
+The normal components take the inverse cell widths `_di_vertex`; each shear component
+takes the inverse spacing of the velocity component it differentiates (`_di_vx`,
+`_di_vy`, `_di_vz`, as in `grid._di.velocity`). Each may be a uniform scalar or a
+per-index vector.
 """
 @parallel_indices (i, j, k) function compute_strain_rate!(
         ∇V::AbstractArray{T, 3},
@@ -128,49 +133,64 @@ Compute the 3D components of the strain rate tensor `ε` from the velocity field
         Vy,
         Vz,
         ϕ::JustRelax.RockRatio,
-        _di,
+        _di_vertex,
+        _di_vx,
+        _di_vy,
+        _di_vz,
     ) where {T}
-    _dx, _dy, _dz = @dxi(_di, i, j, k)
-    Base.@propagate_inbounds @inline d_xi(A) = _d_xi(A, _dx, i, j, k)
-    Base.@propagate_inbounds @inline d_yi(A) = _d_yi(A, _dy, i, j, k)
-    Base.@propagate_inbounds @inline d_zi(A) = _d_zi(A, _dz, i, j, k)
-
     @inbounds begin
         # normal components are all located @ cell centers
         if all((i, j, k) .≤ size(εxx))
             if isvalid_c(ϕ, i, j, k)
+                _dx, _dy, _dz = @dxi(_di_vertex, i, j, k)
                 ∇Vijk = ∇V[i, j, k] * inv(3)
                 # Compute ε_xx
-                εxx[i, j, k] = d_xi(Vx) - ∇Vijk
+                εxx[i, j, k] = _d_xi(Vx, _dx, i, j, k) - ∇Vijk
                 # Compute ε_yy
-                εyy[i, j, k] = d_yi(Vy) - ∇Vijk
+                εyy[i, j, k] = _d_yi(Vy, _dy, i, j, k) - ∇Vijk
                 # Compute ε_zz
-                εzz[i, j, k] = d_zi(Vz) - ∇Vijk
+                εzz[i, j, k] = _d_zi(Vz, _dz, i, j, k) - ∇Vijk
+            else
+                εxx[i, j, k] = zero(T)
+                εyy[i, j, k] = zero(T)
+                εzz[i, j, k] = zero(T)
             end
         end
         # Compute ε_yz
-        if all((i, j, k) .≤ size(εyz)) && isvalid_yz(ϕ, i, j, k)
-            εyz[i, j, k] =
-                0.5 * (
-                _dz * (Vy[i + 1, j, k + 1] - Vy[i + 1, j, k]) +
-                    _dy * (Vz[i + 1, j + 1, k] - Vz[i + 1, j, k])
-            )
+        if all((i, j, k) .≤ size(εyz))
+            if isvalid_yz(ϕ, i, j, k)
+                εyz[i, j, k] =
+                    0.5 * (
+                    @dz(_di_vy, k) * (Vy[i + 1, j, k + 1] - Vy[i + 1, j, k]) +
+                        @dy(_di_vz, j) * (Vz[i + 1, j + 1, k] - Vz[i + 1, j, k])
+                )
+            else
+                εyz[i, j, k] = zero(T)
+            end
         end
         # Compute ε_xz
-        if all((i, j, k) .≤ size(εxz)) && isvalid_xz(ϕ, i, j, k)
-            εxz[i, j, k] =
-                0.5 * (
-                _dz * (Vx[i, j + 1, k + 1] - Vx[i, j + 1, k]) +
-                    _dx * (Vz[i + 1, j + 1, k] - Vz[i, j + 1, k])
-            )
+        if all((i, j, k) .≤ size(εxz))
+            if isvalid_xz(ϕ, i, j, k)
+                εxz[i, j, k] =
+                    0.5 * (
+                    @dz(_di_vx, k) * (Vx[i, j + 1, k + 1] - Vx[i, j + 1, k]) +
+                        @dx(_di_vz, i) * (Vz[i + 1, j + 1, k] - Vz[i, j + 1, k])
+                )
+            else
+                εxz[i, j, k] = zero(T)
+            end
         end
         # Compute ε_xy
-        if all((i, j, k) .≤ size(εxy)) && isvalid_xy(ϕ, i, j, k)
-            εxy[i, j, k] =
-                0.5 * (
-                _dy * (Vx[i, j + 1, k + 1] - Vx[i, j, k + 1]) +
-                    _dx * (Vy[i + 1, j, k + 1] - Vy[i, j, k + 1])
-            )
+        if all((i, j, k) .≤ size(εxy))
+            if isvalid_xy(ϕ, i, j, k)
+                εxy[i, j, k] =
+                    0.5 * (
+                    @dy(_di_vx, j) * (Vx[i, j + 1, k + 1] - Vx[i, j, k + 1]) +
+                        @dx(_di_vy, i) * (Vy[i + 1, j, k + 1] - Vy[i, j, k + 1])
+                )
+            else
+                εxy[i, j, k] = zero(T)
+            end
         end
     end
     return nothing
@@ -215,7 +235,7 @@ diagonal; inactive faces receive zero velocity and zero residual.
         if isvalid_vx(ϕ, i + 1, j)
             Rx[i, j] =
                 R_Vx = (
-                -d_xa(P, ϕ.center) + d_xa(τxx, ϕ.center) + d_yi(τxy, ϕ.vertex) -
+                -variational_pressure_gradient(P, ϕ, Val(1), _dx_c, i, j) + d_xa(τxx, ϕ.center) + d_yi(τxy, ϕ.vertex) -
                     av_xa(ρgx, ϕ.center)
             )
             Vx[i + 1, j + 1] += R_Vx * ηdτ / (variational_face_mass(ϕ.Vx[i + 1, j]) * av_xa(ητ))
@@ -233,7 +253,7 @@ diagonal; inactive faces receive zero velocity and zero residual.
         if isvalid_vy(ϕ, i, j + 1)
             Ry[i, j] =
                 R_Vy =
-                -d_ya(P, ϕ.center) + d_ya(τyy, ϕ.center) + d_xi(τxy, ϕ.vertex) -
+                -variational_pressure_gradient(P, ϕ, Val(2), _dy_c, i, j) + d_ya(τyy, ϕ.center) + d_xi(τxy, ϕ.vertex) -
                 av_ya(ρgy, ϕ.center)
             Vy[i + 1, j + 1] += R_Vy * ηdτ / (variational_face_mass(ϕ.Vy[i, j + 1]) * av_ya(ητ))
         else
@@ -276,7 +296,7 @@ Compute the x-component of the velocity field `Vx` from the pressure `P`, stress
         if isvalid_vx(ϕ, i + 1, j)
             Rx[i, j] =
                 R_Vx = (
-                -d_xa(P, ϕ.center) + d_xa(τxx, ϕ.center) + d_yi(τxy, ϕ.vertex) -
+                -variational_pressure_gradient(P, ϕ, Val(1), _dx_c, i, j) + d_xa(τxx, ϕ.center) + d_yi(τxy, ϕ.vertex) -
                     av_xa(ρgx, ϕ.center)
             )
             Vx[i + 1, j + 1] += R_Vx * ηdτ / (variational_face_mass(ϕ.Vx[i + 1, j]) * av_xa(ητ))
@@ -337,7 +357,7 @@ Compute the y-component of the velocity field `Vy` from the pressure `P`, stress
                 # timesteps because the correction is evaluated at the old
                 # face velocity but is scaled by the physical dt.
                 R_Vy =
-                    -d_ya(P, ϕ.center) + d_ya(τyy, ϕ.center) + d_xi(τxy, ϕ.vertex) -
+                    -variational_pressure_gradient(P, ϕ, Val(2), _dy_c, i, j) + d_ya(τyy, ϕ.center) + d_xi(τxy, ϕ.vertex) -
                     av_ya(ρgy, ϕ.center)
                 face_mass = variational_face_mass(ϕ.Vy[i, j + 1])
                 face_viscosity = av_ya(ητ)
@@ -391,7 +411,7 @@ Compute the velocity field `V` with the timestep dt from the pressure `P`, stres
         @inbounds if isvalid_vx(ϕ, i + 1, j)
             Rx[i, j] =
                 R_Vx = @inbounds (
-                -d_xa(P, ϕ.center) + d_xa(τxx, ϕ.center) + d_yi(τxy, ϕ.vertex) -
+                -variational_pressure_gradient(P, ϕ, Val(1), _dx_c, i, j) + d_xa(τxx, ϕ.center) + d_yi(τxy, ϕ.vertex) -
                     av_xa(ρgx, ϕ.center)
             )
             Vx[i + 1, j + 1] += R_Vx * ηdτ / (variational_face_mass(ϕ.Vx[i + 1, j]) * av_xa(ητ))
@@ -419,7 +439,7 @@ Compute the velocity field `V` with the timestep dt from the pressure `P`, stres
             # Treat the density-gradient correction implicitly; see the
             # corresponding explanation in the first 2D overload above.
             R_Vy =
-                @inbounds -d_ya(P, ϕ.center) + d_ya(τyy, ϕ.center) + d_xi(τxy, ϕ.vertex) -
+                @inbounds -variational_pressure_gradient(P, ϕ, Val(2), _dy_c, i, j) + d_ya(τyy, ϕ.center) + d_xi(τxy, ϕ.vertex) -
                 av_ya(ρgy, ϕ.center)
             face_mass = variational_face_mass(ϕ.Vy[i, j + 1])
             face_viscosity = av_ya(ητ)
@@ -484,7 +504,7 @@ Compute the 3D velocity field `V` from the pressure `P`, stress components `τ`,
                     d_xa(τxx, ϕ.center) +
                     _dy * (m(τxy, ϕ.xy, i + 1, j + 1, k) - m(τxy, ϕ.xy, i + 1, j, k)) +
                     _dz * (m(τxz, ϕ.xz, i + 1, j, k + 1) - m(τxz, ϕ.xz, i + 1, j, k)) -
-                    d_xa(P, ϕ.center) - av_x(fx, ϕ.center)
+                    variational_pressure_gradient(P, ϕ, Val(1), _dx, i, j, k) - av_x(fx, ϕ.center)
                 Vx[i + 1, j + 1, k + 1] +=
                     Rx_ijk * ηdτ / (variational_face_mass(ϕ.Vx[i + 1, j, k]) * av_x(ητ))
             else
@@ -499,7 +519,7 @@ Compute the 3D velocity field `V` from the pressure `P`, stress components `τ`,
                     _dx * (m(τxy, ϕ.xy, i + 1, j + 1, k) - m(τxy, ϕ.xy, i, j + 1, k)) +
                     d_ya(τyy, ϕ.center) +
                     _dz * (m(τyz, ϕ.yz, i, j + 1, k + 1) - m(τyz, ϕ.yz, i, j + 1, k)) -
-                    d_ya(P, ϕ.center) - av_y(fy, ϕ.center)
+                    variational_pressure_gradient(P, ϕ, Val(2), _dy, i, j, k) - av_y(fy, ϕ.center)
                 Vy[i + 1, j + 1, k + 1] +=
                     Ry_ijk * ηdτ / (variational_face_mass(ϕ.Vy[i, j + 1, k]) * av_y(ητ))
             else
@@ -512,7 +532,7 @@ Compute the 3D velocity field `V` from the pressure `P`, stress components `τ`,
                 R_Vz =
                     _dx * (m(τxz, ϕ.xz, i + 1, j, k + 1) - m(τxz, ϕ.xz, i, j, k + 1)) +
                     _dy * (m(τyz, ϕ.yz, i, j + 1, k + 1) - m(τyz, ϕ.yz, i, j, k + 1)) +
-                    d_za(τzz, ϕ.center) - d_za(P, ϕ.center) - av_z(fz, ϕ.center)
+                    d_za(τzz, ϕ.center) - variational_pressure_gradient(P, ϕ, Val(3), _dz, i, j, k) - av_z(fz, ϕ.center)
                 # Free-surface stabilization: the buoyancy change over one time step of vertical
                 # motion, taken implicitly (see the 2D kernel); `dt = 0` switches it off.
                 Vzᵢⱼₖ = Vz[i + 1, j + 1, k + 1]

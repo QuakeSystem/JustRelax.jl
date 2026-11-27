@@ -32,13 +32,14 @@ module JustRelax2D
         AbstractFlowBoundaryConditions,
         DisplacementBoundaryConditions,
         VelocityBoundaryConditions,
-        AbstractDirichletBoundaryCondition,
         apply_dirichlet,
         apply_dirichlet!,
         isdirichlet,
         periodic_dims,
         flow_bcs_of,
         check_periodic_bcs,
+        check_velocity_dirichlet,
+        velocity_dirichlet,
         reject_periodic_bcs
 
     import JustRelax: normal_stress, shear_stress, shear_vorticity, grid_stress
@@ -100,13 +101,14 @@ module JustRelax3D
         AbstractFlowBoundaryConditions,
         DisplacementBoundaryConditions,
         VelocityBoundaryConditions,
-        AbstractDirichletBoundaryCondition,
         apply_dirichlet,
         apply_dirichlet!,
         isdirichlet,
         periodic_dims,
         flow_bcs_of,
         check_periodic_bcs,
+        check_velocity_dirichlet,
+        velocity_dirichlet,
         reject_periodic_bcs
 
     import JustRelax: normal_stress, shear_stress, shear_vorticity, grid_stress
@@ -121,11 +123,13 @@ module JustRelax3D
     __init__() = @init_parallel_stencil(Threads, Float64, 3)
 
     include("common.jl")
+    include("DYREL/variational3D.jl")
     include("stokes/Stokes3D.jl")
     export solve!
 
     include("DYREL/solver.jl")
-    export solve_DYREL!, DYREL
+    include("DYREL/solver_VS.jl")
+    export solve_DYREL!, solve_VariationalDYREL!, DYREL
 
     include("variational_stokes/Stokes3D.jl")
     export solve_VariationalStokes!

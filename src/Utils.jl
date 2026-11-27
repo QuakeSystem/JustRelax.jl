@@ -274,6 +274,16 @@ end
     return A.yz, A.xz, A.xy
 end
 
+@inline shear_components(A::JustRelax.SymmetricTensor{<:AbstractArray{T, 2}}) where {T} = (A.xy,)
+@inline shear_components(A::JustRelax.SymmetricTensor{<:AbstractArray{T, 3}}) where {T} = (A.yz, A.xz, A.xy)
+
+# The staggered shear components on the outermost vertices (2D) or edges (3D) of a rank are
+# one-sided until exchanged; `shear2center!` reads them for the cells next to the rank boundary.
+function update_shear_halo!(A::Vararg{JustRelax.SymmetricTensor, N}) where {N}
+    update_halo!(mapreduce(shear_components, (a, b) -> (a..., b...), A)...)
+    return nothing
+end
+
 """
     @shear_center(A)
 
@@ -516,11 +526,13 @@ end
 @inline _compute_dt(S::JustRelax.StokesArrays, di, dt_diff) =
     _compute_dt(@velocity(S), di, dt_diff, maximum)
 
+# The spacing `di` may differ between ranks (e.g. on a refined grid), so the time step is
+# reduced across ranks as well.
 @inline _compute_dt(S::JustRelax.StokesArrays, di, dt_diff, ::IGG) =
-    _compute_dt(@velocity(S), di, dt_diff, maximum_mpi)
+    minimum_mpi(_compute_dt(@velocity(S), di, dt_diff, maximum_mpi))
 
 @inline _compute_dt(S::JustRelax.StokesArrays, di, ::IGG) =
-    _compute_dt(@velocity(S), di, Inf, maximum_mpi)
+    minimum_mpi(_compute_dt(@velocity(S), di, Inf, maximum_mpi))
 
 @inline function _compute_dt(V::NTuple, di, dt_diff, max_fun::F) where {F <: Function}
     # n = inv(length(V) + 0.1)
@@ -712,6 +724,87 @@ processes.
 """
 norm_mpi(A) = sqrt(sum_mpi(abs2, A))
 norm_mpi(A, B) = sqrt(sum_mpi((a, b) -> abs2(a * b), A, B))
+
+"""
+    dot_mpi(A, B, weight)
+
+Compute the dot product of arrays `A` and `B` over the cells where `weight` is `true`, across
+all MPI processes. With `weight = owned_cells(A)` every cell of the global grid counts once.
+"""
+dot_mpi(A, B, weight) = sum_mpi((a, b, w) -> w * a * b, A, B, weight)
+
+"""
+    owned_cells(A)
+
+Boolean array shaped like `A` that is `true` on the cells of `A` this rank owns. Neighboring
+ranks share the overlap layers of a field of the global grid; each shared layer is owned by
+exactly one of them, so a reduction weighted by `owned_cells(A)` counts every global cell once.
+Without an initialized global grid every cell is owned.
+"""
+function owned_cells(A::AbstractArray{<:Any, N}) where {N}
+    owned = similar(A, Bool)
+    fill!(owned, true)
+    ImplicitGlobalGrid.grid_is_initialized() || return owned
+    grid = ImplicitGlobalGrid.global_grid()
+    owned_range(d) = begin
+        has_lo = grid.neighbors[1, d] != MPI.PROC_NULL
+        has_hi = grid.neighbors[2, d] != MPI.PROC_NULL
+        ax = axes(A, d)
+        (has_lo || has_hi) || return ax
+        # number of layers this array shares with each neighbor along `d`
+        nshared = grid.overlaps[d] + size(A, d) - grid.nxyz[d]
+        0 ≤ nshared < size(A, d) || error(
+            "an array of size $(size(A, d)) along dimension $d cannot share $nshared layers with its neighbors; `A` must be a field of the global grid"
+        )
+        # of the layers shared across an interface, the lower rank owns nshared - nshared ÷ 2
+        # and the upper rank the remaining nshared ÷ 2
+        lo = has_lo ? nshared - nshared ÷ 2 : 0
+        hi = has_hi ? nshared ÷ 2 : 0
+        return (first(ax) + lo):(last(ax) - hi)
+    end
+    fill!(owned, false)
+    view(owned, ntuple(owned_range, Val(N))...) .= true
+    return owned
+end
+
+# Exchange the whole overlap of every array, so that each entry two ranks hold comes from its
+# owner. The default halo width refreshes only the outermost layer, which leaves the two inner
+# shared layers of a ghosted array (one ghost per side, e.g. `thermal.T`) to be computed by both
+# ranks, each with a one-sided stencil at its own edge.
+function update_overlap_halo!(A::Vararg{AbstractArray, N}) where {N}
+    grid = ImplicitGlobalGrid.global_grid()
+    halowidths(B) = ntuple(Val(3)) do d
+        nshared = grid.overlaps[d] + (d ≤ ndims(B) ? size(B, d) : 1) - grid.nxyz[d]
+        max(1, nshared ÷ 2)
+    end
+    update_halo!(map(B -> (A = B, halowidths = halowidths(B)), A)...)
+    return nothing
+end
+
+"""
+    owned_cells(A, trim)
+
+Like `owned_cells(A)`, and also `false` on the outermost `trim[d]` entries of `A` along each
+direction `d` where this rank lies on the boundary of the global domain. A reduction weighted by
+it covers, on any number of ranks, the entries of the serial slice
+`A[(1 + trim[1]):(end - trim[1]), (1 + trim[2]):(end - trim[2]), …]`.
+"""
+function owned_cells(A::AbstractArray{<:Any, N}, trim::NTuple{N, Integer}) where {N}
+    owned = owned_cells(A)
+    initialized = ImplicitGlobalGrid.grid_is_initialized()
+    grid = initialized ? ImplicitGlobalGrid.global_grid() : nothing
+    for d in 1:N
+        iszero(trim[d]) && continue
+        ax = axes(A, d)
+        if !initialized || grid.neighbors[1, d] == MPI.PROC_NULL
+            selectdim(owned, d, first(ax):(first(ax) + trim[d] - 1)) .= false
+        end
+        if !initialized || grid.neighbors[2, d] == MPI.PROC_NULL
+            selectdim(owned, d, (last(ax) - trim[d] + 1):last(ax)) .= false
+        end
+    end
+    return owned
+end
 
 """
     sum_mpi(A)

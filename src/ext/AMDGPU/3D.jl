@@ -30,13 +30,14 @@ import JustRelax:
     AbstractFlowBoundaryConditions,
     DisplacementBoundaryConditions,
     VelocityBoundaryConditions,
-    AbstractDirichletBoundaryCondition,
     apply_dirichlet,
     apply_dirichlet!,
     isdirichlet,
     periodic_dims,
     flow_bcs_of,
     check_periodic_bcs,
+    check_velocity_dirichlet,
+    velocity_dirichlet,
     reject_periodic_bcs
 
 import JustRelax: normal_stress, shear_stress, shear_vorticity, grid_stress, unwrap
@@ -47,9 +48,11 @@ import JustPIC: numphases, nphases, PhaseRatios, update_phase_ratios!, cell_inde
 __init__() = @init_parallel_stencil(AMDGPU, Float64, 3)
 
 include("../../common.jl")
+include("../../DYREL/variational3D.jl")
 include("../../stokes/Stokes3D.jl")
 include("../../variational_stokes/Stokes3D.jl")
 include("../../DYREL/solver.jl")
+include("../../DYREL/solver_VS.jl")
 
 # Types
 function JR3D.StokesArrays(::Type{AMDGPUBackend}, ni::NTuple{N, Integer}) where {N}
@@ -473,6 +476,22 @@ function JR3D.solve_VariationalStokes!(::AMDGPUBackendTrait, stokes, args...; kw
     return _solve_VS!(stokes, args...; kwargs...)
 end
 
+function JR3D.compute_viscosity!(::AMDGPUBackendTrait, stokes, ν, phases, ϕ::JustRelax.RockRatio, args, rheology, air_phase, cutoff, fn::F) where {F}
+    return _compute_viscosity!(stokes, ν, phases, ϕ, args, rheology, air_phase, cutoff, fn)
+end
+
+function compute_viscosity!(::AMDGPUBackendTrait, stokes, ν, phases, ϕ::JustRelax.RockRatio, args, rheology, air_phase, cutoff, fn::F) where {F}
+    return _compute_viscosity!(stokes, ν, phases, ϕ, args, rheology, air_phase, cutoff, fn)
+end
+
+function JR3D.solve_VariationalDYREL!(::AMDGPUBackendTrait, stokes, args...; kwargs)
+    return _solve_VariationalDYREL!(stokes, args...; kwargs...)
+end
+
+function JR3D.DYREL(::Type{AMDGPUBackend}, stokes::JustRelax.StokesArrays, rheology, phase_ratios, ϕ::JustRelax.RockRatio, di, dt; kwargs...)
+    return DYREL(stokes, rheology, phase_ratios, ϕ, di, dt; kwargs...)
+end
+
 function JR3D.solve_DYREL!(::AMDGPUBackendTrait, stokes, args...; kwargs)
     return _solve_DYREL!(stokes, args...; kwargs...)
 end
@@ -498,7 +517,7 @@ function JR3D.subgrid_characteristic_time!(
     ni = size(stokes.P)
     size(dt₀) == ni .+ 2 || throw(DimensionMismatch("dt₀ must have size $(ni .+ 2), got $(size(dt₀))"))
     @parallel (@idx ni) subgrid_characteristic_time!(
-        dt₀, phases.center, rheology, thermal.T, stokes.P, particles.di.vertex
+        dt₀, phases.center, rheology, thermal.T, stokes.P, particle_cell_spacing(particles)
     )
     return nothing
 end
@@ -515,7 +534,7 @@ function JR3D.subgrid_characteristic_time!(
     ni = size(stokes.P)
     size(dt₀) == ni .+ 2 || throw(DimensionMismatch("dt₀ must have size $(ni .+ 2), got $(size(dt₀))"))
     @parallel (@idx ni) subgrid_characteristic_time!(
-        dt₀, phases, rheology, thermal.T, stokes.P, particles.di.vertex
+        dt₀, phases, rheology, thermal.T, stokes.P, particle_cell_spacing(particles)
     )
     return nothing
 end

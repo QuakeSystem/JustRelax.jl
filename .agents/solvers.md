@@ -15,13 +15,14 @@ residual histories.
 | Solver | 2D | 3D | GPU 2D | GPU 3D |
 |--------|----|----|--------|--------|
 | `solve!` (Stokes) | ✓ | ✓ | ✓ | ✓ |
-| `solve_VariationalStokes!` | ✓ | ✓ | ✓ | — |
-| `solve_DYREL!`, `solve_VariationalDYREL!` | ✓ | — | ✓ | — |
+| `solve_VariationalStokes!` | ✓ | ✓ | ✓ | ✓ |
+| `solve_DYREL!`, `solve_VariationalDYREL!` | ✓ | ✓ | ✓ | ✓ |
 | `heatdiffusion_PT!` | ✓ | ✓ | ✓ | ✓ |
 
-The gaps are structural: `src/ext/CUDA/3D.jl` and `src/ext/AMDGPU/3D.jl` include only
-`stokes/Stokes3D.jl`, and the DYREL solver files are included only by the 2D modules.
-Calling an unavailable combination raises a `MethodError` rather than silently falling back.
+The 3D variational methods (`solve_VariationalStokes!`, `solve_VariationalDYREL!`)
+require a uniform grid; 3D `solve_VariationalDYREL!` also rejects periodic boundaries.
+Both variational solvers accept `surface_pressure` (prescribed load on the embedded
+rock–air interface, `flow_bcs.free_surface = false`).
 
 ## `solve!` — standard Stokes
 
@@ -33,14 +34,13 @@ solve!(stokes, pt_stokes, grid, flow_bcs, ρg, phase_ratios, rheology, args, dt,
 ```
 
 `kwargs` is a **required** keyword and must be a NamedTuple (see [`api.md`](api.md)).
-Four argument forms dispatch on the sixth positional argument:
+Three argument forms dispatch on the sixth positional argument:
 
 | Sixth argument | Problem |
 |----------------|---------|
 | `phase_ratios::JustPIC.PhaseRatios`, then `rheology`, `args` | multi-phase visco-elasto-plastic (the general form) |
 | `rheology::MaterialParams`, then `args` | single-phase visco-elasto-plastic |
-| `G`, `K` | linear visco-elastic, constant moduli |
-| `K` | linear, bulk modulus only |
+| `G`, `K` in 2D; `K`, `G` in 3D | linear visco-elastic, constant moduli |
 
 `grid` may be replaced by the spacing `di` alone (an `NTuple` or NamedTuple); this routes
 through `JustRelax.legacy_uniform_grid`, which rebuilds a uniform `Geometry` — under MPI it
@@ -108,7 +108,7 @@ or integrating, and do not seed it with a lithostatic profile in the air.
 
 ## `solve_DYREL!` / `solve_VariationalDYREL!` — self-tuned dynamic relaxation
 
-`src/DYREL/`, 2D only.
+`src/DYREL/`, 2D and 3D (3D variational: uniform, nonperiodic grid).
 
 ```julia
 dyrel = DYREL(backend, stokes, rheology, phase_ratios, di, dt)      # before the time loop

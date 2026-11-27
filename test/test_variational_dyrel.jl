@@ -19,7 +19,7 @@ end
     return nothing
 end
 
-function _full_volume_dyrel(igg; variational, hydrostatic = false, partial = false, plastic = false, legacy_grid = false, friction = 0.0, Pf = nothing)
+function _full_volume_dyrel(igg; variational, hydrostatic = false, partial = false, plastic = false, legacy_grid = false, friction = 0.0, Pf = nothing, anderson_PH = 0)
     ni = (8, 8)
     grid = Geometry(ni, (1.0, 1.0))
     creep = LinearViscous(; η = 1.0)
@@ -64,6 +64,7 @@ function _full_volume_dyrel(igg; variational, hydrostatic = false, partial = fal
         rel_drop = 0.5,
         linear_viscosity = !plastic,
         free_surface = partial,
+        anderson_PH,
     )
     ϕ = nothing
     if variational
@@ -123,6 +124,21 @@ end
     @test JustRelax2D.volumetric_compliance_total(fill(Inf, ni), ϕ, mask) == 0.0
     mask[2, 1] = false
     @test JustRelax2D.volumetric_compliance_total(ηb, ϕ, mask) ≈ 1 / 4
+end
+
+@testset "Variational DYREL volumetric mode needs a closed domain" begin
+    ni = (2, 2)
+    ϕ = RockRatio(CPUBackend, ni)
+    ϕ.center .= 1.0
+    closed = VelocityBoundaryConditions(; free_slip = (left = true, right = true, top = true, bot = true))
+    open_top = VelocityBoundaryConditions(;
+        free_slip = (left = true, right = true, top = true, bot = true), free_surface = true
+    )
+    @test JustRelax2D.volumetric_mode_closed(ϕ, closed)
+    @test !JustRelax2D.volumetric_mode_closed(ϕ, open_top)
+    # a cut cell marks an embedded traction-free interface
+    ϕ.center[1, 2] = 0.25
+    @test !JustRelax2D.volumetric_mode_closed(ϕ, closed)
 end
 
 @testset "Variational DYREL hydrostatic convergence" begin
@@ -395,6 +411,19 @@ end
     @test all(isfinite, stokes.λ)
     @test minimum(stokes.λ) ≥ 0.0
     @test isfinite(result.err)
+end
+
+@testset "DYREL Anderson PH acceleration (variational = $variational)" for variational in (true, false)
+    run(m) = _full_volume_dyrel(TEST_IGG; variational, plastic = true, friction = 30.0, anderson_PH = m)
+    plain, = run(0)
+    accelerated, = run(3)
+
+    # Anderson changes the path, not the fixed point. P is near zero here, so it is compared
+    # against the O(1) stress scale.
+    @test accelerated.P ≈ plain.P atol = 1.0e-5
+    @test accelerated.V.Vx ≈ plain.V.Vx rtol = 1.0e-4
+    @test accelerated.V.Vy ≈ plain.V.Vy rtol = 1.0e-4
+    @test_throws ArgumentError run(-1)
 end
 
 @testset "DYREL fluid pressure (variational = $variational)" for variational in (true, false)

@@ -1,10 +1,4 @@
 ## 2D STOKES MODULE
-function update_τ_o!(stokes::JustRelax.StokesArrays)
-    @parallel (@idx size(τxy)) multi_copy!(
-        @tensor_center(stokes.τ_o), @tensor_center(stokes.τ)
-    )
-    return nothing
-end
 
 ## 2D VISCO-ELASTIC STOKES SOLVER
 
@@ -17,9 +11,8 @@ This is the general, multi-phase call form used by most models; dispatch on the 
 the sixth argument also accepts, for simpler/benchmark setups:
 - a single-phase `rheology::GeoParams.MaterialParams` in place of `phase_ratios`/`rheology`
   (drop the `phase_ratios` argument), or
-- constant `K` (bulk modulus) or `K, G` (bulk and shear modulus) fields in place of
-  `phase_ratios`/`rheology`/`args`, for linear (visco)elastic problems with no material
-  rheology.
+- constant `K, G` (bulk and shear modulus) fields in place of `phase_ratios`/`rheology`/`args`,
+  for linear (visco)elastic problems with no material rheology.
 `grid` may also be replaced by the grid spacing `di` alone (a `NTuple`/`NamedTuple`).
 
 # Arguments
@@ -35,7 +28,8 @@ the sixth argument also accepts, for simpler/benchmark setups:
 - `igg`: the distributed-grid context (`IGG`).
 
 # Keyword arguments
-- `iterMax = 50e3`, `iterMin = 100`: min/max pseudo-transient iterations.
+- `iterMax = 50e3` (`10e3` for the `K, G` and single-`MaterialParams` forms), `iterMin = 100`:
+  min/max pseudo-transient iterations.
 - `nout = 500`: check convergence every `nout` iterations.
 - `viscosity_cutoff = (-Inf, Inf)`: clamp bounds for the effective viscosity.
 - `viscosity_relaxation = 1e-2`: relaxation factor for nonlinear viscosity updates.
@@ -56,167 +50,6 @@ end
 # entry point for extensions
 solve!(::CPUBackendTrait, stokes, args...; kwargs) = _solve!(stokes, args...; kwargs...)
 
-function _solve!(
-        stokes::JustRelax.StokesArrays,
-        pt_stokes,
-        grid::Geometry{2},
-        flow_bcs::AbstractFlowBoundaryConditions,
-        ρg,
-        K,
-        dt,
-        igg::IGG;
-        iterMax = 10.0e3,
-        nout = 500,
-        b_width = (4, 4, 1),
-        verbose = true,
-        kwargs...,
-    )
-    (; η) = stokes.viscosity
-    lx = grid.max_li
-
-    # unpack
-    di = grid.di
-    _di = grid._di
-    (; ϵ_rel, ϵ_abs, r, θ_dτ, ηdτ) = pt_stokes
-    ni = size(stokes.P)
-
-    # ~preconditioner
-    ητ = deepcopy(stokes.viscosity.η)
-    # @hide_communication b_width begin # communication/computation overlap
-    compute_maxloc!(ητ, stokes.viscosity.η; window = (1, 1))
-    update_halo!(ητ)
-    # end
-
-    # errors
-    err_it1 = 1.0
-    err = 1.0
-    iter = 0
-    err_evo1 = Float64[]
-    err_evo2 = Float64[]
-    norm_Rx = Float64[]
-    norm_Ry = Float64[]
-    norm_∇V = Float64[]
-
-    # convert displacement to velocity
-    displacement2velocity!(stokes, dt, flow_bcs)
-
-    # solver loop
-    wtime0 = 0.0
-    while iter < 2 || (((err / err_it1) > ϵ_rel && err > ϵ_abs) && iter ≤ iterMax)
-        wtime0 += @elapsed begin
-            @parallel (@idx ni) compute_∇V!(stokes.∇V, @velocity(stokes), _di.vertex)
-
-            @parallel (@idx ni .+ 1) compute_strain_rate!(
-                @strain(stokes)...,
-                stokes.∇V,
-                @velocity(stokes)...,
-                _di.vertex,
-                _di.velocity[1],
-                _di.velocity[2],
-            )
-            @parallel compute_P!(
-                stokes.P, stokes.P0, stokes.RP, stokes.∇V, stokes.Q, η, K, dt, r, θ_dτ
-            )
-            @parallel (@idx ni .+ 1) compute_τ!(@stress(stokes)..., @strain(stokes)..., η, θ_dτ)
-            @hide_communication b_width begin
-                @parallel compute_V!(
-                    @velocity(stokes)...,
-                    stokes.P,
-                    @stress(stokes)...,
-                    ηdτ,
-                    ρg...,
-                    ητ,
-                    _di.center,
-                    _di.vertex,
-                    dt,
-                )
-                # apply boundary conditions
-                velocity2displacement!(stokes, dt)
-                flow_bcs!(stokes, flow_bcs)
-                update_halo!(@velocity(stokes)...)
-            end
-        end
-
-        iter += 1
-        if iter % nout == 0 && iter > 1
-            @parallel (@idx ni) compute_Res!(
-                stokes.R.Rx,
-                stokes.R.Ry,
-                @velocity(stokes)...,
-                stokes.P,
-                @stress(stokes)...,
-                ρg...,
-                _di.center,
-                _di.vertex,
-                dt,
-            )
-            Vmin, Vmax = extrema(stokes.V.Vx)
-            Pmin, Pmax = extrema(stokes.P)
-            push!(
-                norm_Rx,
-                norm_mpi(stokes.R.Rx) / (Pmax - Pmin) * lx / sqrt(length(stokes.R.Rx)),
-            )
-            push!(
-                norm_Ry,
-                norm_mpi(stokes.R.Ry) / (Pmax - Pmin) * lx / sqrt(length(stokes.R.Ry)),
-            )
-            push!(
-                norm_∇V, norm_mpi(stokes.∇V) / (Vmax - Vmin) * lx / sqrt(length(stokes.∇V))
-            )
-
-            err = maximum_mpi(norm_Rx[end], norm_Ry[end], norm_∇V[end])
-            push!(err_evo1, err)
-            push!(err_evo2, iter)
-            err_it1 = maximum_mpi([norm_Rx[1], norm_Ry[1], norm_∇V[1]])
-            rel_err = err / err_it1
-
-            if igg.me == 0 && ((verbose && (err / err_it1) > ϵ_rel && err > ϵ_abs) || iter == iterMax)
-                @printf(
-                    "Total steps = %d, abs_err = %1.3e , rel_err = %1.3e [norm_Rx=%1.3e, norm_Ry=%1.3e, norm_∇V=%1.3e] \n",
-                    iter,
-                    err,
-                    rel_err,
-                    norm_Rx[end],
-                    norm_Ry[end],
-                    norm_∇V[end]
-                )
-            end
-            isnan(err) && error("NaN(s)")
-        end
-
-        if igg.me == 0 && ((err / err_it1) < ϵ_rel || (err < ϵ_abs))
-            println("Pseudo-transient iterations converged in $iter iterations")
-        end
-    end
-
-    @parallel (@idx ni .+ 1) multi_copy!(@tensor(stokes.τ_o), @tensor(stokes.τ))
-    @parallel (@idx ni) multi_copy!(@tensor_center(stokes.τ_o), @tensor_center(stokes.τ))
-
-    return (
-        iter = iter,
-        err_evo1 = err_evo1,
-        err_evo2 = err_evo2,
-        norm_Rx = norm_Rx,
-        norm_Ry = norm_Ry,
-        norm_∇V = norm_∇V,
-    )
-end
-
-function _solve!(
-        stokes::JustRelax.StokesArrays,
-        pt_stokes,
-        di::Union{NTuple{2, <:Real}, NamedTuple},
-        flow_bcs::AbstractFlowBoundaryConditions,
-        ρg,
-        K,
-        dt,
-        igg::IGG;
-        kwargs...,
-    )
-    grid = JustRelax.legacy_uniform_grid(size(stokes.P), di)
-    return _solve!(stokes, pt_stokes, grid, flow_bcs, ρg, K, dt, igg; kwargs...)
-end
-
 # visco-elastic solver
 function _solve!(
         stokes::JustRelax.StokesArrays,
@@ -224,13 +57,13 @@ function _solve!(
         grid::Geometry{2},
         flow_bcs::AbstractFlowBoundaryConditions,
         ρg,
-        G,
         K,
+        G,
         dt,
         igg::IGG;
         iterMax = 10.0e3,
         nout = 500,
-        b_width = (4, 4, 1),
+        b_width = (4, 4, 0),
         verbose = true,
         kwargs...,
     )
@@ -250,6 +83,9 @@ function _solve!(
     # end
 
     # errors
+    # the residual norms count each overlap entry on its owner only
+    weightRx, weightRy = map(R -> owned_cells(R, (1, 1)), @residuals(stokes.R))
+    weightRP = owned_cells(stokes.R.RP)
     err_it1 = 1.0
     err = 1.0
     iter = 0
@@ -316,11 +152,11 @@ function _solve!(
             )
 
             errs = (
-                norm_mpi(@views stokes.R.Rx[2:(end - 1), 2:(end - 1)]) /
+                masked_norm_mpi(weightRx, stokes.R.Rx) /
                     √((nx_g() - 2) * (ny_g() - 1)),
-                norm_mpi(@views stokes.R.Ry[2:(end - 1), 2:(end - 1)]) /
+                masked_norm_mpi(weightRy, stokes.R.Ry) /
                     √((nx_g() - 1) * (ny_g() - 2)),
-                norm_mpi(stokes.R.RP) / √(nx_g() * ny_g()),
+                masked_norm_mpi(weightRP, stokes.R.RP) / √(nx_g() * ny_g()),
             )
 
             # errs = maximum_mpi.((abs.(stokes.R.Rx), abs.(stokes.R.Ry), abs.(stokes.R.RP)))
@@ -370,14 +206,14 @@ function _solve!(
         di::Union{NTuple{2, <:Real}, NamedTuple},
         flow_bcs::AbstractFlowBoundaryConditions,
         ρg,
-        G,
         K,
+        G,
         dt,
         igg::IGG;
         kwargs...,
     )
     grid = JustRelax.legacy_uniform_grid(size(stokes.P), di)
-    return _solve!(stokes, pt_stokes, grid, flow_bcs, ρg, G, K, dt, igg; kwargs...)
+    return _solve!(stokes, pt_stokes, grid, flow_bcs, ρg, K, G, dt, igg; kwargs...)
 end
 
 # GeoParams: general (visco-elasto-plastic) solver
@@ -420,6 +256,9 @@ function _solve!(
     G = get_G(rheology)
 
     # errors
+    # the residual norms count each overlap entry on its owner only
+    weightRx, weightRy = map(R -> owned_cells(R, (1, 1)), @residuals(stokes.R))
+    weightRP = owned_cells(stokes.R.RP)
     err_it1 = 1.0
     err = 1.0
     iter = 0
@@ -537,11 +376,11 @@ function _solve!(
             )
 
             errs = (
-                norm_mpi(@views stokes.R.Rx[2:(end - 1), 2:(end - 1)]) /
+                masked_norm_mpi(weightRx, stokes.R.Rx) /
                     √((nx_g() - 2) * (ny_g() - 1)),
-                norm_mpi(@views stokes.R.Ry[2:(end - 1), 2:(end - 1)]) /
+                masked_norm_mpi(weightRy, stokes.R.Ry) /
                     √((nx_g() - 1) * (ny_g() - 2)),
-                norm_mpi(stokes.R.RP) / √(nx_g() * ny_g()),
+                masked_norm_mpi(weightRP, stokes.R.RP) / √(nx_g() * ny_g()),
             )
 
             push!(norm_Rx, errs[1])
@@ -578,6 +417,8 @@ function _solve!(
     @parallel (@idx ni .+ 1) compute_vorticity!(
         stokes.ω.xy, @velocity(stokes)..., _di.velocity[1], _di.velocity[2]
     )
+
+    update_shear_halo!(stokes.ε, stokes.ε_pl, stokes.Δε)
 
     # Interpolate shear components to cell center arrays
     shear2center!(stokes.ε)
@@ -662,6 +503,9 @@ function _solve!(
     # end
 
     # errors
+    # the residual norms count each overlap entry on its owner only
+    weightRx, weightRy = map(R -> owned_cells(R, (1, 1)), @residuals(stokes.R))
+    weightRP = owned_cells(stokes.R.RP)
     err_it1 = 1.0
     err = 1.0
     iter = 0
@@ -852,11 +696,11 @@ function _solve!(
             )
 
             errs = (
-                norm_mpi(@views stokes.R.Rx[2:(end - 1), 2:(end - 1)]) /
+                masked_norm_mpi(weightRx, stokes.R.Rx) /
                     √((nx_g() - 2) * (ny_g() - 1)),
-                norm_mpi(@views stokes.R.Ry[2:(end - 1), 2:(end - 1)]) /
+                masked_norm_mpi(weightRy, stokes.R.Ry) /
                     √((nx_g() - 1) * (ny_g() - 2)),
-                norm_mpi(stokes.R.RP) / √(nx_g() * ny_g()),
+                masked_norm_mpi(weightRP, stokes.R.RP) / √(nx_g() * ny_g()),
             )
 
             push!(norm_Rx, errs[1])
@@ -891,6 +735,8 @@ function _solve!(
     @parallel (@idx ni .+ 1) compute_vorticity!(
         stokes.ω.xy, @velocity(stokes)..., _di.velocity...
     )
+
+    update_shear_halo!(stokes.ε, stokes.ε_pl, stokes.Δε)
 
     # Interpolate shear components to cell center arrays
     shear2center!(stokes.ε)

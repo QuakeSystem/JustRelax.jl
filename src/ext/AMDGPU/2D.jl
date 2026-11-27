@@ -30,13 +30,14 @@ import JustRelax:
     AbstractFlowBoundaryConditions,
     DisplacementBoundaryConditions,
     VelocityBoundaryConditions,
-    AbstractDirichletBoundaryCondition,
     apply_dirichlet,
     apply_dirichlet!,
     isdirichlet,
     periodic_dims,
     flow_bcs_of,
     check_periodic_bcs,
+    check_velocity_dirichlet,
+    velocity_dirichlet,
     reject_periodic_bcs
 
 import JustRelax: normal_stress, shear_stress, shear_vorticity, grid_stress, unwrap
@@ -515,7 +516,7 @@ function JR2D.subgrid_characteristic_time!(
     ni = size(stokes.P)
     size(dt₀) == ni .+ 2 || throw(DimensionMismatch("dt₀ must have size $(ni .+ 2), got $(size(dt₀))"))
     @parallel (@idx ni) subgrid_characteristic_time!(
-        dt₀, phases.center, rheology, thermal.T, stokes.P, particles.di.vertex
+        dt₀, phases.center, rheology, thermal.T, stokes.P, particle_cell_spacing(particles)
     )
     return nothing
 end
@@ -532,9 +533,24 @@ function JR2D.subgrid_characteristic_time!(
     ni = size(stokes.P)
     size(dt₀) == ni .+ 2 || throw(DimensionMismatch("dt₀ must have size $(ni .+ 2), got $(size(dt₀))"))
     @parallel (@idx ni) subgrid_characteristic_time!(
-        dt₀, phases, rheology, thermal.T, stokes.P, particles.di.vertex
+        dt₀, phases, rheology, thermal.T, stokes.P, particle_cell_spacing(particles)
     )
     return nothing
+end
+
+function JR2D.subgrid_characteristic_time!(
+        subgrid_arrays,
+        particles,
+        dt₀::ROCArray,
+        phases::AbstractArray{Int, N},
+        rheology,
+        thermal::JustRelax.ThermalArrays,
+        stokes::JustRelax.StokesArrays,
+        di,
+    ) where {N}
+    return subgrid_characteristic_time!(
+        subgrid_arrays, particles, dt₀, phases, rheology, thermal, stokes, di
+    )
 end
 
 # shear heating

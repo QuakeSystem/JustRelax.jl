@@ -156,7 +156,7 @@ function compute_∇V_strain_rate_RP!(
         stokes, dyrel, rheology, phase_ratios, _di, ni, dt, do_strain_rate = true;
         ΔT = nothing, melt_fraction = nothing, kwargs...,
     )
-    @parallel (@idx ni .+ 1) compute_∇V_strain_rate_RP!(
+    @parallel_async (@idx ni .+ 1) compute_∇V_strain_rate_RP!(
         @strain(stokes)...,
         @velocity(stokes)...,
         stokes.R.RP,
@@ -237,6 +237,7 @@ end
             RP[i, j] = _RP_cell(P[i, j], P0[i, j], div_ij, Q[i, j], ηb[i, j], dt, rheology, phase_ratio, ΔT, melt_fraction, i, j)
         end
     end
+
     return nothing
 end
 
@@ -353,44 +354,6 @@ end
     return nothing
 end
 
-# For internal velocity Dirichlet regions -- v0.6.1's DYREL solver has no
-# free-surface stabilization yet, so this is the plain overload above plus
-# `dirichlet` masking only (contrast with the "with Vx,Vy,dt" overload below,
-# which folds in a free-surface density-gradient correction and is unused by
-# this branch's solver.jl).
-@parallel_indices (i, j) function compute_PH_residual_V!(
-        Rx::AbstractArray{T, 2}, Ry, P, ΔPψ, τxx, τyy, τxy, ρgx, ρgy, _di_center, _di_vertex,
-        dirichlet::NTuple{2, AbstractDirichletBoundaryCondition},
-    ) where {T}
-    Base.@propagate_inbounds @inline av_xa(A) = _av_xa_wrap(A, i, j)
-    Base.@propagate_inbounds @inline av_ya(A) = _av_ya_wrap(A, i, j)
-
-    if i ≤ size(Rx, 1) && j ≤ size(Rx, 2)
-        if !isdirichlet(dirichlet[1], i + 1, j + 1)
-            _dx_c = @dx(_di_center, i)
-            _dy_v = @dy(_di_vertex, j)
-            Base.@propagate_inbounds @inline d_xa(A) = _d_xa_wrap(A, _dx_c, i, j)
-            Base.@propagate_inbounds @inline d_yi(A) = _d_yi(A, _dy_v, i, j)
-            Rx[i, j] = d_xa(τxx) + d_yi(τxy) - d_xa(P) - d_xa(ΔPψ) - av_xa(ρgx)
-        else
-            Rx[i, j] = zero(T)
-        end
-    end
-    if i ≤ size(Ry, 1) && j ≤ size(Ry, 2)
-        if !isdirichlet(dirichlet[2], i + 1, j + 1)
-            _dy_c = @dy(_di_center, j)
-            _dx_v = @dx(_di_vertex, i)
-            Base.@propagate_inbounds @inline d_ya(A) = _d_ya_wrap(A, _dy_c, i, j)
-            Base.@propagate_inbounds @inline d_xi(A) = _d_xi(A, _dx_v, i, j)
-            Ry[i, j] = d_ya(τyy) + d_xi(τxy) - d_ya(P) - d_ya(ΔPψ) - av_ya(ρgy)
-        else
-            Ry[i, j] = zero(T)
-        end
-    end
-    # end
-    return nothing
-end
-
 @parallel_indices (i, j) function compute_PH_residual_V!(
         Rx::AbstractArray{T, 2},
         Ry,
@@ -406,6 +369,7 @@ end
         _di_center,
         _di_vertex,
         dt,
+        dirichlet,
     ) where {T}
     # See the overload above: cell-centred fields wrap, the vertex field `τxy` does not.
     Base.@propagate_inbounds @inline av_xa(A) = _av_xa_wrap(A, i, j)
@@ -417,7 +381,9 @@ end
         _dy_v = @dy(_di_vertex, j)
         Base.@propagate_inbounds @inline d_xa(A) = _d_xa_wrap(A, _dx_c, i, j)
         Base.@propagate_inbounds @inline d_yi(A) = _d_yi(A, _dy_v, i, j)
-        Rx[i, j] = d_xa(τxx) + d_yi(τxy) - d_xa(P) - d_xa(ΔPψ) - av_xa(ρgx)
+        # momentum row (i, j) drives Vx[i + 1, j + 1]; a prescribed velocity has no residual
+        Rx[i, j] = isdirichlet(dirichlet.Vx, i + 1, j + 1) ? zero(T) :
+            d_xa(τxx) + d_yi(τxy) - d_xa(P) - d_xa(ΔPψ) - av_xa(ρgx)
     end
 
     if i ≤ size(Ry, 1) && j ≤ size(Ry, 2)
@@ -437,68 +403,8 @@ end
         # correction term
         ρg_correction = (Vyᵢⱼ * ∂ρg∂y) * θ * dt
 
-        Ry[i, j] = d_ya(τyy) + d_xi(τxy) - d_ya(P) - d_ya(ΔPψ) - av_ya(ρgy) + ρg_correction
-    end
-
-    return nothing
-end
-
-@parallel_indices (i, j) function compute_PH_residual_V!(
-        Rx::AbstractArray{T, 2},
-        Ry,
-        Vx,
-        Vy,
-        P,
-        ΔPψ,
-        τxx,
-        τyy,
-        τxy,
-        ρgx,
-        ρgy,
-        _di_center,
-        _di_vertex,
-        dt,
-        dirichlet::NTuple{2, AbstractDirichletBoundaryCondition},
-    ) where {T}
-    # See the overload above: cell-centred fields wrap, the vertex field `τxy` does not.
-    Base.@propagate_inbounds @inline av_xa(A) = _av_xa_wrap(A, i, j)
-    Base.@propagate_inbounds @inline av_ya(A) = _av_ya_wrap(A, i, j)
-
-    nx, ny = size(ρgy)
-    if i ≤ size(Rx, 1) && j ≤ size(Rx, 2)
-        if !isdirichlet(dirichlet[1], i + 1, j + 1)
-            _dx_c = @dx(_di_center, i)
-            _dy_v = @dy(_di_vertex, j)
-            Base.@propagate_inbounds @inline d_xa(A) = _d_xa_wrap(A, _dx_c, i, j)
-            Base.@propagate_inbounds @inline d_yi(A) = _d_yi(A, _dy_v, i, j)
-            Rx[i, j] = d_xa(τxx) + d_yi(τxy) - d_xa(P) - d_xa(ΔPψ) - av_xa(ρgx)
-        else
-            Rx[i, j] = zero(T)
-        end
-    end
-
-    if i ≤ size(Ry, 1) && j ≤ size(Ry, 2)
-        if !isdirichlet(dirichlet[2], i + 1, j + 1)
-            _dy_c = @dy(_di_center, j)
-            _dx_v = @dx(_di_vertex, i)
-            Base.@propagate_inbounds @inline d_ya(A) = _d_ya_wrap(A, _dy_c, i, j)
-            Base.@propagate_inbounds @inline d_xi(A) = _d_xi(A, _dx_v, i, j)
-            θ = 1.0
-            # Vertical velocity
-            Vyᵢⱼ = Vy[i + 1, j + 1]
-            # Get necessary buoyancy forces
-            j_N = wrap_next(j, ny)
-            ρg_S = ρgy[i, j]
-            ρg_N = ρgy[i, j_N]
-            # Spatial derivatives
-            ∂ρg∂y = (ρg_N - ρg_S) * _dy_c
-            # correction term
-            ρg_correction = (Vyᵢⱼ * ∂ρg∂y) * θ * dt
-
-            Ry[i, j] = d_ya(τyy) + d_xi(τxy) - d_ya(P) - d_ya(ΔPψ) - av_ya(ρgy) + ρg_correction
-        else
-            Ry[i, j] = zero(T)
-        end
+        Ry[i, j] = isdirichlet(dirichlet.Vy, i + 1, j + 1) ? zero(T) :
+            d_ya(τyy) + d_xi(τxy) - d_ya(P) - d_ya(ΔPψ) - av_ya(ρgy) + ρg_correction
     end
 
     return nothing
@@ -556,8 +462,9 @@ end
 end
 
 @parallel_indices (i, j, k) function compute_PH_residual_V!(
-        Rx::AbstractArray{T, 3}, Ry, Rz, Vx, Vy, Vz, P, ΔPψ, τxx, τyy, τzz, τyz, τxz, τxy, ρgx, ρgy, ρgz, _di_center, _di_vertex, dt
+        Rx::AbstractArray{T, 3}, Ry, Rz, Vx, Vy, Vz, P, ΔPψ, τxx, τyy, τzz, τyz, τxz, τxy, ρgx, ρgy, ρgz, _di_center, _di_vertex, dt, dirichlet
     ) where {T}
+    # `dirichlet` is always empty in 3D; see `check_velocity_dirichlet`
 
     # Cell-centred fields are differenced with the wrapping stencil: a momentum row reaches the
     # last cell index only when its direction is periodic, and that row is the seam face, whose
@@ -710,7 +617,6 @@ end
     return nothing
 end
 
-
 @parallel_indices (I...) function compute_dV!(
         dV::NTuple{N, AbstractArray{T, N}},
         dVdτ::NTuple{N, AbstractArray{T, N}},
@@ -782,6 +688,7 @@ end
         _di_center,
         _di_vertex,
         dt,
+        dirichlet,
     ) where {T}
     # Cell-centred fields are differenced with the wrapping stencil: a momentum row reaches the
     # last cell index only when its direction is periodic, and that row is the seam face, whose
@@ -791,7 +698,13 @@ end
     Base.@propagate_inbounds @inline av_ya(A) = _av_ya_wrap(A, i, j)
 
     @inbounds begin
-        if i ≤ size(Rx, 1) && j ≤ size(Rx, 2)
+        # A prescribed velocity is re-imposed every iteration and contributes no residual or
+        # damping history.
+        if i ≤ size(Rx, 1) && j ≤ size(Rx, 2) && isdirichlet(dirichlet.Vx, i + 1, j + 1)
+            apply_dirichlet!(Vx, dirichlet.Vx, i + 1, j + 1)
+            Rx[i, j] = zero(T)
+            dVxdτ[i, j] = zero(T)
+        elseif i ≤ size(Rx, 1) && j ≤ size(Rx, 2)
             _dx_c = @dx(_di_center, i)
             _dy_v = @dy(_di_vertex, j)
             Base.@propagate_inbounds @inline d_xa(A) = _d_xa_wrap(A, _dx_c, i, j)
@@ -803,7 +716,11 @@ end
             dVxdτ[i, j] = dVx_new
             Vx[i + 1, j + 1] += ΔVx
         end
-        if i ≤ size(Ry, 1) && j ≤ size(Ry, 2)
+        if i ≤ size(Ry, 1) && j ≤ size(Ry, 2) && isdirichlet(dirichlet.Vy, i + 1, j + 1)
+            apply_dirichlet!(Vy, dirichlet.Vy, i + 1, j + 1)
+            Ry[i, j] = zero(T)
+            dVydτ[i, j] = zero(T)
+        elseif i ≤ size(Ry, 1) && j ≤ size(Ry, 2)
             _dy_c = @dy(_di_center, j)
             _dx_v = @dx(_di_vertex, i)
             Base.@propagate_inbounds @inline d_ya(A) = _d_ya_wrap(A, _dy_c, i, j)
@@ -817,154 +734,6 @@ end
             dVy_new, ΔVy = damped_update_V(dVydτ[i, j], Ry_ij, αVy[i, j], βVy[i, j], dτVy[i, j])
             dVydτ[i, j] = dVy_new
             Vy[i + 1, j + 1] += ΔVy
-        end
-    end
-
-    return nothing
-end
-
-# For internal velocity boundary conditions
-@parallel_indices (i, j) function compute_DR_residual_update_V!(
-        Rx::AbstractArray{T, 2},
-        Ry,
-        Vx,
-        Vy,
-        dVxdτ,
-        dVydτ,
-        P,
-        θc,
-        τxx,
-        τyy,
-        τxy,
-        ρgx,
-        ρgy,
-        Dx,
-        Dy,
-        αVx,
-        αVy,
-        βVx,
-        βVy,
-        dτVx,
-        dτVy,
-        _di_center,
-        _di_vertex,
-        dirichlet::NTuple{2, AbstractDirichletBoundaryCondition},
-    ) where {T}
-    Base.@propagate_inbounds @inline av_xa(A) = _av_xa_wrap(A, i, j)
-    Base.@propagate_inbounds @inline av_ya(A) = _av_ya_wrap(A, i, j)
-
-    @inbounds begin
-        if i ≤ size(Rx, 1) && j ≤ size(Rx, 2)
-            if !isdirichlet(dirichlet[1], i + 1, j + 1)
-                _dx_c = @dx(_di_center, i)
-                _dy_v = @dy(_di_vertex, j)
-                Base.@propagate_inbounds @inline d_xa(A) = _d_xa_wrap(A, _dx_c, i, j)
-                Base.@propagate_inbounds @inline d_yi(A) = _d_yi(A, _dy_v, i, j)
-                Rx_ij = (d_xa(τxx) + d_yi(τxy) - d_xa(P) - d_xa(θc) - av_xa(ρgx)) / Dx[i, j]
-                Rx[i, j] = Rx_ij
-
-                dVx_new, ΔVx = damped_update_V(dVxdτ[i, j], Rx_ij, αVx[i, j], βVx[i, j], dτVx[i, j])
-                dVxdτ[i, j] = dVx_new
-                Vx[i + 1, j + 1] += ΔVx
-            else
-                apply_dirichlet!(Vx, dirichlet[1], i + 1, j + 1)
-                Rx[i, j] = zero(T)
-                dVxdτ[i, j] = zero(T)
-            end
-        end
-        if i ≤ size(Ry, 1) && j ≤ size(Ry, 2)
-            if !isdirichlet(dirichlet[2], i + 1, j + 1)
-                _dy_c = @dy(_di_center, j)
-                _dx_v = @dx(_di_vertex, i)
-                Base.@propagate_inbounds @inline d_ya(A) = _d_ya_wrap(A, _dy_c, i, j)
-                Base.@propagate_inbounds @inline d_xi(A) = _d_xi(A, _dx_v, i, j)
-                Ry_ij = (d_ya(τyy) + d_xi(τxy) - d_ya(P) - d_ya(θc) - av_ya(ρgy)) / Dy[i, j]
-                Ry[i, j] = Ry_ij
-
-                dVy_new, ΔVy = damped_update_V(dVydτ[i, j], Ry_ij, αVy[i, j], βVy[i, j], dτVy[i, j])
-                dVydτ[i, j] = dVy_new
-                Vy[i + 1, j + 1] += ΔVy
-            else
-                apply_dirichlet!(Vy, dirichlet[2], i + 1, j + 1)
-                Ry[i, j] = zero(T)
-                dVydτ[i, j] = zero(T)
-            end
-        end
-    end
-
-    return nothing
-end
-
-# For internal velocity boundary conditions with free surface stabilisation
-@parallel_indices (i, j) function compute_DR_residual_update_V!(
-        Rx::AbstractArray{T, 2},
-        Ry,
-        Vx,
-        Vy,
-        dVxdτ,
-        dVydτ,
-        P,
-        θc,
-        τxx,
-        τyy,
-        τxy,
-        ρgx,
-        ρgy,
-        Dx,
-        Dy,
-        αVx,
-        αVy,
-        βVx,
-        βVy,
-        dτVx,
-        dτVy,
-        _di_center,
-        _di_vertex,
-        dt,
-        dirichlet::NTuple{2, AbstractDirichletBoundaryCondition},
-    ) where {T}
-    Base.@propagate_inbounds @inline av_xa(A) = _av_xa_wrap(A, i, j)
-    Base.@propagate_inbounds @inline av_ya(A) = _av_ya_wrap(A, i, j)
-
-    @inbounds begin
-        if i ≤ size(Rx, 1) && j ≤ size(Rx, 2)
-            if !isdirichlet(dirichlet[1], i + 1, j + 1)
-                _dx_c = @dx(_di_center, i)
-                _dy_v = @dy(_di_vertex, j)
-                Base.@propagate_inbounds @inline d_xa(A) = _d_xa_wrap(A, _dx_c, i, j)
-                Base.@propagate_inbounds @inline d_yi(A) = _d_yi(A, _dy_v, i, j)
-                Rx_ij = (d_xa(τxx) + d_yi(τxy) - d_xa(P) - d_xa(θc) - av_xa(ρgx)) / Dx[i, j]
-                Rx[i, j] = Rx_ij
-
-                dVx_new, ΔVx = damped_update_V(dVxdτ[i, j], Rx_ij, αVx[i, j], βVx[i, j], dτVx[i, j])
-                dVxdτ[i, j] = dVx_new
-                Vx[i + 1, j + 1] += ΔVx
-            else
-                apply_dirichlet!(Vx, dirichlet[1], i + 1, j + 1)
-                Rx[i, j] = zero(T)
-                dVxdτ[i, j] = zero(T)
-            end
-        end
-        if i ≤ size(Ry, 1) && j ≤ size(Ry, 2)
-            if !isdirichlet(dirichlet[2], i + 1, j + 1)
-                _dy_c = @dy(_di_center, j)
-                _dx_v = @dx(_di_vertex, i)
-                Base.@propagate_inbounds @inline d_ya(A) = _d_ya_wrap(A, _dy_c, i, j)
-                Base.@propagate_inbounds @inline d_xi(A) = _d_xi(A, _dx_v, i, j)
-                j_N = wrap_next(j, size(ρgy, 2))
-                ∂ρg∂y = (ρgy[i, j_N] - ρgy[i, j]) * _dy_c
-                ρg_correction = Vy[i + 1, j + 1] * ∂ρg∂y * dt
-                Ry_ij = (d_ya(τyy) + d_xi(τxy) - d_ya(P) - d_ya(θc) - av_ya(ρgy) + ρg_correction) / Dy[i, j]
-                Ry[i, j] = Ry_ij
-
-                dVy_new, ΔVy = damped_update_V(dVydτ[i, j], Ry_ij, αVy[i, j], βVy[i, j], dτVy[i, j])
-                dVydτ[i, j] = dVy_new
-                Vy[i + 1, j + 1] += ΔVy
-            else
-                apply_dirichlet!(Vy, dirichlet[2], i + 1, j + 1)
-                Ry[i, j] = zero(T)
-                dVydτ[i, j] = zero(T)
-            end
         end
     end
 
@@ -1007,7 +776,9 @@ end
         _di_center,
         _di_vertex,
         dt,
+        dirichlet,
     ) where {T}
+    # `dirichlet` is always empty in 3D; see `check_velocity_dirichlet`
 
     # Cell-centred fields are differenced with the wrapping stencil: a momentum row reaches the
     # last cell index only when its direction is periodic, and that row is the seam face, whose
