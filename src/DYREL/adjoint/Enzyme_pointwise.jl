@@ -1,0 +1,211 @@
+using Enzyme
+
+"""
+    enzyme_reverse_pointwise!(f, n, args; periodic = (false, false))
+
+Reverse-mode differentiate the point function `f(primals..., i, j)` over the 2D index range
+`1:n[1] × 1:n[2]`. `args` lists the arguments of `f` as pairs `x => dx`: `dx` is the shadow
+(adjoint) of `x`, and `x => nothing` keeps `x` constant. The seeds in the shadows of the outputs
+are consumed and the input shadows accumulate, as for the reverse of the whole kernel.
+
+Differentiating a whole `@parallel_indices` kernel makes Enzyme differentiate its threaded
+loop, which stores every point's intermediate values on a heap tape and is ~100× slower than
+the forward kernel. Here Enzyme differentiates one point at a time inside ParallelStencil
+kernels, so the tape stays on the stack. The pairs are split on the host into a tuple of primals
+and a tuple of shadows, plain arrays that ParallelStencil hands to any backend, and the Enzyme
+annotations are built inside the kernel (see `annotate`).
+
+The reverse of point `(i, j)` accumulates into the adjoints of its neighbours, and the point
+functions touch at most two consecutive indices in each dimension (with a fixed offset per
+array). Points two apart in both dimensions therefore never collide. Even-sized dimensions
+use two colors; odd-sized dimensions use a third color for the final index so the first and
+last points cannot collide across a periodic seam. Mark a dimension in `periodic` when `f`
+wraps its stencil there, as the vertex stress does through `clamped_indices`: on `nx` cells,
+vertices `1` and `nx + 1` both read cells `nx` and `1`, so the last two indices get colors of
+their own when the parity colors would otherwise meet across the seam.
+"""
+function enzyme_reverse_pointwise!(
+        f, n::NTuple{2, Integer}, args::Tuple; periodic = (false, false)
+    )
+    primals, shadows = map(first, args), map(kernel_shadow, map(last, args))
+    reverse_colored!(f, n, primals, shadows, nothing, periodic)
+    return nothing
+end
+
+"""
+    enzyme_reverse_pointwise!(f, n::Integer, args)
+
+One-dimensional variant for the boundary kernels: reverse `f(primals..., i)` over `1:n`. Each
+point must touch only its own boundary index `i`, so all points run concurrently without
+coloring. Differentiating the whole boundary kernel instead fails on the CPU backend, where
+Enzyme cannot reverse its `Threads.@threads` loop.
+"""
+function enzyme_reverse_pointwise!(f, n::Integer, args::Tuple)
+    primals, shadows = map(first, args), map(kernel_shadow, map(last, args))
+    compile_pullback_serially!(f, primals, shadows, nothing, (1,))
+    @parallel (1:n) reverse_point!(f, primals, shadows)
+    return nothing
+end
+
+@parallel_indices (i) function reverse_point!(f, primals, shadows)
+    apply_point!(f, primals, shadows, nothing, i)
+    return nothing
+end
+
+@inline function apply_point!(f, primals, shadows, context, i)
+    Enzyme.autodiff_deferred(
+        Enzyme.Reverse, Enzyme.Const(f), Enzyme.Const,
+        map(annotate, primals, shadows)..., Enzyme.Const(i),
+    )
+    return nothing
+end
+
+# Enzyme compiles a deferred gradient on its first call. On the CPU backend that call happens
+# inside the threaded kernel loop, and threads compiling the same gradient at once deadlock.
+# Compile each pullback once on the main thread before its first launch, on copies, so the
+# real shadows are not accumulated twice.
+const compiled_pullbacks = Set{Any}()
+
+function compile_pullback_serially!(
+        op, primals, shadows, context, index, apply! = apply_point!
+    )
+    Threads.nthreads() > 1 || return nothing
+    package = ParallelStencil.ParallelKernel.get_package(@__MODULE__)
+    package in (ParallelStencil.ParallelKernel.PKG_THREADS, ParallelStencil.ParallelKernel.PKG_POLYESTER) ||
+        return nothing
+    signature = typeof((apply!, op, primals, shadows, context))
+    signature in compiled_pullbacks && return nothing
+    apply!(op, deepcopy(primals), deepcopy(shadows), deepcopy(context), index...)
+    push!(compiled_pullbacks, signature)
+    return nothing
+end
+
+"""
+    enzyme_forward_pointwise!(f, n, args)
+
+Forward-mode differentiate the point function `f(primals..., i, j)` over `1:n[1] × 1:n[2]`.
+`args` lists pairs `x => dx`: `dx` is the tangent of `x`, the seed of an input and the result
+of an output, and `x => nothing` keeps `x` constant. A point writes only its own outputs, so
+all points run at once.
+"""
+function enzyme_forward_pointwise!(f, n::NTuple{2, Integer}, args::Tuple)
+    primals, tangents = map(first, args), map(last, args)
+    compile_pullback_serially!(f, primals, tangents, nothing, (1, 1), tangent_point!)
+    @parallel (1:n[1], 1:n[2]) forward_point!(f, primals, tangents)
+    return nothing
+end
+
+@parallel_indices (i, j) function forward_point!(f, primals, tangents)
+    tangent_point!(f, primals, tangents, nothing, i, j)
+    return nothing
+end
+
+@inline function tangent_point!(f, primals, tangents, context, i, j)
+    Enzyme.autodiff_deferred(
+        Enzyme.Forward, Enzyme.Const(f), Enzyme.Const,
+        map(annotate_tangent, primals, tangents)..., Enzyme.Const(i), Enzyme.Const(j),
+    )
+    return nothing
+end
+
+@inline annotate_tangent(x, dx) = Enzyme.Duplicated(x, dx)
+@inline annotate_tangent(x, ::Nothing) = Enzyme.Const(x)
+
+# A type object cannot be passed as GPU kernel data. Construct Active on the device.
+@inline kernel_shadow(dx) = dx === Enzyme.Active ? Val(:active) : dx
+
+@inline annotate(x, dx) = Enzyme.DuplicatedNoNeed(x, dx)
+@inline annotate(x, ::Nothing) = Enzyme.Const(x)
+
+# Temporary fix for an Enzyme bug (0.13.199–0.13.216): a read-only input annotated
+# `DuplicatedNoNeed` crashes reverse mode when the kept primal write reads it, e.g. a tuple
+# output such as `ρg`. Wrap the shadow of such inputs to annotate them `Duplicated`; remove
+# once Enzyme is fixed (reproducer: test/mwe_enzyme_reverse_duplicatednoneed.jl).
+struct ReadOnlyShadow{A}
+    dx::A
+end
+Adapt.@adapt_structure ReadOnlyShadow
+
+@inline annotate(x, s::ReadOnlyShadow) = Enzyme.Duplicated(x, s.dx)
+# @inline annotate(x, ::typeof(Enzyme.Active)) = Enzyme.Active(x)
+@inline annotate(x, ::Val{:active}) = Enzyme.Active(x)
+
+@inline function apply_point!(f, primals, shadows, context, i, j)
+    Enzyme.autodiff_deferred(
+        Enzyme.Reverse, Enzyme.Const(f), Enzyme.Const,
+        map(annotate, primals, shadows)..., Enzyme.Const(i), Enzyme.Const(j),
+    )
+    return nothing
+end
+
+# Reverse one point update with the rheology argument active and store its material derivatives.
+# `store_rheology_gradients!` is defined with the material-gradient helpers included below.
+struct PointwiseMaterialGradient{F, rheology_argument}
+    update!::F
+end
+
+@inline function apply_point!(
+        op::PointwiseMaterialGradient{F, rheology_argument}, primals, shadows, context, i, j,
+    ) where {F, rheology_argument}
+    (; gradient_fields, parameter_paths_by_phase) = context
+    rheology = primals[rheology_argument]
+
+    # Array fields paired with adjoint arrays become `DuplicatedNoNeed` arguments. Enzyme
+    # therefore accumulates their reverse derivatives directly into the supplied adjoint
+    # arrays, for example `adjoint.ε`, `adjoint.P`, and `adjoint.viscosity.η`.
+    # The rheology is different: it is an `Active` argument without a shadow object, so its
+    # complete nested derivative is returned by `autodiff_deferred` instead.
+    annotations = map(annotate, primals, shadows)
+    rheology_derivative = Enzyme.autodiff_deferred(
+        Enzyme.Reverse, Enzyme.Const(op.update!), Enzyme.Const, annotations...,
+        Enzyme.Const(i), Enzyme.Const(j),
+    )[1][rheology_argument]
+
+    # Select only the material-parameter paths requested in `gradients` from the returned
+    # rheology derivative and accumulate them in the phase- and point-resolved fields.
+    store_rheology_gradients!(
+        gradient_fields, parameter_paths_by_phase, rheology, rheology_derivative, (i, j)
+    )
+    return nothing
+end
+
+function reverse_colored!(
+        op, n::NTuple{2, Integer}, primals, shadows, context, periodic = (false, false)
+    )
+    nx, ny = n
+    compile_pullback_serially!(op, primals, shadows, context, (1, 1))
+    for (first_column, column_stride, number_of_columns) in color_groups(nx, periodic[1])
+        iszero(number_of_columns) && continue
+        for (first_row, row_stride, number_of_rows) in color_groups(ny, periodic[2])
+            iszero(number_of_rows) && continue
+            @parallel (1:number_of_columns, 1:number_of_rows) reverse_point_group!(
+                op, primals, shadows, context,
+                first_column, column_stride, first_row, row_stride,
+            )
+        end
+    end
+    return nothing
+end
+
+# `(first, stride, count)` of each color. Two colors alternate over an even-length prefix and
+# each remaining index is a color of its own. Across a periodic seam the wrapped stencils of
+# the first and last points meet, so the alternating prefix stops short of the last index.
+function color_groups(n::Integer, periodic::Bool = false)
+    alternating = periodic ? (n - 1) - isodd(n - 1) : n - isodd(n)
+    groups = (
+        (1, 2, cld(alternating, 2)),
+        (2, 2, fld(alternating, 2)),
+    )
+    return (groups..., ((i, 0, 1) for i in (alternating + 1):n)...)
+end
+
+@parallel_indices (column_in_group, row_in_group) function reverse_point_group!(
+        op, primals, shadows, context,
+        first_column, column_stride, first_row, row_stride,
+    )
+    column = first_column + column_stride * (column_in_group - 1)
+    row = first_row + row_stride * (row_in_group - 1)
+    apply_point!(op, primals, shadows, context, column, row)
+
+    return nothing
+end

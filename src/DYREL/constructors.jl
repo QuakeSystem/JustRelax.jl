@@ -10,13 +10,14 @@ Creates a new `DYREL` struct with fields initialized to zero.
   off the containers instead, so the two cannot disagree.
 
 # Keyword arguments
-- `ϵ`: General convergence tolerance. Default: `1.0e-6`.
+- `ϵ`: General convergence tolerance. Momentum residuals are measured against the force density that drives the flow (the buoyancy anomaly, or the deviatoric stress over the domain length), continuity against the velocity scale, and a nonlinear viscosity against the viscosity its stress implies. Default: `1.0e-6`.
 - `ϵ_vel`: Velocity convergence tolerance. Default: `1.0e-6`.
 - `CFL`: Courant-Friedrichs-Lewy number. Default: `0.99`.
 - `c_fact`: Damping scaling factor. Default: `0.5`.
 - `γfact`: Penalty scaling factor. Default: `20.0`.
+- `global_penalty`: Use mean finite viscosity for numerical penalty. Default: `true`.
 """
-function DYREL(ni::NTuple{2}, periodic::NTuple{2, Bool} = (false, false); ϵ = 1.0e-6, ϵ_vel = 1.0e-6, CFL = 0.99, c_fact = 0.5, γfact = 20.0)
+function DYREL(ni::NTuple{2}, periodic::NTuple{2, Bool} = (false, false); ϵ = 1.0e-6, ϵ_vel = 1.0e-6, CFL = 0.99, c_fact = 0.5, γfact = 20.0, global_penalty = true)
     nx, ny = ni
     # Every per-face array is indexed by the momentum row it belongs to, so they all share the
     # residual's shape -- one row longer in a periodic direction, which carries the seam face.
@@ -62,13 +63,13 @@ function DYREL(ni::NTuple{2}, periodic::NTuple{2, Bool} = (false, false); ϵ = 1
     return JustRelax.DYREL{T, F}(
         γ_eff, Dx, Dy, Dz, λmaxVx, λmaxVy, λmaxVz, dVxdτ, dVydτ, dVzdτ, dτVx, dτVy, dτVz,
         dVx, dVy, dVz, βVx, βVy, βVz, cVx, cVy, cVz, αVx, αVy, αVz, ηb, P_num, Rx0, Ry0,
-        Rz0, CFL, γfact, ϵ, ϵ_vel, c_fact
+        Rz0, CFL, γfact, global_penalty, ϵ, ϵ_vel, c_fact
     )
 end
 
-DYREL(nx::Integer, ny::Integer; ϵ = 1.0e-6, ϵ_vel = 1.0e-6, CFL = 0.99, c_fact = 0.5, γfact = 20.0) = DYREL((nx, ny); ϵ = ϵ, ϵ_vel = ϵ_vel, CFL = CFL, c_fact = c_fact, γfact = γfact)
+DYREL(nx::Integer, ny::Integer; ϵ = 1.0e-6, ϵ_vel = 1.0e-6, CFL = 0.99, c_fact = 0.5, γfact = 20.0, global_penalty = true) = DYREL((nx, ny); ϵ = ϵ, ϵ_vel = ϵ_vel, CFL = CFL, c_fact = c_fact, γfact = γfact, global_penalty = global_penalty)
 
-function DYREL(ni::NTuple{3}, periodic::NTuple{3, Bool} = (false, false, false); ϵ = 1.0e-6, ϵ_vel = 1.0e-6, CFL = 0.99, c_fact = 0.5, γfact = 20.0)
+function DYREL(ni::NTuple{3}, periodic::NTuple{3, Bool} = (false, false, false); ϵ = 1.0e-6, ϵ_vel = 1.0e-6, CFL = 0.99, c_fact = 0.5, γfact = 20.0, global_penalty = true)
     nx, ny, nz = ni
     # Every per-face array is indexed by the momentum row it belongs to, so they all share the
     # residual's shape -- one row longer in a periodic direction, which carries the seam face.
@@ -115,23 +116,23 @@ function DYREL(ni::NTuple{3}, periodic::NTuple{3, Bool} = (false, false, false);
     return JustRelax.DYREL{T, F}(
         γ_eff, Dx, Dy, Dz, λmaxVx, λmaxVy, λmaxVz, dVxdτ, dVydτ, dVzdτ, dτVx, dτVy, dτVz,
         dVx, dVy, dVz, βVx, βVy, βVz, cVx, cVy, cVz, αVx, αVy, αVz, ηb, P_num, Rx0, Ry0,
-        Rz0, CFL, γfact, ϵ, ϵ_vel, c_fact
+        Rz0, CFL, γfact, global_penalty, ϵ, ϵ_vel, c_fact
     )
 end
 
-DYREL(nx::Integer, ny::Integer, nz::Integer; ϵ = 1.0e-6, ϵ_vel = 1.0e-6, CFL = 0.99, c_fact = 0.5, γfact = 20.0) = DYREL((nx, ny, nz); ϵ = ϵ, ϵ_vel = ϵ_vel, CFL = CFL, c_fact = c_fact, γfact = γfact)
+DYREL(nx::Integer, ny::Integer, nz::Integer; ϵ = 1.0e-6, ϵ_vel = 1.0e-6, CFL = 0.99, c_fact = 0.5, γfact = 20.0, global_penalty = true) = DYREL((nx, ny, nz); ϵ = ϵ, ϵ_vel = ϵ_vel, CFL = CFL, c_fact = c_fact, γfact = γfact, global_penalty = global_penalty)
 
 
-DYREL(::Type{CPUBackend}, ni::NTuple{N, Integer}, periodic::NTuple{N, Bool} = ntuple(_ -> false, Val(N)); ϵ = 1.0e-6, ϵ_vel = 1.0e-6, CFL = 0.99, c_fact = 0.5, γfact = 20.0) where {N} = DYREL(ni, periodic; ϵ = ϵ, ϵ_vel = ϵ_vel, CFL = CFL, c_fact = c_fact, γfact = γfact)
-DYREL(::Type{CPUBackend}, nx::Integer, ny::Integer; ϵ = 1.0e-6, ϵ_vel = 1.0e-6, CFL = 0.99, c_fact = 0.5, γfact = 20.0) = DYREL((nx, ny); ϵ = ϵ, ϵ_vel = ϵ_vel, CFL = CFL, c_fact = c_fact, γfact = γfact)
-DYREL(::Type{CPUBackend}, nx::Integer, ny::Integer, nz::Integer; ϵ = 1.0e-6, ϵ_vel = 1.0e-6, CFL = 0.99, c_fact = 0.5, γfact = 20.0) = DYREL((nx, ny, nz); ϵ = ϵ, ϵ_vel = ϵ_vel, CFL = CFL, c_fact = c_fact, γfact = γfact)
+DYREL(::Type{CPUBackend}, ni::NTuple{N, Integer}, periodic::NTuple{N, Bool} = ntuple(_ -> false, Val(N)); ϵ = 1.0e-6, ϵ_vel = 1.0e-6, CFL = 0.99, c_fact = 0.5, γfact = 20.0, global_penalty = true) where {N} = DYREL(ni, periodic; ϵ = ϵ, ϵ_vel = ϵ_vel, CFL = CFL, c_fact = c_fact, γfact = γfact, global_penalty = global_penalty)
+DYREL(::Type{CPUBackend}, nx::Integer, ny::Integer; ϵ = 1.0e-6, ϵ_vel = 1.0e-6, CFL = 0.99, c_fact = 0.5, γfact = 20.0, global_penalty = true) = DYREL((nx, ny); ϵ = ϵ, ϵ_vel = ϵ_vel, CFL = CFL, c_fact = c_fact, γfact = γfact, global_penalty = global_penalty)
+DYREL(::Type{CPUBackend}, nx::Integer, ny::Integer, nz::Integer; ϵ = 1.0e-6, ϵ_vel = 1.0e-6, CFL = 0.99, c_fact = 0.5, γfact = 20.0, global_penalty = true) = DYREL((nx, ny, nz); ϵ = ϵ, ϵ_vel = ϵ_vel, CFL = CFL, c_fact = c_fact, γfact = γfact, global_penalty = global_penalty)
 
-function DYREL(::Type{CPUBackend}, stokes::JustRelax.StokesArrays, rheology, phase_ratios, di, dt; ϵ = 1.0e-6, ϵ_vel = 1.0e-6, CFL = 0.99, c_fact = 0.5, γfact = 20.0)
-    return DYREL(stokes, rheology, phase_ratios, di, dt; ϵ = ϵ, ϵ_vel = ϵ_vel, CFL = CFL, c_fact = c_fact, γfact = γfact)
+function DYREL(::Type{CPUBackend}, stokes::JustRelax.StokesArrays, rheology, phase_ratios, di, dt; ϵ = 1.0e-6, ϵ_vel = 1.0e-6, CFL = 0.99, c_fact = 0.5, γfact = 20.0, global_penalty = true)
+    return DYREL(stokes, rheology, phase_ratios, di, dt; ϵ = ϵ, ϵ_vel = ϵ_vel, CFL = CFL, c_fact = c_fact, γfact = γfact, global_penalty = global_penalty)
 end
 
-function DYREL(::Type{CPUBackend}, stokes::JustRelax.StokesArrays, rheology, phase_ratios, ϕ::JustRelax.RockRatio, di, dt; ϵ = 1.0e-6, ϵ_vel = 1.0e-6, CFL = 0.99, c_fact = 0.5, γfact = 20.0)
-    return DYREL(stokes, rheology, phase_ratios, ϕ, di, dt; ϵ = ϵ, ϵ_vel = ϵ_vel, CFL = CFL, c_fact = c_fact, γfact = γfact)
+function DYREL(::Type{CPUBackend}, stokes::JustRelax.StokesArrays, rheology, phase_ratios, ϕ::JustRelax.RockRatio, di, dt; ϵ = 1.0e-6, ϵ_vel = 1.0e-6, CFL = 0.99, c_fact = 0.5, γfact = 20.0, global_penalty = true)
+    return DYREL(stokes, rheology, phase_ratios, ϕ, di, dt; ϵ = ϵ, ϵ_vel = ϵ_vel, CFL = CFL, c_fact = c_fact, γfact = γfact, global_penalty = global_penalty)
 end
 
 
@@ -154,19 +155,20 @@ This function:
 - `dt`: Time step.
 
 # Keyword arguments
-- `ϵ`: General convergence tolerance. Default: `1.0e-6`.
+- `ϵ`: General convergence tolerance. Momentum residuals are measured against the force density that drives the flow (the buoyancy anomaly, or the deviatoric stress over the domain length), continuity against the velocity scale, and a nonlinear viscosity against the viscosity its stress implies. Default: `1.0e-6`.
 - `ϵ_vel`: Velocity convergence tolerance. Default: `1.0e-6`.
 - `CFL`: Courant-Friedrichs-Lewy number. Default: `0.99`.
 - `c_fact`: Damping scaling factor. Default: `0.5`.
 - `γfact`: Factor for the penalty parameter calculation. Default: `20.0`.
+- `global_penalty`: Use mean finite viscosity for numerical penalty. Default: `true`.
 """
-function DYREL(stokes::JustRelax.StokesArrays, rheology, phase_ratios, di, dt; ϵ = 1.0e-6, ϵ_vel = 1.0e-6, CFL = 0.99, c_fact = 0.5, γfact = 20.0)
+function DYREL(stokes::JustRelax.StokesArrays, rheology, phase_ratios, di, dt; ϵ = 1.0e-6, ϵ_vel = 1.0e-6, CFL = 0.99, c_fact = 0.5, γfact = 20.0, global_penalty = true)
 
     ni = size(stokes.P)
     dim = Val(length(ni))
 
     # instantiate DYREL object
-    dyrel = DYREL(ni, periodic_dims(stokes); ϵ = ϵ, ϵ_vel = ϵ_vel, CFL = CFL, c_fact = c_fact, γfact = γfact)
+    dyrel = DYREL(ni, periodic_dims(stokes); ϵ = ϵ, ϵ_vel = ϵ_vel, CFL = CFL, c_fact = c_fact, γfact = γfact, global_penalty = global_penalty)
 
     # compute bulk viscosity and penalty parameter
     compute_bulk_viscosity_and_penalty!(dyrel, stokes, rheology, phase_ratios, γfact, dt)
@@ -180,8 +182,8 @@ function DYREL(stokes::JustRelax.StokesArrays, rheology, phase_ratios, di, dt; �
     return dyrel
 end
 
-function DYREL(stokes::JustRelax.StokesArrays, rheology, phase_ratios, ϕ::JustRelax.RockRatio, di, dt; ϵ = 1.0e-6, ϵ_vel = 1.0e-6, CFL = 0.99, c_fact = 0.5, γfact = 20.0)
-    dyrel = DYREL(size(stokes.P), periodic_dims(stokes); ϵ = ϵ, ϵ_vel = ϵ_vel, CFL = CFL, c_fact = c_fact, γfact = γfact)
+function DYREL(stokes::JustRelax.StokesArrays, rheology, phase_ratios, ϕ::JustRelax.RockRatio, di, dt; ϵ = 1.0e-6, ϵ_vel = 1.0e-6, CFL = 0.99, c_fact = 0.5, γfact = 20.0, global_penalty = true)
+    dyrel = DYREL(size(stokes.P), periodic_dims(stokes); ϵ = ϵ, ϵ_vel = ϵ_vel, CFL = CFL, c_fact = c_fact, γfact = γfact, global_penalty = global_penalty)
     DYREL!(dyrel, stokes, rheology, phase_ratios, ϕ, di, dt; CFL = CFL, γfact = γfact)
     return dyrel
 end
@@ -264,23 +266,34 @@ This function parallelizes the computation across grid cells.
 """
 function compute_bulk_viscosity_and_penalty!(dyrel, stokes, rheology, phase_ratios, γfact, dt)
     ni = size(stokes.P)
-    @parallel (@idx ni) compute_bulk_viscosity_and_penalty!(dyrel.ηb, dyrel.γ_eff, rheology, phase_ratios.center, mean(stokes.viscosity.η[.!isinf.(stokes.viscosity.η)]), γfact, dt)
+    η = stokes.viscosity.η
+    η_mean = mean_penalty_viscosity(η)
+    @parallel (@idx ni) compute_bulk_viscosity_and_penalty!(dyrel.ηb, dyrel.γ_eff, rheology, phase_ratios.center, η, η_mean, γfact, dt, dyrel.global_penalty)
     return nothing
 end
 
+function mean_penalty_viscosity(η)
+    η_finite = η[.!isinf.(η)]
+    η_mean = mean(η_finite)
+    if MPI.Initialized()
+        η_sum = sum_mpi(η_finite)
+        η_count = MPI.Allreduce(length(η_finite), MPI.SUM, MPI.COMM_WORLD)
+        return η_sum / η_count
+    end
+    return η_mean
+end
 
-@parallel_indices (I...) function compute_bulk_viscosity_and_penalty!(ηb, γ_eff, rheology, phase_ratios_center, η_mean, γfact, dt)
+
+@parallel_indices (I...) function compute_bulk_viscosity_and_penalty!(ηb, γ_eff, rheology, phase_ratios_center, η, η_mean, γfact, dt, global_penalty)
 
     # bulk viscosity
     ratios = @inbounds @cell phase_ratios_center[I...]
     Kbdt = fn_ratio(get_bulk_modulus, rheology, ratios) * dt
     ηb[I...] = Kbdt
 
-    # penalty parameter: scaled by a single global viscosity. A penalty scaled by the local
-    # viscosity cannot relax the pressure of a weak body enclosed by strong material (e.g. a
-    # thermally contracting magma chamber): that pressure mode is resisted by the strong
-    # surroundings, so a step sized by the weak viscosity barely reduces it.
-    γ_num = γfact * η_mean
+    η_local = η[I...]
+    η_scale = global_penalty || isinf(η_local) ? η_mean : η_local
+    γ_num = γfact * η_scale
     γ_phy = isinf(Kbdt) ? γ_num : Kbdt
     γ_eff[I...] = γ_phy * γ_num / (γ_phy + γ_num)
 
@@ -292,8 +305,29 @@ end
 
 function compute_bulk_viscosity_and_penalty!(dyrel, stokes, rheology, phase_ratios, ϕ, γfact, dt)
     ni = size(stokes.P)
-    @parallel (@idx ni) compute_bulk_viscosity_and_penalty!(dyrel.ηb, dyrel.γ_eff, rheology, phase_ratios.center, stokes.viscosity.η, ϕ, mean(stokes.viscosity.η[.!isinf.(stokes.viscosity.η)]), γfact, dt)
+    η = stokes.viscosity.η
+    @parallel (@idx ni) compute_bulk_viscosity_and_penalty!(dyrel.ηb, dyrel.γ_eff, rheology, phase_ratios.center, η, ϕ, rock_mean_viscosity(η, ϕ), γfact, dt, dyrel.global_penalty)
     return nothing
+end
+
+# Mean of the finite viscosities over the rock cells, across all ranks. Eliminated (air) cells
+# are left out: they are not part of the solve, and their weak viscosity would shrink the
+# penalty of the whole domain.
+#
+# This is the cs-adjoint2026 choice. JustRelax v0.8.1-QS took the mean over all cells, air
+# included (`mean_penalty_viscosity`), which gives a somewhat smaller penalty in models with air.
+# The penalty is only the step size of the pressure update `P += γ_eff * RP`: it changes how the
+# solver reaches the solution, not the converged solution. With `convergence = :force` the
+# result does not depend on it (PlumeFreeSurface test, ϵ = 1e-6: max Vy agrees to 5e-9 relative
+# with either mean). With the looser `convergence = :pressure` the solve stops further from the
+# solution, and where it stops depends on the penalty (same test: max Vy 7.85e-9 with this mean,
+# 9.28e-9 with the v0.8.1-QS mean, converged value 6.20e-9). `:pressure` therefore reproduces
+# v0.8.1-QS variational results exactly only in models without air.
+function rock_mean_viscosity(η, ϕ::JustRelax.RockRatio)
+    in_rock(ηᵢ, ϕᵢ) = ϕᵢ > 0 && isfinite(ηᵢ)
+    total = sum_mpi((ηᵢ, ϕᵢ) -> in_rock(ηᵢ, ϕᵢ) ? ηᵢ : zero(ηᵢ), η, ϕ.center)
+    count = sum_mpi((ηᵢ, ϕᵢ) -> in_rock(ηᵢ, ϕᵢ) ? one(ηᵢ) : zero(ηᵢ), η, ϕ.center)
+    return iszero(count) ? one(total) : total / count
 end
 
 # `ηb` holds the same material quantity as the full-volume solver: the rock fraction
@@ -310,7 +344,12 @@ end
 # fraction back in (`γ_eff * RP` and the single center-fraction factor used by the
 # Gershgorin bound), so no second volume-fraction factor is introduced; `isvalid_c`
 # guarantees the divisor is positive.
-@parallel_indices (I...) function compute_bulk_viscosity_and_penalty!(ηb, γ_eff, rheology, phase_ratios_center, η, ϕ::JustRelax.RockRatio, η_mean, γfact, dt)
+#
+# As in the full-volume solver, the penalty is scaled by a single global viscosity (the mean over
+# the rock cells), not the local one: a local penalty cannot relax the pressure of a weak body
+# enclosed by strong material, e.g. a plume in the mantle, whose pressure mode is resisted by the
+# strong surroundings. `global_penalty = false` falls back to the local viscosity.
+@parallel_indices (I...) function compute_bulk_viscosity_and_penalty!(ηb, γ_eff, rheology, phase_ratios_center, η, ϕ::JustRelax.RockRatio, η_mean, γfact, dt, global_penalty)
 
     if isvalid_c(ϕ, I...)
         ratios = @cell phase_ratios_center[I...]
@@ -318,7 +357,7 @@ end
         ηb[I...] = Kbdt
 
         η_local = η[I...]
-        γ_num = γfact * (isinf(η_local) ? η_mean : η_local)
+        γ_num = γfact * (global_penalty || isinf(η_local) ? η_mean : η_local)
         γ_phy = isinf(Kbdt) ? γ_num : Kbdt
         γ_eff[I...] = γ_phy * γ_num / (γ_phy + γ_num) / ϕ.center[I...]
     else

@@ -34,6 +34,7 @@ import JustRelax:
     AbstractFlowBoundaryConditions,
     DisplacementBoundaryConditions,
     VelocityBoundaryConditions,
+    AbstractDirichletBoundaryCondition,
     apply_dirichlet,
     apply_dirichlet!,
     isdirichlet,
@@ -42,12 +43,19 @@ import JustRelax:
     check_periodic_bcs,
     reject_periodic_bcs
 
-import JustRelax: normal_stress, shear_stress, shear_vorticity, unwrap
+import JustRelax: normal_stress, shear_stress, shear_vorticity, grid_stress, unwrap
 import JustRelax: @dxi, @dx, @dy, @dz
 
 import JustPIC: numphases, nphases, PhaseRatios, update_phase_ratios!, cell_index
 
-__init__() = @init_parallel_stencil(CUDA, Float64, 2)
+function __init__()
+    @init_parallel_stencil(CUDA, Float64, 2)
+    # Enzyme accumulates shadows atomically on GPU targets. In a function it does not inline,
+    # the shadow of a by-reference argument is the caller's stack memory, where PTX has no
+    # atomics (CUDA error 717), so Enzyme has to inline everything before differentiating.
+    Enzyme.API.inlineall!(true)
+    return nothing
+end
 
 include("../../common.jl")
 include("../../stokes/Stokes2D.jl")
@@ -66,6 +74,23 @@ function JR2D.apply_geoparams_rsf_viscosity!(
     )
     return _apply_gp_rsf_viscosity!(stokes, fields, phase_ratios, rheology, dt; kwargs...)
 end
+
+# The forward and adjoint DYREL implementations are separate so Enzyme only has
+# to differentiate pointwise stencil operations.  Load the adjoint path here as
+# well as in the CPU module; backend-specific allocation methods live below.
+include("../../DYREL/adjoint/adjoint_solver_utils.jl")
+include("../../DYREL/adjoint/adjoint_inner_solvers.jl")
+include("../../DYREL/adjoint/Enzyme_pointwise.jl")
+include("../../DYREL/adjoint/Enzyme_kernels.jl")
+include("../../DYREL/adjoint/Enzyme_boundary_kernel.jl")
+include("../../DYREL/adjoint/Enzyme_kernels_VS.jl")
+include("../../DYREL/adjoint/Enzyme_gradients_kernels.jl")
+include("../../DYREL/adjoint/sensitivity_utils.jl")
+include("../../DYREL/adjoint/sensitivities_adjoint.jl")
+include("../../DYREL/adjoint/sensitivities_adjoint_VS.jl")
+include("../../DYREL/adjoint/objective_function.jl")
+include("../../DYREL/adjoint/solver_adjoint.jl")
+include("../../DYREL/adjoint/solver_adjoint_VS.jl")
 
 @parallel_indices (i, j) function _apply_free_surface_diagonal_CUDA!(
         Dy, λmaxVy, ρgy, di_center, dt
@@ -93,6 +118,34 @@ function JR2D.apply_free_surface_diagonal!(
 end
 
 # Types
+# Adjoint buffers must be allocated by this module's ParallelStencil backend.
+function JR2D.AdjointStokesArrays(::Type{CUDABackend}, ni::Vararg{Integer, N}) where {N}
+    return AdjointStokesArrays(tuple(ni...))
+end
+
+function JR2D.AdjointStokesArrays(::Type{CUDABackend}, ni::NTuple{N, Integer}) where {N}
+    return AdjointStokesArrays(ni)
+end
+
+function JR2D.AdjointStokesArrays(
+        ::Type{CUDABackend}, ni::NTuple{N, Integer}, bcs::AbstractFlowBoundaryConditions
+    ) where {N}
+    return AdjointStokesArrays(ni, periodic_dims(bcs))
+end
+
+function JR2D.AdjointStokesArrays(
+        ::Type{CUDABackend}, ni::NTuple{N, Integer}, periodic::NTuple{N, Bool}
+    ) where {N}
+    return AdjointStokesArrays(ni, periodic)
+end
+
+function JR2D.material_controls(
+        ::Type{CUDABackend}, ni::NTuple{N, Integer}, names::NTuple{M, Symbol};
+        nphases = nothing,
+    ) where {N, M}
+    return _material_controls(ni, names; nphases)
+end
+
 function JR2D.StokesArrays(::Type{CUDABackend}, ni::NTuple{N, Integer}) where {N}
     return StokesArrays(ni)
 end
@@ -107,20 +160,20 @@ function JR2D.RateStateArrays(::Type{CUDABackend}, ni::NTuple{N, Integer}; loc::
     return RateStateArrays(ni; loc = loc)
 end
 
-function JR2D.DYREL(::Type{CUDABackend}, ni::NTuple{N, Integer}, periodic::NTuple{N, Bool} = ntuple(_ -> false, Val(N)); ϵ = 1.0e-6, ϵ_vel = 1.0e-6, CFL = 0.99, c_fact = 0.5, γfact = 20.0) where {N}
-    return DYREL(ni, periodic; ϵ = ϵ, ϵ_vel = ϵ_vel, CFL = CFL, c_fact = c_fact, γfact = γfact)
+function JR2D.DYREL(::Type{CUDABackend}, ni::NTuple{N, Integer}, periodic::NTuple{N, Bool} = ntuple(_ -> false, Val(N)); ϵ = 1.0e-6, ϵ_vel = 1.0e-6, CFL = 0.99, c_fact = 0.5, γfact = 20.0, global_penalty = true) where {N}
+    return DYREL(ni, periodic; ϵ = ϵ, ϵ_vel = ϵ_vel, CFL = CFL, c_fact = c_fact, γfact = γfact, global_penalty = global_penalty)
 end
 
-function JR2D.DYREL(::Type{CUDABackend}, nx::Integer, ny::Integer; ϵ = 1.0e-6, ϵ_vel = 1.0e-6, CFL = 0.99, c_fact = 0.5, γfact = 20.0)
-    return DYREL((nx, ny); ϵ = ϵ, ϵ_vel = ϵ_vel, CFL = CFL, c_fact = c_fact, γfact = γfact)
+function JR2D.DYREL(::Type{CUDABackend}, nx::Integer, ny::Integer; ϵ = 1.0e-6, ϵ_vel = 1.0e-6, CFL = 0.99, c_fact = 0.5, γfact = 20.0, global_penalty = true)
+    return DYREL((nx, ny); ϵ = ϵ, ϵ_vel = ϵ_vel, CFL = CFL, c_fact = c_fact, γfact = γfact, global_penalty = global_penalty)
 end
 
-function JR2D.DYREL(::Type{CUDABackend}, stokes::JustRelax.StokesArrays, rheology, phase_ratios, di, dt; ϵ = 1.0e-6, ϵ_vel = 1.0e-6, CFL = 0.99, c_fact = 0.5, γfact = 20.0)
-    return DYREL(stokes, rheology, phase_ratios, di, dt; ϵ = ϵ, ϵ_vel = ϵ_vel, CFL = CFL, c_fact = c_fact, γfact = γfact)
+function JR2D.DYREL(::Type{CUDABackend}, stokes::JustRelax.StokesArrays, rheology, phase_ratios, di, dt; ϵ = 1.0e-6, ϵ_vel = 1.0e-6, CFL = 0.99, c_fact = 0.5, γfact = 20.0, global_penalty = true)
+    return DYREL(stokes, rheology, phase_ratios, di, dt; ϵ = ϵ, ϵ_vel = ϵ_vel, CFL = CFL, c_fact = c_fact, γfact = γfact, global_penalty = global_penalty)
 end
 
-function JR2D.DYREL(::Type{CUDABackend}, stokes::JustRelax.StokesArrays, rheology, phase_ratios, ϕ::JustRelax.RockRatio, di, dt; ϵ = 1.0e-6, ϵ_vel = 1.0e-6, CFL = 0.99, c_fact = 0.5, γfact = 20.0)
-    return DYREL(stokes, rheology, phase_ratios, ϕ, di, dt; ϵ = ϵ, ϵ_vel = ϵ_vel, CFL = CFL, c_fact = c_fact, γfact = γfact)
+function JR2D.DYREL(::Type{CUDABackend}, stokes::JustRelax.StokesArrays, rheology, phase_ratios, ϕ::JustRelax.RockRatio, di, dt; ϵ = 1.0e-6, ϵ_vel = 1.0e-6, CFL = 0.99, c_fact = 0.5, γfact = 20.0, global_penalty = true)
+    return DYREL(stokes, rheology, phase_ratios, ϕ, di, dt; ϵ = ϵ, ϵ_vel = ϵ_vel, CFL = CFL, c_fact = c_fact, γfact = γfact, global_penalty = global_penalty)
 end
 
 function JR2D.update_α_β!(βVx::CuArray, βVy, αVx, αVy, dτVx, dτVy, cVx, cVy)
@@ -339,10 +392,6 @@ function JR2D.compute_viscosity!(
     return _compute_viscosity!(stokes, ν, phase_ratios, ϕ, args, rheology, air_phase, cutoff, fn_viscosity)
 end
 
-function JR2D.compute_viscosity!(η, ν, εII::CuArray, args, rheology, cutoff)
-    return compute_viscosity!(η, ν, εII, args, rheology, cutoff)
-end
-
 function compute_viscosity!(::CUDABackendTrait, stokes, ν, args, rheology, cutoff, fn_viscosity::F) where {F}
     return _compute_viscosity!(stokes, ν, args, rheology, cutoff, fn_viscosity)
 end
@@ -357,10 +406,6 @@ function compute_viscosity!(
         ::CUDABackendTrait, stokes, ν, phase_ratios, ϕ::JustRelax.RockRatio, args, rheology, air_phase, cutoff, fn_viscosity::F
     ) where {F}
     return _compute_viscosity!(stokes, ν, phase_ratios, ϕ, args, rheology, air_phase, cutoff, fn_viscosity)
-end
-
-function compute_viscosity!(η, ν, εII::CuArray, args, rheology, cutoff)
-    return compute_viscosity!(η, ν, εII, args, rheology, cutoff)
 end
 
 ## Stress
@@ -569,7 +614,7 @@ end
 
 function JR2D.compute_shear_heating!(::CUDABackendTrait, thermal, stokes, rheology, dt)
     ni = size(thermal.shear_heating)
-    @parallel (ni) compute_shear_heating_kernel!(
+    @parallel (@idx ni) compute_shear_heating_kernel!(
         thermal.shear_heating,
         @tensor_center(stokes.τ),
         @tensor_center(stokes.τ_o),
@@ -604,18 +649,12 @@ end
 # stress rotation on particles
 
 function JR2D.rotate_stress_particles!(
-        τ::NTuple, ω::NTuple, particles::Particles{CUDA.CUDABackend}, dt; method::Symbol = :matrix
+        τ::NTuple, ω::NTuple, particles::Particles{CUDA.CUDABackend}, dt; method = nothing
     )
-    fn = if method === :matrix
-        rotate_stress_particles_rotation_matrix!
-
-    elseif method === :jaumann
-        rotate_stress_particles_jaumann!
-
-    else
-        error("Unknown method: $method. Valid methods are :matrix and :jaumann")
-    end
-    @parallel (@idx size(particles.index)) fn(τ..., ω..., particles.index, dt)
+    warn_rotation_method(method)
+    @parallel (@idx size(particles.index)) rotate_stress_particles_GeoParams!(
+        τ..., ω..., particles.index, dt
+    )
 
     return nothing
 end

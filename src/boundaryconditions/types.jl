@@ -41,8 +41,9 @@ Create thermal boundary conditions for 2D or 3D temperature fields.
 Boundary tuples use `left`, `right`, `top`, and `bot` in 2D. In 3D they also use
 `front` and `back`. Omitted faces are filled with `false`, and the dimensionality
 is inferred from the longest boundary tuple that is passed: pass a complete
-six-face tuple for a 3D set, since the defaults are four-face 2D tuples. Tuples
-with any other number of faces are rejected.
+six-face tuple for a 3D set, since the defaults are four-face 2D tuples. A longest
+tuple with any other number of faces, or a face name that is not valid for the
+inferred dimension, is rejected.
 
 The face values have the following meaning:
 
@@ -100,13 +101,15 @@ struct TemperatureBoundaryConditions{T1, T2, T3, T4, D, nD} <: AbstractBoundaryC
             throw(ArgumentError("thermal boundary conditions must use 4 (2D) or 6 (3D) faces"))
         end
 
-        # expand to 3D
+        check_thermal_bc_faces(nD, no_flux, constant_flux, constant_value, periodic)
+
+        # fill omitted faces with `false` and expand to 3D
         dummy = (; front = false, back = false)
 
-        no_flux_exp = merge(dummy, no_flux)
-        constant_flux_exp = merge(dummy, constant_flux)
-        constant_value_exp = merge(dummy, constant_value)
-        periodic_exp = merge(dummy, periodic)
+        no_flux_exp = merge(dummy, _thermal_bc_tuple(no_flux, Val(nD)))
+        constant_flux_exp = merge(dummy, _thermal_bc_tuple(constant_flux, Val(nD)))
+        constant_value_exp = merge(dummy, _thermal_bc_tuple(constant_value, Val(nD)))
+        periodic_exp = merge(dummy, _thermal_bc_tuple(periodic, Val(nD)))
 
         check_periodic_pairs(periodic_exp, nD)
         check_periodic_conflicts(
@@ -150,9 +153,22 @@ struct DisplacementBoundaryConditions{T, nD} <: AbstractFlowBoundaryConditions
         return new{T, nD}(no_slip, free_slip, periodic, free_surface)
     end
 end
+@inline _component_dirichlet(nt, key::Symbol) =
+    Dirichlet(hasproperty(nt, key) ? getproperty(nt, key) : NamedTuple())
+
+@inline function _velocity_dirichlet(nt, ::Val{2})
+    return (Vx = _component_dirichlet(nt, :Vx), Vy = _component_dirichlet(nt, :Vy))
+end
+@inline function _velocity_dirichlet(nt, ::Val{3})
+    return (
+        Vx = _component_dirichlet(nt, :Vx),
+        Vy = _component_dirichlet(nt, :Vy),
+        Vz = _component_dirichlet(nt, :Vz),
+    )
+end
 
 """
-    VelocityBoundaryConditions(; no_slip, free_slip, periodic, free_surface=false)
+    VelocityBoundaryConditions(; no_slip, free_slip, periodic, free_surface=false, dirichlet=NamedTuple())
 
 Define 2D or 3D boundary conditions for the velocity field. Face names are
 `left`, `right`, `top`, and `bot` in 2D, with `front` and `back` added in 3D.
@@ -162,24 +178,48 @@ Faces where all three are `false` are not modified by `flow_bcs!`, which is how
 a prescribed velocity field is imposed. Periodic faces must be enabled in pairs
 (`left`/`right`, `front`/`back`, or `bot`/`top`), and a periodic top face is
 incompatible with `free_surface=true`.
+
+`dirichlet` prescribes an interior, mask-selected Dirichlet region for the
+velocity field (for example an internal "velocity box"), independent of the
+four/six edge faces above. Pass a per-component named tuple, e.g.
+`dirichlet = (; Vx = (; constant = v, mask = mask_x))`; a component that is
+omitted, or the keyword itself, leaves that component unconstrained. Each
+component's `mask` must be sized like that component's velocity array (`Vx`,
+`Vy`, or `Vz`).
+
+For a spatially-varying prescribed value (e.g. several boxes with different
+velocities), build a `DirichletBoundaryCondition(value_array, Mask(mask_array))`
+directly and pass it as the component, e.g. `dirichlet = (; Vx = my_bc)`: the
+`(; constant, mask)` shorthand's array form infers its mask from the value
+array's non-zero entries, which cannot represent a prescribed value of exactly
+zero. See [`Dirichlet`](@ref).
+
+The prescribed nodes are imposed inside the velocity kernels of `solve_DYREL!` and
+`solve_VariationalDYREL!` (2D only): their momentum residual is set to zero and their
+velocity is held at the prescribed value. The adjoints of both solvers differentiate the same
+kernels and treat the prescribed velocities as constants; their observation must not overlap
+prescribed nodes.
 """
-struct VelocityBoundaryConditions{T, nD} <: AbstractFlowBoundaryConditions
+struct VelocityBoundaryConditions{T, D, nD} <: AbstractFlowBoundaryConditions
     no_slip::T
     free_slip::T
     periodic::T
     free_surface::Bool
+    dirichlet::D
 
     function VelocityBoundaryConditions(;
             no_slip::T = (left = false, right = false, top = false, bot = false),
             free_slip::T = (left = true, right = true, top = true, bot = true),
             periodic::T = map(_ -> false, no_slip),
             free_surface::Bool = false,
+            dirichlet::NamedTuple = NamedTuple(),
         ) where {T}
         @assert length(no_slip) === length(free_slip) === length(periodic)
         check_flow_bcs(no_slip, free_slip, periodic, free_surface)
 
         nD = length(no_slip) == 4 ? 2 : 3
-        return new{T, nD}(no_slip, free_slip, periodic, free_surface)
+        D_nt = _velocity_dirichlet(dirichlet, Val(nD))
+        return new{T, typeof(D_nt), nD}(no_slip, free_slip, periodic, free_surface, D_nt)
     end
 end
 
@@ -220,6 +260,16 @@ function check_periodic_pairs(periodic, nD)
     return
 end
 
+function check_thermal_bc_faces(nD, conditions...)
+    faces = nD == 2 ? (:left, :right, :top, :bot) : (:left, :right, :front, :back, :top, :bot)
+    for condition in conditions, k in keys(condition)
+        k in faces || throw(
+            ArgumentError("unknown $(nD)D thermal boundary face `$k`; valid faces are $faces")
+        )
+    end
+    return
+end
+
 function check_periodic_conflicts(periodic, conditions...)
     for k in keys(periodic)
         getproperty(periodic, k) || continue
@@ -242,7 +292,7 @@ interior face. `check_periodic_bcs` requires the two to agree.
 """
 function periodic_dims end
 
-@inline periodic_dims(bcs::VelocityBoundaryConditions{T, nD}) where {T, nD} =
+@inline periodic_dims(bcs::VelocityBoundaryConditions{T, D, nD}) where {T, D, nD} =
     _periodic_dims(bcs.periodic, Val(nD))
 @inline periodic_dims(bcs::DisplacementBoundaryConditions{T, nD}) where {T, nD} =
     _periodic_dims(bcs.periodic, Val(nD))

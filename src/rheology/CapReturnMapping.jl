@@ -121,12 +121,56 @@ end
     return SVector(s - trial[1] + 2 * η * λ * Aτ, p - trial[2] - Kdt * λ * Ap, F - ηvp * λ)
 end
 
-function cap_return_mapping(rheology, phase, s::T, p::T, EII, η, Kdt, ηvp; Pf = zero(T), maxiter = 40) where {T}
+@inline function cap_return_mapping(rheology, phase, s::T, p::T, EII, η, Kdt, ηvp; Pf = zero(T), maxiter = 40) where {T}
     F, _, _ = cap_invariants(rheology, phase, s, p, EII, Pf)
     x = SVector(s, p, zero(T))
     F <= 0 && return x, true
     # Dilatant cap flow needs a finite elastic volumetric compliance.
     isfinite(Kdt) && Kdt > 0 && η > 0 || return x, false
+    # The solve gets a copy of the rheology without derivatives: an Active rheology passed to
+    # the inactive call is mis-addressed on CUDA (error 717, invalid address space).
+    x0, converged, J⁻¹, r0 = cap_newton_solve(
+        detach(rheology), phase, s, p, F, EII, η, Kdt, ηvp, Pf, maxiter
+    )
+    converged || return x0, false
+    # Implicit-function step. `r` repeats the residual `r0` at the solution, so the value stays
+    # `x0`, while Enzyme differentiates only this step: dx = -J⁻¹ ∂R/∂(inputs), the derivative
+    # of the converged state without the Newton iterations.
+    r = cap_residual(x0, rheology, phase, EII, SVector(s, p), η, Kdt, ηvp, Pf)
+    return x0 - J⁻¹ * (r - r0), true
+end
+
+# Newton solve of the cap residual, returning the state, convergence flag, inverse residual
+# Jacobian and residual at the state. Enzyme treats it as inactive (see the rule below): the
+# reverse of its iterations, line search and ForwardDiff Jacobian is not needed for the
+# implicit derivative, and does not compile for GPUs.
+function cap_newton_solve(rheology, phase, s::T, p::T, F, EII, η, Kdt, ηvp, Pf, maxiter) where {T}
+    x, converged = _cap_newton_iterations(rheology, phase, s, p, F, EII, η, Kdt, ηvp, Pf, maxiter)
+    trial = SVector(s, p)
+    unscaled = y -> cap_residual(y, rheology, phase, EII, trial, η, Kdt, ηvp, Pf)
+    J⁻¹ = inv(ForwardDiff.jacobian(unscaled, x))
+    # A singular Jacobian has no implicit derivative; report it as a failed return map.
+    converged &= all(isfinite, J⁻¹)
+    return x, converged, J⁻¹, unscaled(x)
+end
+EnzymeRules.inactive(::typeof(cap_newton_solve), args...) = nothing
+
+# Copy of `x` with every floating-point number detached from differentiation. Enzyme's
+# `ignore_derivatives` fails on aggregates such as a GeoParams material, so rebuild the bits
+# value from its detached scalars.
+@inline detach(x::AbstractFloat) = ignore_derivatives(x)
+@inline detach(x::Tuple) = map(detach, x)
+@generated function detach(x::T) where {T}
+    isbitstype(T) && isstructtype(T) && fieldcount(T) > 0 || return :x
+    fields = (:(detach(getfield(x, $i))) for i in 1:fieldcount(T))
+    return quote
+        Base.@_inline_meta
+        $(Expr(:new, T, fields...))
+    end
+end
+
+@inline function _cap_newton_iterations(rheology, phase, s::T, p::T, F, EII, η, Kdt, ηvp, Pf, maxiter) where {T}
+    x = SVector(s, p, zero(T))
     scale = max(abs(s), abs(p), abs(F), eps(T))
     tolerance = 100 * eps(T)
     trial = SVector(s, p)

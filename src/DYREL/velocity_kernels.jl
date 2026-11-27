@@ -147,7 +147,7 @@ end
 # here — it is folded with the (similarly small) plastic pressure correction ΔPψ into the single
 # `θc` correction array by the stress kernel. Only these two small corrections are summed; the large
 # hydrostatic P is kept separate in the momentum kernel to preserve precision (see
-# compute_stress_viscosity_DRYEL!).
+# compute_stress_viscosity_DYREL!).
 # NB: ∇V itself is NOT stored here — it is dead inside the DYREL/PH loop (RP is derived from the
 # in-register `div_ij`, and nothing on this path reads ∇V back). The public `stokes.∇V` diagnostic
 # is recomputed once from the converged velocity field after the loop in `_solve_DYREL!`.
@@ -198,7 +198,38 @@ end
         ΔT,
         melt_fraction,
         dt,
-        do_strain_rate
+        do_strain_rate,
+    ) where {T}
+    compute_∇V_strain_rate_RP_point!(
+        εxx, εyy, εxy, Vx, Vy, RP, P, P0, Q, ηb, _di_vertex, _di_vx, _di_vy, rheology,
+        phase_ratio, ΔT, melt_fraction, dt, do_strain_rate, i, j,
+    )
+    return nothing
+end
+
+# Body of `compute_∇V_strain_rate_RP!` at point (i, j). It is a separate function so the adjoint
+# can differentiate one point at a time (see `enzyme_reverse_pointwise!`).
+@inline function compute_∇V_strain_rate_RP_point!(
+        εxx::AbstractArray{T, 2},
+        εyy,
+        εxy,
+        Vx,
+        Vy,
+        RP,
+        P,
+        P0,
+        Q,
+        ηb,
+        _di_vertex,
+        _di_vx,
+        _di_vy,
+        rheology,
+        phase_ratio,
+        ΔT,
+        melt_fraction,
+        dt,
+        do_strain_rate,
+        i::Integer, j::Integer,
     ) where {T}
 
     third = T(1) / T(3)
@@ -234,7 +265,7 @@ end
             end
             # fused pressure residual (reuses `div_ij` in-register); the numerical pressure
             # P_num = γ_eff·RP is folded into θc (with ΔPψ) downstream by the stress kernel.
-            RP[i, j] = _RP_cell(P[i, j], P0[i, j], div_ij, Q[i, j], ηb[i, j], dt, rheology, phase_ratio, ΔT, melt_fraction, i, j)
+            RP[i, j] = _RP_cell(P[i, j], P0[i, j], div_ij, Q[i, j], bulk_viscosity(ηb, rheology, phase_ratio, dt, i, j), dt, rheology, phase_ratio, ΔT, melt_fraction, i, j)
         end
     end
 
@@ -354,6 +385,44 @@ end
     return nothing
 end
 
+# For internal velocity Dirichlet regions -- v0.6.1's DYREL solver has no
+# free-surface stabilization yet, so this is the plain overload above plus
+# `dirichlet` masking only (contrast with the "with Vx,Vy,dt" overload below,
+# which folds in a free-surface density-gradient correction and is unused by
+# this branch's solver.jl).
+@parallel_indices (i, j) function compute_PH_residual_V!(
+        Rx::AbstractArray{T, 2}, Ry, P, ΔPψ, τxx, τyy, τxy, ρgx, ρgy, _di_center, _di_vertex,
+        dirichlet::NTuple{2, AbstractDirichletBoundaryCondition},
+    ) where {T}
+    Base.@propagate_inbounds @inline av_xa(A) = _av_xa_wrap(A, i, j)
+    Base.@propagate_inbounds @inline av_ya(A) = _av_ya_wrap(A, i, j)
+
+    if i ≤ size(Rx, 1) && j ≤ size(Rx, 2)
+        if !isdirichlet(dirichlet[1], i + 1, j + 1)
+            _dx_c = @dx(_di_center, i)
+            _dy_v = @dy(_di_vertex, j)
+            Base.@propagate_inbounds @inline d_xa(A) = _d_xa_wrap(A, _dx_c, i, j)
+            Base.@propagate_inbounds @inline d_yi(A) = _d_yi(A, _dy_v, i, j)
+            Rx[i, j] = d_xa(τxx) + d_yi(τxy) - d_xa(P) - d_xa(ΔPψ) - av_xa(ρgx)
+        else
+            Rx[i, j] = zero(T)
+        end
+    end
+    if i ≤ size(Ry, 1) && j ≤ size(Ry, 2)
+        if !isdirichlet(dirichlet[2], i + 1, j + 1)
+            _dy_c = @dy(_di_center, j)
+            _dx_v = @dx(_di_vertex, i)
+            Base.@propagate_inbounds @inline d_ya(A) = _d_ya_wrap(A, _dy_c, i, j)
+            Base.@propagate_inbounds @inline d_xi(A) = _d_xi(A, _dx_v, i, j)
+            Ry[i, j] = d_ya(τyy) + d_xi(τxy) - d_ya(P) - d_ya(ΔPψ) - av_ya(ρgy)
+        else
+            Ry[i, j] = zero(T)
+        end
+    end
+    # end
+    return nothing
+end
+
 @parallel_indices (i, j) function compute_PH_residual_V!(
         Rx::AbstractArray{T, 2},
         Ry,
@@ -374,8 +443,158 @@ end
         dt,
         _inv_dt,
     ) where {T}
+    compute_PH_residual_V_point!(
+        Rx, Ry, Vx, Vy, P, ΔPψ, τxx, τyy, τxy, ρgx, ρgy, _di_center, _di_vertex, dt,
+        no_velocity_dirichlet(), i, j,
+    )
+    _ph_add_inertia!(Rx, Ry, Vx, Vy, Vx0, Vy0, ρ_inertia, _inv_dt, no_velocity_dirichlet(), i, j)
+    return nothing
+end
+
+# Forward residual with inertia and the adjoint's internal Dirichlet rows. Inertia is added
+# after the pointwise Stokes residual so Enzyme's pullback of that residual is unchanged.
+@parallel_indices (i, j) function compute_PH_residual_V!(
+        Rx::AbstractArray{T, 2},
+        Ry,
+        Vx,
+        Vy,
+        Vx0,
+        Vy0,
+        P,
+        ΔPψ,
+        τxx,
+        τyy,
+        τxy,
+        ρgx,
+        ρgy,
+        ρ_inertia,
+        _di_center,
+        _di_vertex,
+        dt,
+        _inv_dt,
+        dirichlet::NTuple{2, JustRelax.AbstractDirichletBoundaryCondition},
+    ) where {T}
+    compute_PH_residual_V_point!(
+        Rx, Ry, Vx, Vy, P, ΔPψ, τxx, τyy, τxy, ρgx, ρgy, _di_center, _di_vertex, dt,
+        dirichlet, i, j,
+    )
+    _ph_add_inertia!(Rx, Ry, Vx, Vy, Vx0, Vy0, ρ_inertia, _inv_dt, dirichlet, i, j)
+    return nothing
+end
+
+@inline function _ph_add_inertia!(Rx, Ry, Vx, Vy, Vx0, Vy0, ρ_inertia, _inv_dt, dirichlet, i, j)
+    iszero(_inv_dt) && return nothing
+    Base.@propagate_inbounds @inline av_xa(A) = _av_xa_wrap(A, i, j)
+    Base.@propagate_inbounds @inline av_ya(A) = _av_ya_wrap(A, i, j)
+    if i ≤ size(Rx, 1) && j ≤ size(Rx, 2) && !isdirichlet(dirichlet[1], i + 1, j + 1)
+        @inbounds Rx[i, j] -= av_xa(ρ_inertia) * _inv_dt * (Vx[i + 1, j + 1] - Vx0[i + 1, j + 1])
+    end
+    if i ≤ size(Ry, 1) && j ≤ size(Ry, 2) && !isdirichlet(dirichlet[2], i + 1, j + 1)
+        @inbounds Ry[i, j] -= av_ya(ρ_inertia) * _inv_dt * (Vy[i + 1, j + 1] - Vy0[i + 1, j + 1])
+    end
+    return nothing
+end
+
+# Stokes residual used by the adjoint dot-product tests and by callers that do not pass
+# inertia arrays. Inertia stays in the overloads that take `V0` and `_inv_dt`.
+@parallel_indices (i, j) function compute_PH_residual_V!(
+        Rx::AbstractArray{T, 2},
+        Ry,
+        Vx,
+        Vy,
+        P,
+        ΔPψ,
+        τxx,
+        τyy,
+        τxy,
+        ρgx,
+        ρgy,
+        _di_center,
+        _di_vertex,
+        dt,
+    ) where {T}
+    compute_PH_residual_V_point!(
+        Rx, Ry, Vx, Vy, P, ΔPψ, τxx, τyy, τxy, ρgx, ρgy, _di_center, _di_vertex, dt, i, j,
+    )
+    return nothing
+end
+
+# With internal velocity Dirichlet nodes `dirichlet = (bc_x, bc_y)` (e.g. the velocity boxes of
+# `VelocityBoundaryConditions(; dirichlet)`), with masks shaped like the velocity arrays:
+# momentum row (i, j) drives `V[i + 1, j + 1]`. A prescribed node is not an equation of the
+# system: its momentum residual is zero. Mirrors the variational kernel (velocity_kernels_VS.jl).
+@parallel_indices (i, j) function compute_PH_residual_V!(
+        Rx::AbstractArray{T, 2},
+        Ry,
+        Vx,
+        Vy,
+        P,
+        ΔPψ,
+        τxx,
+        τyy,
+        τxy,
+        ρgx,
+        ρgy,
+        _di_center,
+        _di_vertex,
+        dt,
+        dirichlet::NTuple{2, JustRelax.AbstractDirichletBoundaryCondition},
+    ) where {T}
+    compute_PH_residual_V_point!(
+        Rx, Ry, Vx, Vy, P, ΔPψ, τxx, τyy, τxy, ρgx, ρgy, _di_center, _di_vertex, dt,
+        dirichlet, i, j,
+    )
+    return nothing
+end
+
+# Body of `compute_PH_residual_V!` at point (i, j). It is a separate function so the adjoint
+# can differentiate one point at a time (see `enzyme_reverse_pointwise!`).
+@inline function compute_PH_residual_V_point!(
+        Rx::AbstractArray{T, 2},
+        Ry,
+        Vx,
+        Vy,
+        P,
+        ΔPψ,
+        τxx,
+        τyy,
+        τxy,
+        ρgx,
+        ρgy,
+        _di_center,
+        _di_vertex,
+        dt,
+        i::Integer, j::Integer,
+    ) where {T}
+    return compute_PH_residual_V_point!(
+        Rx, Ry, Vx, Vy, P, ΔPψ, τxx, τyy, τxy, ρgx, ρgy, _di_center, _di_vertex, dt,
+        no_velocity_dirichlet(), i, j,
+    )
+end
+
+# The prescribed rows of `dirichlet` get a zero residual. The adjoint differentiates this
+# function, so their momentum adjoint drops out of the pullback without further code.
+@inline function compute_PH_residual_V_point!(
+        Rx::AbstractArray{T, 2},
+        Ry,
+        Vx,
+        Vy,
+        P,
+        ΔPψ,
+        τxx,
+        τyy,
+        τxy,
+        ρgx,
+        ρgy,
+        _di_center,
+        _di_vertex,
+        dt,
+        dirichlet::NTuple{2, JustRelax.AbstractDirichletBoundaryCondition},
+        i::Integer, j::Integer,
+    ) where {T}
     # See the overload above: cell-centred fields wrap, the vertex field `τxy` does not.
-    # Physical inertia: face-averaged ρ (V − V0)/dt (`_inv_dt = 1/dt`, or 0 when off).
+    # Inertia is applied by the forward kernel after this call. Enzyme differentiates this
+    # function, so the adjoint residual stays the Stokes residual.
     Base.@propagate_inbounds @inline av_xa(A) = _av_xa_wrap(A, i, j)
     Base.@propagate_inbounds @inline av_ya(A) = _av_ya_wrap(A, i, j)
 
@@ -385,9 +604,11 @@ end
         _dy_v = @dy(_di_vertex, j)
         Base.@propagate_inbounds @inline d_xa(A) = _d_xa_wrap(A, _dx_c, i, j)
         Base.@propagate_inbounds @inline d_yi(A) = _d_yi(A, _dy_v, i, j)
-        Vxᵢⱼ = Vx[i + 1, j + 1]
-        Rx[i, j] = d_xa(τxx) + d_yi(τxy) - d_xa(P) - d_xa(ΔPψ) - av_xa(ρgx) -
-            av_xa(ρ_inertia) * _inv_dt * (Vxᵢⱼ - Vx0[i + 1, j + 1])
+        Rx[i, j] = if isdirichlet(dirichlet[1], i + 1, j + 1)
+            zero(T)
+        else
+            d_xa(τxx) + d_yi(τxy) - d_xa(P) - d_xa(ΔPψ) - av_xa(ρgx)
+        end
     end
 
     if i ≤ size(Ry, 1) && j ≤ size(Ry, 2)
@@ -407,8 +628,11 @@ end
         # correction term
         ρg_correction = (Vyᵢⱼ * ∂ρg∂y) * θ * dt
 
-        Ry[i, j] = d_ya(τyy) + d_xi(τxy) - d_ya(P) - d_ya(ΔPψ) - av_ya(ρgy) + ρg_correction -
-            av_ya(ρ_inertia) * _inv_dt * (Vyᵢⱼ - Vy0[i + 1, j + 1])
+        Ry[i, j] = if isdirichlet(dirichlet[2], i + 1, j + 1)
+            zero(T)
+        else
+            d_ya(τyy) + d_xi(τxy) - d_ya(P) - d_ya(ΔPψ) - av_ya(ρgy) + ρg_correction
+        end
     end
 
     return nothing
@@ -627,6 +851,7 @@ end
     return nothing
 end
 
+
 @parallel_indices (I...) function compute_dV!(
         dV::NTuple{N, AbstractArray{T, N}},
         dVdτ::NTuple{N, AbstractArray{T, N}},
@@ -703,6 +928,197 @@ end
         dt,
         _inv_dt,
     ) where {T}
+    compute_DR_residual_update_V_point!(
+        Rx, Ry, Vx, Vy, dVxdτ, dVydτ, P, θc, τxx, τyy, τxy, ρgx, ρgy,
+        Dx, Dy, αVx, αVy, βVx, βVy, dτVx, dτVy, _di_center, _di_vertex,
+        dt, Vx0, Vy0, ρ_inertia, _inv_dt, no_velocity_dirichlet(), i, j,
+    )
+    return nothing
+end
+
+# Inertia and internal Dirichlet together. The pointwise update is not differentiated;
+# the adjoint traces `compute_PH_residual_V_point!` only.
+@parallel_indices (i, j) function compute_DR_residual_update_V!(
+        Rx::AbstractArray{T, 2},
+        Ry,
+        Vx,
+        Vy,
+        Vx0,
+        Vy0,
+        dVxdτ,
+        dVydτ,
+        P,
+        θc,
+        τxx,
+        τyy,
+        τxy,
+        ρgx,
+        ρgy,
+        ρ_inertia,
+        Dx,
+        Dy,
+        αVx,
+        αVy,
+        βVx,
+        βVy,
+        dτVx,
+        dτVy,
+        _di_center,
+        _di_vertex,
+        dt,
+        _inv_dt,
+        dirichlet::NTuple{2, JustRelax.AbstractDirichletBoundaryCondition},
+    ) where {T}
+    compute_DR_residual_update_V_point!(
+        Rx, Ry, Vx, Vy, dVxdτ, dVydτ, P, θc, τxx, τyy, τxy, ρgx, ρgy,
+        Dx, Dy, αVx, αVy, βVx, βVy, dτVx, dτVy, _di_center, _di_vertex,
+        dt, Vx0, Vy0, ρ_inertia, _inv_dt, dirichlet, i, j,
+    )
+    return nothing
+end
+
+# With internal velocity Dirichlet nodes (see the `compute_PH_residual_V!` overload above): a
+# prescribed node holds its value, has no residual and no pseudo-time history.
+@parallel_indices (i, j) function compute_DR_residual_update_V!(
+        Rx::AbstractArray{T, 2},
+        Ry,
+        Vx,
+        Vy,
+        dVxdτ,
+        dVydτ,
+        P,
+        θc,
+        τxx,
+        τyy,
+        τxy,
+        ρgx,
+        ρgy,
+        Dx,
+        Dy,
+        αVx,
+        αVy,
+        βVx,
+        βVy,
+        dτVx,
+        dτVy,
+        _di_center,
+        _di_vertex,
+        dt,
+        dirichlet::NTuple{2, JustRelax.AbstractDirichletBoundaryCondition},
+    ) where {T}
+    compute_DR_residual_update_V_point!(
+        Rx, Ry, Vx, Vy, dVxdτ, dVydτ, P, θc, τxx, τyy, τxy, ρgx, ρgy,
+        Dx, Dy, αVx, αVy, βVx, βVy, dτVx, dτVy, _di_center, _di_vertex,
+        dt, Vx, Vy, ρgx, zero(T), dirichlet, i, j,
+    )
+    return nothing
+end
+
+# For internal velocity boundary conditions
+@parallel_indices (i, j) function compute_DR_residual_update_V!(
+        Rx::AbstractArray{T, 2},
+        Ry,
+        Vx,
+        Vy,
+        dVxdτ,
+        dVydτ,
+        P,
+        θc,
+        τxx,
+        τyy,
+        τxy,
+        ρgx,
+        ρgy,
+        Dx,
+        Dy,
+        αVx,
+        αVy,
+        βVx,
+        βVy,
+        dτVx,
+        dτVy,
+        _di_center,
+        _di_vertex,
+        dirichlet::NTuple{2, AbstractDirichletBoundaryCondition},
+    ) where {T}
+    Base.@propagate_inbounds @inline av_xa(A) = _av_xa_wrap(A, i, j)
+    Base.@propagate_inbounds @inline av_ya(A) = _av_ya_wrap(A, i, j)
+
+    @inbounds begin
+        if i ≤ size(Rx, 1) && j ≤ size(Rx, 2)
+            if !isdirichlet(dirichlet[1], i + 1, j + 1)
+                _dx_c = @dx(_di_center, i)
+                _dy_v = @dy(_di_vertex, j)
+                Base.@propagate_inbounds @inline d_xa(A) = _d_xa_wrap(A, _dx_c, i, j)
+                Base.@propagate_inbounds @inline d_yi(A) = _d_yi(A, _dy_v, i, j)
+                Rx_ij = (d_xa(τxx) + d_yi(τxy) - d_xa(P) - d_xa(θc) - av_xa(ρgx)) / Dx[i, j]
+                Rx[i, j] = Rx_ij
+
+                dVx_new, ΔVx = damped_update_V(dVxdτ[i, j], Rx_ij, αVx[i, j], βVx[i, j], dτVx[i, j])
+                dVxdτ[i, j] = dVx_new
+                Vx[i + 1, j + 1] += ΔVx
+            else
+                apply_dirichlet!(Vx, dirichlet[1], i + 1, j + 1)
+                Rx[i, j] = zero(T)
+                dVxdτ[i, j] = zero(T)
+            end
+        end
+        if i ≤ size(Ry, 1) && j ≤ size(Ry, 2)
+            if !isdirichlet(dirichlet[2], i + 1, j + 1)
+                _dy_c = @dy(_di_center, j)
+                _dx_v = @dx(_di_vertex, i)
+                Base.@propagate_inbounds @inline d_ya(A) = _d_ya_wrap(A, _dy_c, i, j)
+                Base.@propagate_inbounds @inline d_xi(A) = _d_xi(A, _dx_v, i, j)
+                Ry_ij = (d_ya(τyy) + d_xi(τxy) - d_ya(P) - d_ya(θc) - av_ya(ρgy)) / Dy[i, j]
+                Ry[i, j] = Ry_ij
+
+                dVy_new, ΔVy = damped_update_V(dVydτ[i, j], Ry_ij, αVy[i, j], βVy[i, j], dτVy[i, j])
+                dVydτ[i, j] = dVy_new
+                Vy[i + 1, j + 1] += ΔVy
+            else
+                apply_dirichlet!(Vy, dirichlet[2], i + 1, j + 1)
+                Ry[i, j] = zero(T)
+                dVydτ[i, j] = zero(T)
+            end
+        end
+    end
+
+    return nothing
+end
+
+@inline function compute_DR_residual_update_V_point!(
+        Rx::AbstractArray{T, 2},
+        Ry,
+        Vx,
+        Vy,
+        dVxdτ,
+        dVydτ,
+        P,
+        θc,
+        τxx,
+        τyy,
+        τxy,
+        ρgx,
+        ρgy,
+        Dx,
+        Dy,
+        αVx,
+        αVy,
+        βVx,
+        βVy,
+        dτVx,
+        dτVy,
+        _di_center,
+        _di_vertex,
+        dt,
+        Vx0,
+        Vy0,
+        ρ_inertia,
+        _inv_dt,
+        dirichlet::NTuple{2, JustRelax.AbstractDirichletBoundaryCondition},
+        i::Integer,
+        j::Integer,
+    ) where {T}
     # Cell-centred fields are differenced with the wrapping stencil: a momentum row reaches the
     # last cell index only when its direction is periodic, and that row is the seam face, whose
     # forward neighbour is cell 1. Vertex reads (`τxy`) and the velocity write land on the seam
@@ -712,23 +1128,30 @@ end
     Base.@propagate_inbounds @inline av_ya(A) = _av_ya_wrap(A, i, j)
 
     @inbounds begin
-        if i ≤ size(Rx, 1) && j ≤ size(Rx, 2)
+        if i ≤ size(Rx, 1) && j ≤ size(Rx, 2) && isdirichlet(dirichlet[1], i + 1, j + 1)
+            # prescribed node: hold the value, no residual, no pseudo-time history
+            apply_dirichlet!(Vx, dirichlet[1], i + 1, j + 1)
+            Rx[i, j] = zero(T)
+            dVxdτ[i, j] = zero(T)
+        elseif i ≤ size(Rx, 1) && j ≤ size(Rx, 2)
             _dx_c = @dx(_di_center, i)
             _dy_v = @dy(_di_vertex, j)
             Base.@propagate_inbounds @inline d_xa(A) = _d_xa_wrap(A, _dx_c, i, j)
             Base.@propagate_inbounds @inline d_yi(A) = _d_yi(A, _dy_v, i, j)
             Vxᵢⱼ = Vx[i + 1, j + 1]
-            Rx_ij = (
-                d_xa(τxx) + d_yi(τxy) - d_xa(P) - d_xa(θc) - av_xa(ρgx) -
-                    av_xa(ρ_inertia) * _inv_dt * (Vxᵢⱼ - Vx0[i + 1, j + 1])
-            ) / Dx[i, j]
+            m_x = iszero(_inv_dt) ? zero(T) : av_xa(ρ_inertia) * _inv_dt * (Vxᵢⱼ - Vx0[i + 1, j + 1])
+            Rx_ij = (d_xa(τxx) + d_yi(τxy) - d_xa(P) - d_xa(θc) - av_xa(ρgx) - m_x) / Dx[i, j]
             Rx[i, j] = Rx_ij
 
             dVx_new, ΔVx = damped_update_V(dVxdτ[i, j], Rx_ij, αVx[i, j], βVx[i, j], dτVx[i, j])
             dVxdτ[i, j] = dVx_new
             Vx[i + 1, j + 1] += ΔVx
         end
-        if i ≤ size(Ry, 1) && j ≤ size(Ry, 2)
+        if i ≤ size(Ry, 1) && j ≤ size(Ry, 2) && isdirichlet(dirichlet[2], i + 1, j + 1)
+            apply_dirichlet!(Vy, dirichlet[2], i + 1, j + 1)
+            Ry[i, j] = zero(T)
+            dVydτ[i, j] = zero(T)
+        elseif i ≤ size(Ry, 1) && j ≤ size(Ry, 2)
             _dy_c = @dy(_di_center, j)
             _dx_v = @dx(_di_vertex, i)
             Base.@propagate_inbounds @inline d_ya(A) = _d_ya_wrap(A, _dy_c, i, j)
@@ -737,10 +1160,8 @@ end
             Vyᵢⱼ = Vy[i + 1, j + 1]
             ∂ρg∂y = (ρgy[i, j_N] - ρgy[i, j]) * _dy_c
             ρg_correction = Vyᵢⱼ * ∂ρg∂y * dt
-            Ry_ij = (
-                d_ya(τyy) + d_xi(τxy) - d_ya(P) - d_ya(θc) - av_ya(ρgy) + ρg_correction -
-                    av_ya(ρ_inertia) * _inv_dt * (Vyᵢⱼ - Vy0[i + 1, j + 1])
-            ) / Dy[i, j]
+            m_y = iszero(_inv_dt) ? zero(T) : av_ya(ρ_inertia) * _inv_dt * (Vyᵢⱼ - Vy0[i + 1, j + 1])
+            Ry_ij = (d_ya(τyy) + d_xi(τxy) - d_ya(P) - d_ya(θc) - av_ya(ρgy) + ρg_correction - m_y) / Dy[i, j]
             Ry[i, j] = Ry_ij
 
             dVy_new, ΔVy = damped_update_V(dVydτ[i, j], Ry_ij, αVy[i, j], βVy[i, j], dτVy[i, j])

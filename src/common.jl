@@ -1,5 +1,6 @@
 using Adapt, MuladdMacro
 import ForwardDiff
+import Enzyme: EnzymeRules, ignore_derivatives
 
 include("types/constructors/stokes.jl")
 export StokesArrays, PTStokesCoeffs
@@ -208,6 +209,9 @@ include("stress_rotation/stress_rotation_particles.jl")
 export rotate_stress!, stress2grid!
 
 ## DYREL solver
+
+include("DYREL/adjoint/constructors_adjoint.jl")
+export AdjointStokesArrays, material_controls
 
 include("DYREL/constructors.jl")
 include("DYREL/pressure_kernels.jl")

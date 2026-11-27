@@ -18,6 +18,7 @@ Structure containing parameters and arrays for the DYREL (Dynamic Relaxation) so
 - `Rx0`, `Ry0`, `Rz0`: Velocity residual history scratch fields.
 - `CFL`: Courant-Friedrichs-Lewy number.
 - `γfact`: Penalty scaling factor.
+- `global_penalty`: Use a viscosity scale averaged across the domain.
 - `ϵ`: General convergence tolerance.
 - `ϵ_vel`: Velocity convergence tolerance.
 - `c_fact`: Damping scaling factor.
@@ -55,7 +56,47 @@ struct DYREL{T, F}
     Rz0::T    # velocity residual history scratch (3D)
     CFL::F    # Courant-Friedrichs-Lewy condition
     γfact::F  # penalty scaling factor
+    global_penalty::Bool # use domain-mean viscosity for numerical penalty
     ϵ::F      # convergence criterion
     ϵ_vel::F  # convergence criterion
     c_fact::F # damping factor
 end
+
+# Iteration state the adjoint solver keeps between solves: its own `DYREL`, set by the first
+# adjoint solve. Not device data, so `adapt` leaves it as is.
+mutable struct AdjointSolverState
+    dyrel::Any
+end
+
+Adapt.adapt_structure(_, state::AdjointSolverState) = state
+
+"""
+    AdjointStokesArrays
+
+State arrays used by the adjoint Stokes solver. They also keep the adjoint's own DYREL
+iteration state, so the adjoint damping carries over from one adjoint solve to the next.
+"""
+struct AdjointStokesArrays{A, B, RType, D, E, F, T}
+    P::T
+    θ::T
+    λP::T
+    P0::T
+    V::A
+    λV::A
+    ∇V::T
+    τ::B
+    ε::B
+    ε_pl::B
+    EII_pl::T
+    viscosity::D
+    τ_o::Union{B, Nothing}
+    R::RType
+    U::E
+    ω::F
+    η::T
+    ρ::T
+    dρgx::T
+    solver::AdjointSolverState
+end
+
+Adapt.@adapt_structure AdjointStokesArrays
