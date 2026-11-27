@@ -53,6 +53,18 @@ include("../../stokes/Stokes3D.jl")
 include("../../variational_stokes/Stokes3D.jl")
 include("../../DYREL/solver.jl")
 
+function apply_geoparams_rsf_viscosity!(
+        ::CUDABackendTrait, stokes, fields::JustRelax.RateStateXY, phase_ratios, rheology, dt; kwargs...,
+    )
+    return _apply_gp_rsf_viscosity!(stokes, fields, phase_ratios, rheology, dt; kwargs...)
+end
+
+function JR3D.apply_geoparams_rsf_viscosity!(
+        ::CUDABackendTrait, stokes, fields::JustRelax.RateStateXY, phase_ratios, rheology, dt; kwargs...,
+    )
+    return _apply_gp_rsf_viscosity!(stokes, fields, phase_ratios, rheology, dt; kwargs...)
+end
+
 # Types
 function JR3D.StokesArrays(::Type{CUDABackend}, ni::NTuple{N, Integer}) where {N}
     return StokesArrays(ni)
@@ -66,6 +78,10 @@ end
 
 function JR3D.RateStateArrays(::Type{CUDABackend}, ni::NTuple{N, Integer}; loc::Symbol = :both) where {N}
     return RateStateArrays(ni; loc = loc)
+end
+
+function JR3D.RateStateXY(::Type{CUDABackend}, ni::NTuple{3, Integer}; skip_vs::Bool = false)
+    return RateStateXY(ni; skip_vs = skip_vs)
 end
 
 function JR3D.DYREL(::Type{CUDABackend}, ni::NTuple{N, Integer}, periodic::NTuple{N, Bool} = ntuple(_ -> false, Val(N)); ϵ = 1.0e-6, ϵ_vel = 1.0e-6, CFL = 0.99, c_fact = 0.5, γfact = 20.0) where {N}

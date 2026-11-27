@@ -2,9 +2,9 @@
 Herrendörfer viscoelastic simple shear with GeoParams rate-and-state friction
 on a 100 m grid (CUDA).
 
-Same physics as the 500 m miniapp, with:
+Same physics as the 500 m miniapp, with a uniform 100 m grid:
     nel_x = 1500          → Δx = 100 m on [-75 km, 75 km]
-    nel_y = (140, 140, 140)
+    nel_y = 1500          → Δy = 100 m on [-150 km, 0]
     Wf    = 100 m
 
 Requires CUDA. Prefer 8 Julia threads for host-side work:
@@ -30,6 +30,8 @@ using JustPIC
 const backend_JP = CUDA.CUDABackend
 
 using GeoParams
+using WriteVTK
+using Adapt
 
 include(joinpath(@__DIR__, "simple_shear_setup.jl"))
 include(joinpath(@__DIR__, "simple_shear_rheology.jl"))
@@ -46,13 +48,39 @@ function nearest_vertex_indices(xvi, x_probe, z_probe)
     return i, j, x[i], z[j]
 end
 
+function host_float(A, i, j)
+    A isa Array && return Float64(@inbounds A[i, j])
+    return Float64(first(Array(@view A[i:i, j:j])))
+end
+
 function open_probe_csv(path, x, y, z)
     mkpath(dirname(path))
     io = open(path, "w")
-    println(io, "time,X,Y,Z,Vx,Vy,tau_xy,Vp,Omega,a_eff,b_eff,eta_v,P")
+    println(io, "Time,x_m,y_m,z_m,Vx,Vy,shear_stress,Vp,Omega,a_eff,b_eff,eta_v,P")
     flush(io)
     println("probe CSV → $path  at ($(x), $(y), $(z))")
     return io
+end
+
+function probe_sample(stokes, fields, ip, jp)
+    Vx = host_float(stokes.V.Vx, ip, jp)
+    Vy = host_float(stokes.V.Vy, min(ip, size(stokes.V.Vy, 1)), min(jp, size(stokes.V.Vy, 2)))
+    τxy = host_float(stokes.τ.xy, ip, jp)
+    ηv = host_float(stokes.viscosity.ηv, ip, jp)
+    Vp = host_float(fields.Vp_v, ip, jp)
+    Ω = host_float(fields.Ωv, ip, jp)
+    a = host_float(fields.a_eff_v, ip, jp)
+    b = host_float(fields.b_eff_v, ip, jp)
+    nxP, nyP = size(stokes.P)
+    i0 = clamp(ip - 1, 1, nxP)
+    ic = clamp(ip, 1, nxP)
+    j0 = clamp(jp - 1, 1, nyP)
+    jc = clamp(jp, 1, nyP)
+    P = 0.25 * (
+        host_float(stokes.P, i0, j0) + host_float(stokes.P, ic, jc) +
+            host_float(stokes.P, i0, jc) + host_float(stokes.P, ic, j0)
+    )
+    return (; Vx, Vy, τxy, ηv, Vp, Ω, a, b, P)
 end
 
 function write_probe_csv!(io, t, x, y, z, Vx, Vy, τxy, Vp, Ω, a, b, ηv, P)
@@ -69,12 +97,81 @@ function write_probe_csv!(io, t, x, y, z, Vx, Vy, τxy, Vp, Ω, a, b, ηv, P)
     return nothing
 end
 
+"Aging-law state in seconds: θ = (L / V₀) exp(Ω)."
+theta_seconds(Ω, L, V0) = (L / V0) * exp(Ω)
+
+function phase_ids(phase_loc)
+    cells = Adapt.adapt(Array, phase_loc)
+    ids = [argmax(p) for p in cells]
+    return reshape(Float32.(ids), size(cells))
+end
+
+"Vertex velocity from the staggered faces, same stencil as `velocity2vertex!`."
+function vertex_velocity(stokes, ni)
+    nx, ny = ni
+    Vx = Array(stokes.V.Vx)
+    Vy = Array(stokes.V.Vy)
+    Vxv = Array{Float64}(undef, nx + 1, ny + 1)
+    Vyv = Array{Float64}(undef, nx + 1, ny + 1)
+    @inbounds for j in 1:(ny + 1), i in 1:(nx + 1)
+        Vxv[i, j] = (Vx[i, j] + Vx[i, j + 1]) / 2
+        Vyv[i, j] = (Vy[i, j] + Vy[i + 1, j]) / 2
+    end
+    return Vxv, Vyv
+end
+
+function reset_vtk(vtk_dir, pvd)
+    mkpath(vtk_dir)
+    rm(pvd * ".pvd"; force = true)
+    for path in readdir(vtk_dir; join = true)
+        name = basename(path)
+        startswith(name, "shearband_100m_") || continue
+        endswith(name, ".vtr") || endswith(name, ".vts") || continue
+        rm(path; force = true)
+    end
+    return nothing
+end
+
+function write_paraview(stokes, fields, phase_ratios, grid, ni, it, t, pvd, L, V0)
+    tensor_invariant!(stokes.τ)
+    tensor_invariant!(stokes.ε)
+    Vxv, Vyv = vertex_velocity(stokes, ni)
+    Ωv = Array(fields.Ωv)
+    state = theta_seconds.(Ωv, L, V0)
+    velocity = zeros(Float32, 2, (ni .+ 1)...)
+    velocity[1, :, :] .= Float32.(Vxv)
+    velocity[2, :, :] .= Float32.(Vyv)
+    xvi = ntuple(d -> Array(grid.xvi[d]), 2)
+    fname = joinpath(dirname(pvd), "shearband_100m_" * lpad(string(it), 8, '0'))
+    vtk_grid(fname, xvi...; compress = true) do vtk
+        vtk["phase", VTKPointData()] = phase_ids(phase_ratios.vertex)
+        vtk["tau_xy", VTKPointData()] = Float32.(Array(stokes.τ.xy))
+        vtk["eta_v", VTKPointData()] = Float32.(Array(stokes.viscosity.ηv))
+        vtk["Omega", VTKPointData()] = Float32.(Ωv)
+        vtk["state", VTKPointData()] = Float32.(state)
+        vtk["Vp", VTKPointData()] = Float32.(Array(fields.Vp_v))
+        vtk["a_eff", VTKPointData()] = Float32.(Array(fields.a_eff_v))
+        vtk["b_eff", VTKPointData()] = Float32.(Array(fields.b_eff_v))
+        vtk["velocity", VTKPointData()] = velocity
+        vtk["phase_cell", VTKCellData()] = phase_ids(phase_ratios.center)
+        vtk["P", VTKCellData()] = Float32.(Array(stokes.P))
+        vtk["eta", VTKCellData()] = Float32.(Array(stokes.viscosity.η))
+        vtk["j2_dev_stress", VTKCellData()] = Float32.(Array(stokes.τ.II))
+        vtk["j2_strain_rate", VTKCellData()] = Float32.(Array(stokes.ε.II))
+        vtk["TimeValue"] = t
+        paraview_collection(pvd; append = true) do collection
+            collection_add_timestep(collection, vtk, t)
+        end
+    end
+    return fname
+end
+
 function main(
         igg;
         nel_x = 1500,
         coord_x = (-75.0e3, 75.0e3),
-        nel_y = (140, 140, 140),
-        coord_y = (-150.0e3, -76.0e3, -74.0e3, 0.0),
+        nel_y = 1500,
+        coord_y = (-150.0e3, 0.0),
         fault = (; x = (-75.0e3, 75.0e3), y = (-75.2e3, -74.8e3)),
         V_top = 4.0e-9,
         η0 = 5.0e26,
@@ -84,14 +181,16 @@ function main(
         Wf = 100.0,   # LaMEM fault width [m]
         dt = 500.0,
         nsteps = 103000,
-        t_max = 1.0e9,
-        dt_min = 1.0e-1,
+        t_max = 3.0e9,
+        dt_min = 1.0e-3,
         dt_max = 1.0e7,
         dt_rsf_switch = 1.0e9,
         inertia = true,
         ρ_inertia = nothing,
         probe = (; x = -50.0e3, z = -75.0e3),
-        csv_path = joinpath(@__DIR__, "VTK", "probe_100m_x-50000_z-75000.csv"),
+        csv_path = joinpath(@__DIR__, "ShearBand100m", "probe_100m_x-50000_z-75000.csv"),
+        vtk_every = 20,
+        pvd = joinpath(@__DIR__, "ShearBand100m", "shearband_100m"),
         print_every = 10,
     )
     CUDA.functional() || error("CUDA is not functional on this machine.")
@@ -115,6 +214,8 @@ function main(
     rsf_law = GeoParams.rate_state_element(rheology[2].CompositeRheology[1])
     float(rsf_law.D.val) ≈ Wf ||
         error("GeoParams RateStateFriction D=$(rsf_law.D.val) does not match Wf=$Wf")
+    L_rsf = float(rsf_law.L.val)
+    V0_rsf = float(rsf_law.V₀.val)
 
     phase_ratios = PhaseRatios(backend_JP, length(rheology), ni)
     init_phase_ratios_from_grid!(phase_ratios, ph_vertex, length(rheology))
@@ -177,10 +278,20 @@ function main(
         "GeoParams RSF Herrendörfer 100 m (CUDA): ni=$ni, Δx=$(Δx) m, Wf=$Wf m, " *
             "dt=$dt, nsteps=$nsteps, t_max=$t_max, inertia=$inertia",
     )
+    println("ParaView every $vtk_every steps → $(pvd).pvd")
+    reset_vtk(dirname(pvd), pvd)
     t = 0.0
     it = 0
     out = nothing
     try
+        sample0 = probe_sample(stokes, fields, ip, jp)
+        write_probe_csv!(
+            csv_io, t, x_p, z_p, 0.0,
+            sample0.Vx, sample0.Vy, sample0.τxy, sample0.Vp, sample0.Ω,
+            sample0.a, sample0.b, sample0.ηv, sample0.P,
+        )
+        vtk0 = write_paraview(stokes, fields, phase_ratios, grid, ni, it, t, pvd, L_rsf, V0_rsf)
+        println("VTK it=$it t=$t → $vtk0")
         while it < nsteps && t < t_max
             out = solve_DYREL!(
                 stokes, ρg, dyrel, flow_bcs, phase_ratios, rheology, args, grid, dt, igg;
@@ -201,30 +312,24 @@ function main(
             it += 1
             t += dt
 
-            Vx_p = Float64(stokes.V.Vx[ip, jp])
-            Vy_p = Float64(stokes.V.Vy[min(ip, size(stokes.V.Vy, 1)), min(jp, size(stokes.V.Vy, 2))])
-            τxy_p = Float64(stokes.τ.xy[ip, jp])
-            ηv_p = Float64(stokes.viscosity.ηv[ip, jp])
-            Vp_p = Float64(fields.Vp_v[ip, jp])
-            Ω_p = Float64(fields.Ωv[ip, jp])
-            a_p = Float64(fields.a_eff_v[ip, jp])
-            b_p = Float64(fields.b_eff_v[ip, jp])
-            nxP, nyP = size(stokes.P)
-            i0 = clamp(ip - 1, 1, nxP)
-            ic = clamp(ip, 1, nxP)
-            j0 = clamp(jp - 1, 1, nyP)
-            jc = clamp(jp, 1, nyP)
-            P_p = 0.25 * (
-                Float64(stokes.P[i0, j0]) + Float64(stokes.P[ic, jc]) +
-                    Float64(stokes.P[i0, jc]) + Float64(stokes.P[ic, j0])
+            sample = probe_sample(stokes, fields, ip, jp)
+            write_probe_csv!(
+                csv_io, t, x_p, z_p, 0.0,
+                sample.Vx, sample.Vy, sample.τxy, sample.Vp, sample.Ω,
+                sample.a, sample.b, sample.ηv, sample.P,
             )
-            write_probe_csv!(csv_io, t, x_p, z_p, 0.0, Vx_p, Vy_p, τxy_p, Vp_p, Ω_p, a_p, b_p, ηv_p, P_p)
+            if rem(it, vtk_every) == 0
+                vtk_name = write_paraview(
+                    stokes, fields, phase_ratios, grid, ni, it, t, pvd, L_rsf, V0_rsf,
+                )
+                println("VTK it=$it t=$t → $vtk_name")
+            end
 
             if it == 1 || rem(it, print_every) == 0 || t >= t_max || it >= nsteps
                 println(
                     "it=$it  t=$t  max|τxy|=$(maximum(abs, Array(stokes.τ.xy)))  " *
                         "Vp_max=$(out.Vp_max)  dt=$dt  dt_rsf=$(out.dt_rsf)  " *
-                        "probe Vp=$Vp_p  Ω=$Ω_p  b=$b_p",
+                        "probe Vp=$(sample.Vp)  Ω=$(sample.Ω)  b=$(sample.b)",
                 )
             end
 
@@ -245,10 +350,10 @@ Build mesh, rheology, GPU Stokes arrays and RSF fields. No `solve_DYREL!`.
 """
 function smoke_connectivity(;
         nel_x = 1500,
-        nel_y = (140, 140, 140),
+        nel_y = 1500,
         Wf = 100.0,
         coord_x = (-75.0e3, 75.0e3),
-        coord_y = (-150.0e3, -76.0e3, -74.0e3, 0.0),
+        coord_y = (-150.0e3, 0.0),
         fault = (; x = (-75.0e3, 75.0e3), y = (-75.2e3, -74.8e3)),
     )
     CUDA.functional() || error("CUDA is not functional on this machine.")
@@ -259,15 +364,14 @@ function smoke_connectivity(;
     (; xvi, ni, li) = mesh
     Δx = li[1] / ni[1]
     dy = diff(Array(xvi[2]))
-    # Middle y-segment is cells (nel_y[1]+1):(nel_y[1]+nel_y[2])
-    dy_mid = dy[(nel_y[1] + 1):(nel_y[1] + nel_y[2])]
     println(
-        "smoke: ni=$ni  Δx=$(Δx) m  Δy_mid∈$(extrema(dy_mid)) m  " *
+        "smoke: ni=$ni  Δx=$(Δx) m  Δy∈$(extrema(dy)) m  " *
             "threads=$(Threads.nthreads())",
     )
     println("smoke: CUDA $(CUDA.name(CUDA.device()))")
     isapprox(Δx, 100.0; rtol = 1.0e-12) || error("Δx=$Δx, expected 100 m")
-    ni == (1500, 420) || error("ni=$ni, expected (1500, 420)")
+    all(isapprox.(dy, 100.0; rtol = 1.0e-12)) || error("Δy is not 100 m: $(extrema(dy))")
+    ni == (1500, 1500) || error("ni=$ni, expected (1500, 1500)")
 
     rheology = init_rheology_rate_state(; Wf = Wf)
     for ip in 1:2
@@ -313,9 +417,9 @@ if abspath(PROGRAM_FILE) == @__FILE__
         smoke_connectivity()
     else
         nel_x = 1500
-        nel_y = (140, 140, 140)
+        nel_y = 1500
         nx = nel_x
-        ny = sum(nel_y)
+        ny = nel_y
         igg = if !(JustRelax.MPI.Initialized())
             IGG(init_global_grid(nx, ny, 1; init_MPI = true)...)
         else
@@ -327,11 +431,11 @@ if abspath(PROGRAM_FILE) == @__FILE__
             nel_y = nel_y,
             Wf = 100.0,
             nsteps = 103000,
-            t_max = 1.0e9,
+            t_max = 3.0e9,
             dt = 500.0,
             inertia = true,
             probe = (; x = -50.0e3, z = -75.0e3),
-            csv_path = joinpath(@__DIR__, "VTK", "probe_100m_x-50000_z-75000.csv"),
+            csv_path = joinpath(@__DIR__, "ShearBand100m", "probe_100m_x-50000_z-75000.csv"),
         )
     end
 end

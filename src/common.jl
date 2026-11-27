@@ -160,6 +160,8 @@ RateStateArrays(backend, ni::NTuple{N, Integer}; kwargs...) where {N} =
 Allocate xy-edge rate-and-state arrays and a `Vx` Dirichlet pair for a 3D grid
 of `ni` cells. `skip_vs` drops `a ≥ b` edges from the stable timestep.
 """
+RateStateXY(::Type{CPUBackend}, ni::NTuple{3, Integer}; kwargs...) = RateStateXY(ni; kwargs...)
+
 function RateStateXY(ni::NTuple{3, Integer}; skip_vs::Bool = false)
     nx, ny, nz = ni
     Ω = @zeros(nx + 1, ny + 1, nz)

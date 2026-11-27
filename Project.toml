@@ -33,6 +33,9 @@ WriteVTK = "64499a7a-5c06-52f2-abe2-ccb03c286192"
 AMDGPU = "21141c5a-9bdb-4563-92ae-f87d6854732e"
 Makie = "ee78f7c6-11fb-53f2-987a-cfe4a2b5a57a"
 
+[sources]
+GeoParams = {path = "/scratch/tectonics/iskander/project/justrelax/arm/geoparams/GeoParams.jl"}
+
 [extensions]
 JustRelaxAMDGPUExt = "AMDGPU"
 JustRelaxCUDAExt = "CUDA"

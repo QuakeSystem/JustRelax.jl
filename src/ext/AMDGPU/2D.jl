@@ -51,6 +51,18 @@ include("../../variational_stokes/Stokes2D.jl")
 include("../../DYREL/solver.jl")
 include("../../DYREL/solver_VS.jl")
 
+function apply_geoparams_rsf_viscosity!(
+        ::AMDGPUBackendTrait, stokes, fields::JustRelax.RateStateXY, phase_ratios, rheology, dt; kwargs...,
+    )
+    return _apply_gp_rsf_viscosity!(stokes, fields, phase_ratios, rheology, dt; kwargs...)
+end
+
+function JR2D.apply_geoparams_rsf_viscosity!(
+        ::AMDGPUBackendTrait, stokes, fields::JustRelax.RateStateXY, phase_ratios, rheology, dt; kwargs...,
+    )
+    return _apply_gp_rsf_viscosity!(stokes, fields, phase_ratios, rheology, dt; kwargs...)
+end
+
 @parallel_indices (i, j) function _apply_free_surface_diagonal_AMDGPU!(
         Dy, λmaxVy, ρgy, di_center, dt
     )

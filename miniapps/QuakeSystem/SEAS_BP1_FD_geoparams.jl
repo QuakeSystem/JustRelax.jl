@@ -21,7 +21,10 @@ Benchmark (not a literal copy of the LaMEM VelBoxes):
   RSF from the free surface down to 40 km, a(z) = 0.010 above 15 km, linear to
   0.025 at 18 km, then 0.025. Below 40 km the two Vx nodes that form the fault
   jump are fixed at ±Vp/2. The outer fault-normal rows are fixed at the same
-  plate rate. Mesh segments and the 100 m fault spacing are the LaMEM 100 m grid.
+  plate rate. The domain is 160 km from the fault to each side and 160 km deep.
+  Cells are 25 m inside ±1 km of the fault and from the surface to 20 km depth.
+  Outside that, 200 cells on each side and 200 cells below 20 km grow smoothly.
+  Wf is 25 m, the same as the fine cell size.
 
 DYREL controls match the Herrendörfer GeoParams miniapp: iterMax = 5000,
 rel_drop = 1e-4, ϵ = 1e-8, linear viscosity, inertia on.
@@ -32,17 +35,21 @@ time) and launch with 8 threads.
     julia -t 8 --project=. miniapps/QuakeSystem/SEAS_BP1_FD_geoparams.jl --smoke
     julia -t 8 --project=. miniapps/QuakeSystem/SEAS_BP1_FD_geoparams.jl --run
 
-`--run` writes one time series per step for the fault at 10 km and 12.5 km:
-`VTK/seas_bp1_fd_fault_10km.csv` and `VTK/seas_bp1_fd_fault_12.5km.csv`.
-The other benchmark depths stay in `VTK/seas_bp1_fd_stations.csv`.
+`--run` integrates to 3e10 s. Output is SI: time in s, slip in m, slip rate and
+`Vp` in m/s, stress in Pa, and the state variable θ in s. Each CSV starts with
+a header whose first column is `Time`, so ParaView can use it as a time series.
+Snapshots go to `VTK/seas_bp1_fd.pvd` every 10 steps, with the fields LaMEM
+writes for this benchmark: phase, velocity, j2_dev_stress, j2_strain_rate,
+state_rsf, state_rsf_cell, Vp_rsf, Vp_rsf_cell.
 =#
-const isCUDA = false
+const isCUDA = true
 
 @static if isCUDA
     using CUDA
 end
 
 using JustRelax, JustRelax.JustRelax3D
+using WriteVTK
 using Printf
 
 const backend = @static if isCUDA
@@ -118,7 +125,40 @@ function mesh_seg_1d(nel, coord; bias = nothing)
     return xvi
 end
 
-function bp1_rheology(; η = 5.0e26, D = 100.0)
+"""
+    bp1_mesh()
+
+Fault-normal coordinate from -160 km to 160 km: 200 growing cells, then 2 km of
+25 m cells centered on the fault, then 200 growing cells. Depth from -160 km to
+the surface: 200 growing cells up to -20 km, then 25 m cells to z = 0.
+"""
+function bp1_mesh()
+    dy = 25.0
+    y_fine = 1.0e3
+    y_far = 160.0e3
+    n_side = 200
+    n_fine = round(Int, 2 * y_fine / dy)
+    dy_far = 2 * (y_far - y_fine) / n_side - dy
+    z_fine = -20.0e3
+    z_bot = -160.0e3
+    n_deep = 200
+    n_shallow = round(Int, -z_fine / dy)
+    dz_bot = 2 * (z_fine - z_bot) / n_deep - dy
+    xv = mesh_seg_1d(2, (-dy, dy))
+    yv = mesh_seg_1d(
+        (n_side, n_fine, n_side),
+        (-y_far, -y_fine, y_fine, y_far);
+        bias = (dy / dy_far, 1.0, dy_far / dy),
+    )
+    zv = mesh_seg_1d(
+        (n_deep, n_shallow),
+        (z_bot, z_fine, 0.0);
+        bias = (dy / dz_bot, 1.0),
+    )
+    return xv, yv, zv
+end
+
+function bp1_rheology(; η = 5.0e26, D = 25.0)
     el = ConstantElasticity(; G = G0, ν = 0.25)
     visc = LinearViscous(; η = η)
     # a on the law is the surface value; a(z) is stored on the fault edges.
@@ -158,16 +198,13 @@ end
 function open_station_csv(path)
     mkpath(dirname(path))
     io = open(path, "w")
-    println(io, "# problem=SEAS BP1-FD")
-    println(io, "# code=JustRelax GeoParams rate-and-state, 3D antiplane, two periodic strike cells")
-    println(io, "# slip_rate and state are log10. shear_stress is MPa. depth_m is positive downward.")
-    println(io, "t,depth_m,slip,slip_rate,shear_stress,state,Vp")
+    println(io, "Time,depth_m,slip,slip_rate,shear_stress,state,Vp")
     flush(io)
     return io
 end
 
-function log10_theta(Ω, L, V0)
-    return log10(L / V0) + Ω / log(10)
+function theta_seconds(Ω, L, V0)
+    return (L / V0) * exp(Ω)
 end
 
 function fault_station_path(km)
@@ -175,35 +212,126 @@ function fault_station_path(km)
     return joinpath(@__DIR__, "VTK", "seas_bp1_fd_fault_$(label)km.csv")
 end
 
-function open_fault_station_csv(path, km, depth_m, z_m)
+function open_fault_station_csv(path)
     mkpath(dirname(path))
     io = open(path, "w")
-    println(io, "# problem=SEAS BP1-FD")
-    println(io, "# station=fault y=0  target_depth=$(km) km  cell_center_depth=$(depth_m) m  z=$(z_m) m")
-    println(io, "# slip_rate and state are log10. shear_stress is MPa. depth_m is positive downward.")
-    println(io, "t,depth_m,y_m,z_m,slip,slip_rate,shear_stress,state,Vp")
+    println(io, "Time,depth_m,y_m,z_m,slip,slip_rate,shear_stress,state,Vp")
     flush(io)
     return io
 end
 
+function host_float(A, i, j, k)
+    A isa Array && return Float64(@inbounds A[i, j, k])
+    return Float64(first(Array(@view A[i:i, j:j, k:k])))
+end
+
 function fault_sample(stokes, fields, j, k, L, V0)
-    Vj = Float64(stokes.V.Vx[2, j + 1, k + 1] - stokes.V.Vx[2, j, k + 1])
+    Vj = host_float(stokes.V.Vx, 2, j + 1, k + 1) - host_float(stokes.V.Vx, 2, j, k + 1)
+    Ω = host_float(fields.Ω, 2, j, k)
     return (;
         Vj = Vj,
-        τ = Float64(stokes.τ.xy[2, j, k]),
-        Ω = Float64(fields.Ω[2, j, k]),
-        Vp = Float64(fields.Vp[2, j, k]),
-        rate = abs(Vj) > 0 ? log10(abs(Vj)) : -Inf,
-        state = log10_theta(Float64(fields.Ω[2, j, k]), L, V0),
+        τ = host_float(stokes.τ.xy, 2, j, k),
+        Ω = Ω,
+        Vp = host_float(fields.Vp, 2, j, k),
+        rate = Vj,
+        state = theta_seconds(Ω, L, V0),
     )
 end
 
 function write_fault_row!(io, t, station, slip, sample)
     println(
         io,
-        "$t,$(station.depth_m),0.0,$(-station.depth_m),$slip,$(sample.rate),$(sample.τ / 1.0e6),$(sample.state),$(sample.Vp)",
+        "$t,$(station.depth_m),0.0,$(-station.depth_m),$slip,$(sample.rate),$(sample.τ),$(sample.state),$(sample.Vp)",
     )
     return nothing
+end
+
+function vertex_velocity(stokes, ni)
+    Vx = Array(stokes.V.Vx)
+    Vy = Array(stokes.V.Vy)
+    Vz = Array(stokes.V.Vz)
+    nx, ny, nz = ni
+    n = (nx + 1, ny + 1, nz + 1)
+    Vxv = Array{Float64}(undef, n)
+    Vyv = similar(Vxv)
+    Vzv = similar(Vxv)
+    @inbounds for k in 1:n[3], j in 1:n[2], i in 1:n[1]
+        Vxv[i, j, k] = 0.25 * (Vx[i, j, k] + Vx[i, j + 1, k] + Vx[i, j, k + 1] + Vx[i, j + 1, k + 1])
+        Vyv[i, j, k] = 0.25 * (Vy[i, j, k] + Vy[i + 1, j, k] + Vy[i, j, k + 1] + Vy[i + 1, j, k + 1])
+        Vzv[i, j, k] = 0.25 * (Vz[i, j, k] + Vz[i, j + 1, k] + Vz[i + 1, j, k] + Vz[i + 1, j + 1, k])
+    end
+    return Vxv, Vyv, Vzv
+end
+
+function xy_edge_state(edge, mask, L, V0)
+    state = zeros(size(edge))
+    @inbounds for i in eachindex(edge, mask, state)
+        mask[i] > 0.5 || continue
+        state[i] = theta_seconds(edge[i], L, V0)
+    end
+    return state
+end
+
+function xy_edge_to_vertex(edge, ni)
+    nx, ny, nz = ni
+    v = zeros(nx + 1, ny + 1, nz + 1)
+    @inbounds for k in 1:nz, j in 1:(ny + 1), i in 1:(nx + 1)
+        v[i, j, k] = max(v[i, j, k], edge[i, j, k])
+        v[i, j, k + 1] = max(v[i, j, k + 1], edge[i, j, k])
+    end
+    return v
+end
+
+function xy_edge_to_cell(edge, ni)
+    nx, ny, nz = ni
+    c = zeros(nx, ny, nz)
+    @inbounds for k in 1:nz, j in 1:ny, i in 1:nx
+        c[i, j, k] = max(edge[i, j, k], edge[i + 1, j, k], edge[i, j + 1, k], edge[i + 1, j + 1, k])
+    end
+    return c
+end
+
+function reset_vtk(vtk_dir, pvd)
+    mkpath(vtk_dir)
+    rm(pvd * ".pvd"; force = true)
+    for path in readdir(vtk_dir; join = true)
+        name = basename(path)
+        startswith(name, "seas_bp1_fd_") || continue
+        endswith(name, ".vtr") || endswith(name, ".vts") || continue
+        rm(path; force = true)
+    end
+    return nothing
+end
+
+function write_paraview(case, it, t, pvd, L, V0)
+    (; grid, ni, stokes, fields) = case
+    tensor_invariant!(stokes.τ)
+    tensor_invariant!(stokes.ε)
+    Vxv, Vyv, Vzv = vertex_velocity(stokes, ni)
+    mask = Array(fields.rsf_mask)
+    state_e = xy_edge_state(Array(fields.Ω), mask, L, V0)
+    Vp_e = Array(fields.Vp) .* mask
+    velocity = zeros(Float32, 3, (ni .+ 1)...)
+    velocity[1, :, :, :] .= Float32.(Vxv)
+    velocity[2, :, :, :] .= Float32.(Vyv)
+    velocity[3, :, :, :] .= Float32.(Vzv)
+    xvi = ntuple(d -> Array(grid.xvi[d]), 3)
+    fname = joinpath(dirname(pvd), "seas_bp1_fd_" * lpad(string(it), 8, '0'))
+    vtk_grid(fname, xvi...) do vtk
+        vtk["phase", VTKCellData()] = fill(Float32(1), ni)
+        vtk["j2_dev_stress", VTKCellData()] = Float32.(Array(stokes.τ.II))
+        vtk["j2_strain_rate", VTKCellData()] = Float32.(Array(stokes.ε.II))
+        vtk["state_rsf_cell", VTKCellData()] = Float32.(xy_edge_to_cell(state_e, ni))
+        vtk["Vp_rsf_cell", VTKCellData()] = Float32.(xy_edge_to_cell(Vp_e, ni))
+        vtk["state_rsf", VTKPointData()] = Float32.(xy_edge_to_vertex(state_e, ni))
+        vtk["Vp_rsf", VTKPointData()] = Float32.(xy_edge_to_vertex(Vp_e, ni))
+        vtk["velocity", VTKPointData()] = velocity
+        vtk["TimeValue"] = t
+        paraview_collection(pvd; append = true) do collection
+            collection_add_timestep(collection, vtk, t)
+        end
+    end
+    return fname
 end
 
 """
@@ -213,28 +341,28 @@ creates it when it is not already active.
 """
 function prepare_bp1(;
         η = 5.0e26,
-        D = 100.0,
+        D = 25.0,
         σ = 50.0e6,
         Vp = 1.0e-9,
         dt = 2522.0,
     )
+    # ImplicitGlobalGrid rejects nx = 1. Two equal cells are the smallest strike grid.
+    xv, yv, zv = bp1_mesh()
+    ni = (length(xv) - 1, length(yv) - 1, length(zv) - 1)
     igg = if JustRelax.ImplicitGlobalGrid.grid_is_initialized()
+        (nx_g(), ny_g(), nz_g()) == ni ||
+            error("MPI grid $((nx_g(), ny_g(), nz_g())) does not match the mesh $ni")
         gg = get_global_grid()
         IGG(gg.me, gg.dims, gg.nprocs, gg.coords, gg.comm)
     else
-        IGG(init_global_grid(2, 210, 224; init_MPI = !JustRelax.MPI.Initialized())...)
+        IGG(init_global_grid(ni...; init_MPI = !JustRelax.MPI.Initialized())...)
     end
-    # ImplicitGlobalGrid rejects nx = 1. Two equal cells are the smallest strike grid.
-    xv = mesh_seg_1d(2, (-50.0, 50.0))
-    yv = mesh_seg_1d((100, 10, 100), (-1.0e6, -500.0, 500.0, 1.0e6); bias = (0.00502765, 1.0, 198.9))
-    zv = mesh_seg_1d((24, 200), (-73000.0, -20000.0, 0.0); bias = (0.02272727, 1.0))
-    ni = (length(xv) - 1, length(yv) - 1, length(zv) - 1)
     grid = Geometry(PTArray(backend), xv, yv, zv)
     rheology = bp1_rheology(; η = η, D = D)
     phase_ratios = PhaseRatios(backend_JP, 1, ni)
     fill_phase1!(phase_ratios)
 
-    fields = RateStateXY(ni; skip_vs = true)
+    fields = RateStateXY(backend, ni; skip_vs = true)
     meta = init_antiplane_fault!(
         fields, grid.xvi, grid.xci;
         z_rsf_min = -40.0e3,
@@ -277,9 +405,15 @@ function smoke_bp1()
     j = meta.j_fault
     dy_left = yv[j] - yv[j - 1]
     dy_right = yv[j + 1] - yv[j]
-    ni == (2, 210, 224) || error("expected cell counts (2, 210, 224), got $ni")
-    isapprox(dy_left, 100.0; atol = 1.0e-6) || error("fault cell left of y=0 is $dy_left m, not 100 m")
-    isapprox(dy_right, 100.0; atol = 1.0e-6) || error("fault cell right of y=0 is $dy_right m, not 100 m")
+    ni == (2, 480, 1000) || error("expected cell counts (2, 480, 1000), got $ni")
+    isapprox(dy_left, 25.0; atol = 1.0e-6) || error("fault cell left of y=0 is $dy_left m, not 25 m")
+    isapprox(dy_right, 25.0; atol = 1.0e-6) || error("fault cell right of y=0 is $dy_right m, not 25 m")
+    isapprox(yv[1], -160.0e3; atol = 1.0e-4) || error("fault-normal domain starts at $(yv[1]) m")
+    isapprox(yv[end], 160.0e3; atol = 1.0e-4) || error("fault-normal domain ends at $(yv[end]) m")
+    zv = Array(grid.xvi[3])
+    isapprox(zv[1], -160.0e3; atol = 1.0e-4) || error("domain bottom is $(zv[1]) m")
+    isapprox(zv[end] - zv[end - 1], 25.0; atol = 1.0e-6) ||
+        error("surface cell is $(zv[end] - zv[end - 1]) m, not 25 m")
     a = Array(fields.a_eff)
     mask = Array(fields.rsf_mask)
     k_surf = argmin(abs.(zc))
@@ -306,7 +440,7 @@ function smoke_bp1()
     isapprox(value[1, end - 1, 2], 0.5e-9; rtol = 1.0e-12) || error("positive flank is not +Vp/2")
     fixed[1, j, k_deep + 1] > 0.5 || error("deep fault Vx is not fixed")
     println(
-        "BP1-FD smoke OK  ni=$ni  Wf_cells=100 m  τ0=$(meta.τ0 / 1.0e6) MPa  " *
+        "BP1-FD smoke OK  ni=$ni  Wf=$(case.D) m  cells=25 m  τ0=$(meta.τ0) Pa  " *
             "RSF edges=$(meta.n_rsf)  G=$G0  threads=$(Threads.nthreads())",
     )
     println("stations (cell-center depth, m): ", [s.depth_m for s in station_rows(zc)])
@@ -314,20 +448,22 @@ function smoke_bp1()
 end
 
 function run_bp1(;
-        nsteps = 245000,
-        t_max = 1500.0 * YEAR,
+        nsteps = 1_000_000,
+        t_max = 3.0e10,
         dt = 2522.0,
         dt_min = 5.0e-3,
         dt_max = 1.0e9,
+        nstep_out = 10,
         iterMax = 50.0e2,
         rel_drop = 1.0e-4,
         ϵ = 1.0e-8,
         print_every = 1,
         csv_path = joinpath(@__DIR__, "VTK", "seas_bp1_fd_stations.csv"),
+        pvd = joinpath(@__DIR__, "VTK", "seas_bp1_fd"),
     )
     case = smoke_bp1()
     (; igg, ni, grid, rheology, phase_ratios, fields, meta, flow_bcs, stokes, args, viscosity_cutoff) = case
-    ni == (2, 210, 224) || error("run grid $ni does not match the MPI grid")
+    ni == (2, 480, 1000) || error("run grid $ni does not match the 25 m mesh")
     zc = Array(grid.xci[3])
     stations = station_rows(zc)
     fault_stations = [s for s in stations if s.km in FAULT_STATION_KM]
@@ -335,11 +471,9 @@ function run_bp1(;
         error("fault stations $(FAULT_STATION_KM) were not found on the grid")
     slip = zeros(length(stations))
     fault_slip = zeros(length(fault_stations))
+    reset_vtk(dirname(pvd), pvd)
     csv = open_station_csv(csv_path)
-    fault_csv = [
-        open_fault_station_csv(fault_station_path(s.km), s.km, s.depth_m, -s.depth_m)
-        for s in fault_stations
-    ]
+    fault_csv = [open_fault_station_csv(fault_station_path(s.km)) for s in fault_stations]
     ρg = @zeros(ni...), @zeros(ni...), @zeros(ni...)
     dyrel = DYREL(backend, stokes, rheology, phase_ratios, grid.di, dt; ϵ = ϵ)
     ρ_inertia = @zeros(ni...)
@@ -351,11 +485,21 @@ function run_bp1(;
     it = 0
     out = nothing
     try
+        for (s, station) in enumerate(stations)
+            sample = fault_sample(stokes, fields, j, station.k, L, V0)
+            println(
+                csv,
+                "0.0,$(station.depth_m),0.0,$(sample.rate),$(sample.τ),$(sample.state),$(sample.Vp)",
+            )
+        end
+        flush(csv)
         for (s, station) in enumerate(fault_stations)
             sample = fault_sample(stokes, fields, j, station.k, L, V0)
             write_fault_row!(fault_csv[s], 0.0, station, 0.0, sample)
             flush(fault_csv[s])
         end
+        vtk_name = write_paraview(case, 0, 0.0, pvd, L, V0)
+        println("vtk it=0 t=0.0 → $(vtk_name).vtr")
         while it < nsteps && t < t_max
             out = solve_DYREL!(
                 stokes, ρg, dyrel, flow_bcs, phase_ratios, rheology, args, grid, dt, igg;
@@ -379,7 +523,7 @@ function run_bp1(;
                 slip[s] += sample.Vj * dt
                 println(
                     csv,
-                    "$t,$(station.depth_m),$(slip[s]),$(sample.rate),$(sample.τ / 1.0e6),$(sample.state),$(sample.Vp)",
+                    "$t,$(station.depth_m),$(slip[s]),$(sample.rate),$(sample.τ),$(sample.state),$(sample.Vp)",
                 )
             end
             flush(csv)
@@ -389,7 +533,11 @@ function run_bp1(;
                 fault_slip[s] += sample.Vj * dt
                 write_fault_row!(fault_csv[s], t, station, fault_slip[s], sample)
                 flush(fault_csv[s])
-                push!(fault_line, "$(station.km)km τ=$(sample.τ / 1.0e6) MPa V=$(sample.rate)")
+                push!(fault_line, "$(station.km)km τ=$(sample.τ) Pa V=$(sample.rate) m/s")
+            end
+            if it == 1 || rem(it, nstep_out) == 0
+                vtk_name = write_paraview(case, it, t, pvd, L, V0)
+                println("vtk it=$it t=$t → $(vtk_name).vtr")
             end
             if it == 1 || rem(it, print_every) == 0
                 println(
@@ -408,11 +556,12 @@ function run_bp1(;
         JustRelax.MPI.Initialized() && finalize_global_grid(; finalize_MPI = false)
     end
     println("finished it=$it t=$t")
+    println("  paraview → $(pvd).pvd")
     println("  all depths → $csv_path")
     for station in fault_stations
         println("  fault $(station.km) km ($(station.depth_m) m) → $(fault_station_path(station.km))")
     end
-    return (; case, out, t, it, Vp)
+    return (; case, out, t, it)
 end
 
 if abspath(PROGRAM_FILE) == @__FILE__

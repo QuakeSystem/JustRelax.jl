@@ -36,6 +36,8 @@ node_modules
 *.pdf
 *.typ
 *.sh
+*.out
+*.sbatch
 
 # ParaView / VTK
 *.vtk

@@ -565,6 +565,23 @@ function apply_geoparams_rsf_viscosity!(
         phase_ratios,
         rheology,
         dt;
+        kwargs...,
+    )
+    return apply_geoparams_rsf_viscosity!(
+        backend(stokes), stokes, fields, phase_ratios, rheology, dt; kwargs...,
+    )
+end
+
+apply_geoparams_rsf_viscosity!(
+    ::CPUBackendTrait, stokes, fields::JustRelax.RateStateXY, phase_ratios, rheology, dt; kwargs...,
+) = _apply_gp_rsf_viscosity!(stokes, fields, phase_ratios, rheology, dt; kwargs...)
+
+function _apply_gp_rsf_viscosity!(
+        stokes,
+        fields::JustRelax.RateStateXY,
+        phase_ratios,
+        rheology,
+        dt;
         viscosity_cutoff = (-Inf, Inf),
         P_floor = 1.0e3,
     )
