@@ -38,13 +38,9 @@ Solve the Stokes system with the self-tuned dynamic relaxation (DYREL) method.
 - `free_surface`: Include the density-gradient free-surface stabilization term. Default: `false`.
 - `update_material`: Recompute viscosity and buoyancy from `rheology`. Set to `false` when
   those fields are prescribed by the caller. Default: `true`.
-- `rsf`: Optional `(; ctrl::RateStateController, fields::RateStateArrays)` bundle. When
-  enabled and `ctrl.affect_stokes`, each PH/DR iteration runs a LaMEM-style local bisection
-  for effective viscosity (elasticity + Maxwell creep + RSF with frozen `Ω_old`) on **cell
-  centers and/or vertices** (`fields.loc = :center | :vertex | :both`) and writes the
-  equivalent creep buffer onto `η` / `ηv`. With `affect_stokes=false`, Stokes stays Maxwell-only
-  and only `Vp`/`Ω` update after convergence. No ``τ → τ_rsf`` projection.
-  Returns also `dt_rsf`, `Vp_max`.
+- `gp_rsf`: Optional `RateStateArrays` (2D vertices) or `RateStateXY` (3D antiplane
+  edges). Each iteration writes the GeoParams series viscosity with frozen `Ω`.
+  The state advances only after the step. Returns also `dt_rsf`, `Vp_max`.
 - `inertia`: Include physical inertia ``ρ (V − V0)/dt`` in the momentum residual (LaMEM-style).
   Uses `stokes.V0` from the previous converged step. Default: `false`.
 - `ρ_inertia`: Density for the inertia term when `inertia=true`:
@@ -147,13 +143,14 @@ function _solve_DYREL!(
         linear_viscosity = false,
         free_surface = false,
         update_material = true,
-        rsf = nothing,
         gp_rsf = nothing,
         inertia = false,
         ρ_inertia = nothing,
         kwargs...,
     ) where {N}
 
+    haskey(kwargs, :rsf) &&
+        error("The hand-written `rsf` viscosity fold was removed. Pass GeoParams rate-and-state as `gp_rsf`.")
     check_periodic_bcs(stokes, flow_bcs, igg, grid.di.center)
 
     @copy stokes.P0 stokes.P
@@ -165,19 +162,13 @@ function _solve_DYREL!(
     _di = grid._di
     di_center = di.center
     ni = size(stokes.P)
-    rsf_on = !isnothing(rsf) && rsf.ctrl.enabled
-    # Debug / diagnostics: compute Vp & Ω after the step, but do not fold η into Stokes
-    rsf_stokes = rsf_on && rsf.ctrl.affect_stokes
     gp_rsf_on = gp_rsf isa JustRelax.RateStateArrays || gp_rsf isa JustRelax.RateStateXY
     if gp_rsf isa NamedTuple
-        error("gp_rsf must be a RateStateArrays or a RateStateXY. The legacy (; ctrl, fields) bundle is the `rsf` argument.")
+        error("gp_rsf must be a RateStateArrays or a RateStateXY.")
     elseif !isnothing(gp_rsf) && !gp_rsf_on
         error("gp_rsf must be a RateStateArrays (2D) or a RateStateXY (3D antiplane edges).")
     end
     η_xy, mask_xy = _gp_rsf_xy_viscosity(gp_rsf)
-    if rsf_stokes && gp_rsf_on
-        error("Pass either the legacy `rsf` viscosity fold or `gp_rsf` (GeoParams RateStateFriction), not both.")
-    end
     # Physical inertia ρ(V − V0)/dt (V0 = previous converged velocity)
     dt_fs = dt * free_surface
     _inv_dt = (inertia && !isinf(dt) && dt > 0) ? inv(Float64(dt)) : 0.0
@@ -236,19 +227,6 @@ function _solve_DYREL!(
         compute_viscosity!(stokes, phase_ratios, args, rheology, viscosity_cutoff)
         compute_ρg!(ρg[end], phase_ratios, rheology, args)
     end
-    # Maxwell / GeoParams buffers used as the RSF fold base (avoid stacking folds each PT iter)
-    η_creep = nothing
-    η_creep_v = nothing
-    if rsf_stokes
-        if rsf_do_center(rsf.fields)
-            η_creep = similar(stokes.viscosity.η)
-            copyto!(η_creep, stokes.viscosity.η)
-        end
-        if rsf_do_vertex(rsf.fields)
-            η_creep_v = similar(stokes.viscosity.ηv)
-            copyto!(η_creep_v, stokes.viscosity.ηv)
-        end
-    end
     # Series RSF viscosity before the pseudo-time diagonal. Strain rate is still the
     # previous step (or zero), so a locked fault stays on the linear dashpot.
     if gp_rsf_on
@@ -275,8 +253,6 @@ function _solve_DYREL!(
         # isone(itPH) &&
         compute_∇V_strain_rate_RP!(stokes, dyrel, rheology, phase_ratios, _di, ni, dt, true; args...)
 
-        # RSF: fold frictional η into the Maxwell buffer with frozen Ω_old (before stress)
-        _apply_rsf_viscosity_and_halo!(stokes, rsf, phase_ratios, dt, viscosity_cutoff, rsf_stokes, η_creep, η_creep_v; restore_creep = true)
         if gp_rsf_on
             apply_geoparams_rsf_viscosity!(
                 stokes, gp_rsf, phase_ratios, rheology, dt; viscosity_cutoff = viscosity_cutoff,
@@ -285,18 +261,12 @@ function _solve_DYREL!(
 
         # compute deviatoric stress, refresh τII viscosity, and assemble θc = γ_eff·RP + ΔPψ in one pass
         compute_stress_viscosity_DRYEL!(stokes, θc, dyrel.γ_eff, rheology, phase_ratios, λ_relaxation_PH, dt, viscosity_relaxation, args, viscosity_cutoff, linear_viscosity; η_xy, mask_xy)
-        # GeoParams τII-viscosity may overwrite η; re-fold RSF onto that refreshed buffer
-        if rsf_stokes && !linear_viscosity
-            _apply_rsf_viscosity_and_halo!(stokes, rsf, phase_ratios, dt, viscosity_cutoff, true, η_creep, η_creep_v; restore_creep = false)
-        end
         if gp_rsf_on && !linear_viscosity
             apply_geoparams_rsf_viscosity!(
                 stokes, gp_rsf, phase_ratios, rheology, dt; viscosity_cutoff = viscosity_cutoff,
             )
         end
-        # Do not enforce τ → τ_rsf: LaMEM keeps τ = 2 η_eff ε. Forcing frictional
-        # strength jumps stress (and stress-based Vp) even when the fault is still locked.
-        update_stress_halo!(stokes, dim, linear_viscosity && !rsf_stokes && !gp_rsf_on)
+        update_stress_halo!(stokes, dim, linear_viscosity && !gp_rsf_on)
         free_surface_stress_bcs!(stokes, flow_bcs, dim)
         # update_halo!(stokes.λv)
         # update_halo!(stokes.τ.xx_v)
@@ -369,8 +339,6 @@ function _solve_DYREL!(
             # compute divergence, deviatoric strain rate and pressure residual in one pass
             compute_∇V_strain_rate_RP!(stokes, dyrel, rheology, phase_ratios, _di, ni, dt, true; args...)
 
-            # RSF frictional η fold (frozen Ω_old) before stress
-            _apply_rsf_viscosity_and_halo!(stokes, rsf, phase_ratios, dt, viscosity_cutoff, rsf_stokes, η_creep, η_creep_v; restore_creep = true)
             if gp_rsf_on
                 apply_geoparams_rsf_viscosity!(
                     stokes, gp_rsf, phase_ratios, rheology, dt; viscosity_cutoff = viscosity_cutoff,
@@ -379,15 +347,12 @@ function _solve_DYREL!(
 
             # Deviatoric stress, τII viscosity refresh, and θc = γ_eff·RP + ΔPψ assembly in one pass
             compute_stress_viscosity_DRYEL!(stokes, θc, dyrel.γ_eff, rheology, phase_ratios, λ_relaxation_DR, dt, viscosity_relaxation, args, viscosity_cutoff, linear_viscosity; η_xy, mask_xy)
-            if rsf_stokes && !linear_viscosity
-                _apply_rsf_viscosity_and_halo!(stokes, rsf, phase_ratios, dt, viscosity_cutoff, true, η_creep, η_creep_v; restore_creep = false)
-            end
             if gp_rsf_on && !linear_viscosity
                 apply_geoparams_rsf_viscosity!(
                     stokes, gp_rsf, phase_ratios, rheology, dt; viscosity_cutoff = viscosity_cutoff,
                 )
             end
-            update_stress_halo!(stokes, dim, linear_viscosity && !rsf_stokes && !gp_rsf_on)
+            update_stress_halo!(stokes, dim, linear_viscosity && !gp_rsf_on)
             free_surface_stress_bcs!(stokes, flow_bcs, dim)
 
             # Velocity residuals + damped pseudo-transient velocity update (fused; the small pressure
@@ -491,21 +456,13 @@ function _solve_DYREL!(
         end
     end
 
-    # Advance RSF state only after a converged time step (Ω_old was frozen during iterations)
+    # Advance the GeoParams state only after a converged time step (Ω was frozen during iterations)
     dt_rsf = Inf
     Vp_max = 0.0
     dt_h = Inf
     dt_w = Inf
     dt_c = Inf
-    if rsf_on
-        update_rate_state!(rsf.fields, stokes, rsf.ctrl, phase_ratios, dt)
-        dt_info = compute_dt_ratestate_grid(rsf.fields, stokes, rsf.ctrl, phase_ratios, dt)
-        dt_rsf = dt_info.dt_rsf
-        Vp_max = dt_info.Vp_max
-        dt_h = dt_info.dt_h
-        dt_w = dt_info.dt_w
-        dt_c = dt_info.dt_c
-    elseif gp_rsf_on
+    if gp_rsf_on
         update_geoparams_rate_state!(gp_rsf, stokes, phase_ratios, rheology, dt)
         dt_info = compute_dt_geoparams_rsf(gp_rsf, stokes, phase_ratios, rheology, dt)
         dt_rsf = dt_info.dt_rsf
@@ -520,45 +477,6 @@ function _solve_DYREL!(
         dt_rsf, Vp_max, dt_h, dt_w, dt_c,
     )
 
-end
-
-"""Apply RSF viscosity fold on centers and/or vertices when RSF is enabled.
-
-`η_creep` / `η_creep_v` are the Maxwell / GeoParams buffers. When `restore_creep`,
-copy them onto `η` / `ηv` first so repeated PT iterations do not stack harmonic folds.
-
-Vertex ηv is folded **in place** (LaMEM edgeConstEq); do not overwrite with
-`center2vertex!(ηv, η)` after a vertex fold.
-"""
-function _apply_rsf_viscosity_and_halo!(
-        stokes, rsf, phase_ratios, dt, viscosity_cutoff, rsf_on, η_creep, η_creep_v;
-        restore_creep::Bool = true,
-    )
-    rsf_on || return nothing
-    fields = rsf.fields
-    if restore_creep
-        if rsf_do_center(fields) && !isnothing(η_creep)
-            copyto!(stokes.viscosity.η, η_creep)
-        end
-        if rsf_do_vertex(fields) && !isnothing(η_creep_v)
-            copyto!(stokes.viscosity.ηv, η_creep_v)
-        end
-    end
-    # Center path uses ε.xy_c / τ_o.xy_c; vertex path uses native ε.xy / τ_o.xy
-    if rsf_do_center(fields)
-        shear2center!(stokes.ε)
-        shear2center!(stokes.τ_o)
-    end
-    apply_rsf_viscosity!(
-        stokes, fields, rsf.ctrl, phase_ratios, dt;
-        viscosity_cutoff = viscosity_cutoff,
-    )
-    # Keep ηv consistent with folded η only when RSF is center-only
-    if rsf_do_center(fields) && !rsf_do_vertex(fields)
-        center2vertex!(stokes.viscosity.ηv, stokes.viscosity.η)
-    end
-    update_halo!(stokes.viscosity.η, stokes.viscosity.ηv)
-    return nothing
 end
 
 function _solve_DYREL!(

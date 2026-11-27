@@ -255,34 +255,11 @@ export BackendTrait, CPUBackendTrait, NonCPUBackendTrait
 include("grid/Grid.jl")
 export IGG, lazy_grid, Geometry, GeometryAnnulus, velocity_grids, x_g, y_g, z_g
 
-# RSF value types live here (one definition). Dimension modules only allocate
-# `RateStateArrays` with `@zeros` and run the kernels.
-include("rheology/RateStateFriction.jl")
-include("rheology/RateStateSetup.jl")
+# Grid storage for GeoParams rate-and-state. The friction law is
+# `GeoParams.RateStateFriction`. Dimension modules export the allocator
+# `RateStateArrays`; the struct stays qualified as `JustRelax.RateStateArrays`.
 include("rheology/RateStateArrays.jl")
-export RateStateFriction,
-    compute_strain_rate,
-    compute_stress,
-    compute_stress_frozen_Ω,
-    compute_Vp_from_stress,
-    update_Ω,
-    compute_dt_ratestate,
-    compute_dt_ratestate_lamem,
-    dteta_max_lamem,
-    dt_healing,
-    dt_weakening,
-    dt_courant,
-    max_state_change,
-    get_rsf_profile,
-    phase_has_rsf,
-    validate_rsf_phase!,
-    PhaseRSFParams,
-    RateStateController,
-    build_rate_state_controller,
-    evaluate_rsf_ab,
-    as_rate_state_friction,
-    rsf_do_center,
-    rsf_do_vertex
+export rsf_do_center, rsf_do_vertex
 
 include("JustRelax_CPU.jl")
 

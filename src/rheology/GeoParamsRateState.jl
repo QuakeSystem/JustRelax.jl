@@ -1,9 +1,90 @@
 # GeoParams `RateStateFriction` on the staggered grid.
 #
 # The composite series solve (linear dashpot + friction + elasticity) owns the stress.
-# This file only builds the trial invariant the Maxwell kernel already uses, writes the
-# equivalent creep viscosity, and advances Ω after the step. It does not run the legacy
-# bisection fold.
+# This file builds the trial invariant the Maxwell kernel already uses, writes the
+# equivalent creep viscosity, and advances Ω after the step.
+
+"""
+    get_rsf_profile(x, x_knots, val_knots)
+
+Piecewise-linear interpolation of a rate-and-state parameter. Values outside the
+knot range clamp to the nearest endpoint.
+"""
+@inline function get_rsf_profile(x::Real, x_knots, val_knots)
+    n = length(x_knots)
+    n == length(val_knots) && n ≥ 1 ||
+        throw(ArgumentError("profile knots and values must be the same non-empty length"))
+    if x ≤ x_knots[1]
+        return float(val_knots[1])
+    elseif x ≥ x_knots[n]
+        return float(val_knots[n])
+    end
+    @inbounds for i in 1:(n - 1)
+        x0, x1 = x_knots[i], x_knots[i + 1]
+        if x0 ≤ x ≤ x1
+            t = (x - x0) / (x1 - x0)
+            return float(val_knots[i]) * (1 - t) + float(val_knots[i + 1]) * t
+        end
+    end
+    return float(val_knots[end])
+end
+
+"""Lapusta / LaMEM ``dteta_max`` ∈ [0.1, 0.2] from elastic stiffness ``k = 2/π · G/((1-ν) Wf)``."""
+@inline function dteta_max_lamem(a, b, L, Wf, G, ν, dP)
+    dP = max(dP, 1.0e-30)
+    k = (2 / 3.14) * ((G / (1 - ν)) / Wf)
+    xi = 0.25 * ((k * L) / (a * dP) - (b - a) / a)^2 - (k * L) / (a * dP)
+    dteta = if xi > 0
+        a * dP / (k * L - (b - a) * dP)
+    else
+        1 - (b - a) * dP / (k * L)
+    end
+    dteta = min(dteta, 0.2)
+    return dteta < 0.1 ? 0.1 : dteta
+end
+
+"""Healing step: ``0.2 L / (V₀ exp(-Ω))`` at the updated state."""
+@inline function dt_healing(; L, V₀, Ω, kwargs...)
+    return 0.2 * L / (V₀ * exp(-Ω))
+end
+
+"""Weakening step: ``min(dteta_max · L / Vp, 1e9)``."""
+@inline function dt_weakening(; L, Vp, dteta_max = 0.2, kwargs...)
+    return min(dteta_max * L / max(Vp, 1.0e-30), 1.0e9)
+end
+
+"""Slip Courant step: ``1e-3 · Wf / Vp``."""
+@inline function dt_courant(; Wf, Vp, f = 1.0e-3, kwargs...)
+    return f * Wf / max(Vp, 1.0e-30)
+end
+
+"""LaMEM cell timestep: ``min(dt_w, dt_h, dt_c, 1e9)``."""
+@inline function compute_dt_ratestate_lamem(; Wf, L, V₀, a, b, G, ν, P, Vp, Ω)
+    dP = max(abs(P), 1.0e-30)
+    dtw = dt_weakening(; L = L, Vp = Vp, dteta_max = dteta_max_lamem(a, b, L, Wf, G, ν, dP))
+    dth = dt_healing(; L = L, V₀ = V₀, Ω = Ω)
+    dtc = dt_courant(; Wf = Wf, Vp = Vp)
+    return min(dtw, dth, dtc, 1.0e9)
+end
+
+@inline function _dominant_phase(phase_ratio, i, j)
+    return Int(argmax(@inbounds phase_ratio[i, j]))
+end
+
+@inline function _dominant_phase(phase_ratio, i, j, k)
+    return Int(argmax(@inbounds phase_ratio[i, j, k]))
+end
+
+"""Hard-clamp slip rate to `[-Vp_max_abs, Vp_max_abs]` (default 100 m/s)."""
+@inline function _clamp_Vp(v, Vp_max_abs = 100.0)
+    if !(isfinite(v))
+        return oftype(v, Vp_max_abs)
+    elseif abs(v) > Vp_max_abs
+        return copysign(oftype(v, Vp_max_abs), v)
+    else
+        return v
+    end
+end
 
 """
     init_geoparams_rate_state!(fields, rheology, phase_ratios, state_init, xvi; xci=xvi, b_profiles=nothing)
